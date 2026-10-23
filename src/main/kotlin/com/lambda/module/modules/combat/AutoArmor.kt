@@ -24,24 +24,11 @@ import com.lambda.config.settings.complex.KeybindSetting.Companion.onPress
 import com.lambda.config.withEdits
 import com.lambda.context.SafeContext
 import com.lambda.event.events.TickEvent
-import com.lambda.event.events.MovementEvent
-import com.lambda.interaction.handlers.BaritoneHandler
+import com.lambda.interaction.handlers.FlightStop
 import com.lambda.task.tasks.EnderChestRestockTask
 import com.lambda.task.tasks.EnderChestRestockTask.Companion.MIN_ENDER_CHESTS
 import com.lambda.task.tasks.EnderChestRestockTask.Companion.isEnderChest
-import com.lambda.task.tasks.PlaceContainerTask.Companion.isSafeContainerSpot
-import com.lambda.util.BlockUtils.blockState
-import com.lambda.util.BlockUtils.hasFluid
-import com.lambda.util.BlockUtils.hasSolidGround
-import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.CommunicationUtils.info
-import net.minecraft.entity.mob.EndermanEntity
-import net.minecraft.entity.mob.MobEntity
-import net.minecraft.entity.mob.Monster
-import net.minecraft.entity.mob.ZombifiedPiglinEntity
-import net.minecraft.util.PlayerInput
-import net.minecraft.util.math.BlockPos
-import net.minecraft.util.math.Vec2f
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
 import com.lambda.module.Module
@@ -105,15 +92,10 @@ object AutoArmor : Module(
 	/** Mending failed, maybe leaving a shulker placed, so it's not tried again until AutoArmor or HighwayTools is started again. */
 	private var mendFailed = false
 	private var wasBuilding = false
-	/** Waiting to stand still to mend for ElytraFly, at a safe spot with nobody around. */
-	private var landing = false
 	private var announced = false
 
 	/** Whether experience bottles are being thrown, or a shulker or the ender chest is out for them. */
 	val isMending get() = mendTask?.isActive == true
-
-	/** Landing to mend or mending, so ElytraFly waits instead of flying. */
-	val pausesFlight get() = landing || isMending
 
 	/** Whether worn armor gets mended, which needs [hasBottles]. */
 	val mendsArmor get() = isEnabled && mendArmor
@@ -172,6 +154,7 @@ object AutoArmor : Module(
 		onEnable { mendFailed = false }
 
 		onDisable {
+			FlightStop.release(this@AutoArmor)
 			// Mending first picks its shulker back up, so stopping never leaves one behind.
 			mendTask.stopSafely()
 			if (!isMending) endMend()
@@ -183,11 +166,10 @@ object AutoArmor : Module(
 			// Starting the highway again is a fresh start for mending too.
 			if (HighwayTools.isBuilding && !wasBuilding) mendFailed = false
 			wasBuilding = HighwayTools.isBuilding
-			landing = false
 			mendTask?.let {
 				// Picks its shulker or the ender chest back up, so nobody can take it.
 				if (it.isActive && hasDanger()) it.stopSafely()
-				if (it.isActive) return@listen
+				if (it.isActive) return@listen FlightStop.hold(this@AutoArmor)
 				// Ended without its callbacks, e.g. cancelled.
 				endMend()
 			}
@@ -195,24 +177,14 @@ object AutoArmor : Module(
 			val needed = kinds.isNotEmpty() && (carriesBottles() || canUseEnderChest())
 			if (needed && elytraPriority && !announced) info("Worn ${if (kinds.contains(ELYTRA)) "elytras" else "armor"}, looking for a safe spot to mend")
 			announced = needed
-			if (!needed || hasDanger()) return@listen
+			if (!needed) return@listen FlightStop.release(this@AutoArmor)
 			if (!elytraPriority) {
 				// Not while a restock has a container out or the aura fights.
-				if (!HighwayTools.isBusy) startMend(kinds)
+				if (!HighwayTools.isBusy && !waitsForPlayer()) startMend(kinds)
 				return@listen
 			}
 			// Flies on until it's safe here, then stands still to place a shulker.
-			landing = hasSafeSpot()
-			if (!landing || player.isGliding || !player.isOnGround || player.velocity.horizontalLengthSquared() > STILL_SPEED_SQ) return@listen
-			landing = false
-			startMend(kinds)
-		}
-
-		// Stands still while landing or mending, unless Baritone walks to a drop.
-		listen<MovementEvent.InputUpdate> {
-			if (!pausesFlight || BaritoneHandler.isActive) return@listen
-			it.input.playerInput = PlayerInput(false, false, false, false, false, it.input.playerInput.sneak, false)
-			it.input.movementVector = Vec2f.ZERO
+			if (with(FlightStop) { land(this@AutoArmor, mobRadius) }) startMend(kinds)
 		}
 
 		listen<TickEvent.Post>({ Int.MIN_VALUE }) {
@@ -276,28 +248,9 @@ object AutoArmor : Module(
 	private fun SafeContext.canUseEnderChest() = elytraPriority && allowShulker && allowEnderChest &&
 		player.inventory.mainStacks.sumOf { if (isEnderChest(it)) it.count else 0 } >= MIN_ENDER_CHESTS
 
-	/**
-	 * For ElytraFly another player in render distance, or a hostile mob in [mobRadius] since nothing fights it off.
-	 * For HighwayTools a player close enough to take a placed shulker, the aura deals with mobs.
-	 */
+	/** For ElytraFly another player in render distance or a hostile mob close, for HighwayTools a player close enough to take a placed shulker. */
 	private fun SafeContext.hasDanger() =
-		if (!elytraPriority) waitsForPlayer()
-		else world.players.any { it !== player } ||
-			world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }.isNotEmpty()
-
-	/** Zombified piglins and endermen leave you alone until angered. */
-	private val MobEntity.isHostile get() = this is Monster && when (this) {
-		is ZombifiedPiglinEntity -> isAttacking
-		is EndermanEntity -> isAngry
-		else -> true
-	}
-
-	/** Ground below to land on and a spot next to it a shulker can go, without a hole, fire or lava, like a restock picks. */
-	private fun SafeContext.hasSafeSpot(): Boolean {
-		val feet = (0..MAX_LANDING_DROP).map { player.blockPos.down(it) }.firstOrNull { !isPassable(it.down()) } ?: return false
-		if (!hasSolidGround(feet) || blockState(feet).hasFluid) return false
-		return BlockPos.iterateOutwards(feet, SPOT_RANGE, 0, SPOT_RANGE).any { isPassable(it) && isSafeContainerSpot(it) }
-	}
+		if (elytraPriority) with(FlightStop) { hasDanger(mobRadius) } else waitsForPlayer()
 
 	private fun SafeContext.startMend(kinds: List<(ItemStack) -> Boolean>) {
 		// A build that can't be paused now is busy with something else.
@@ -331,6 +284,7 @@ object AutoArmor : Module(
 
 	private fun endMend() {
 		mendTask = null
+		FlightStop.release(this)
 		HighwayTools.resume(this)
 	}
 
@@ -340,11 +294,6 @@ object AutoArmor : Module(
 	private val CHEST: (ItemStack) -> Boolean = { it.isIn(ItemTags.CHEST_ARMOR) }
 	private val LEGS: (ItemStack) -> Boolean = { it.isIn(ItemTags.LEG_ARMOR) }
 	private val FEET: (ItemStack) -> Boolean = { it.isIn(ItemTags.FOOT_ARMOR) }
-	private const val STILL_SPEED_SQ = 1e-4
-	/** How far below the ground to land on may be, a bounce doesn't go higher. */
-	private const val MAX_LANDING_DROP = 4
-	/** How far from where you land a spot for the shulker is looked for, like placing it does. */
-	private const val SPOT_RANGE = 3
 
 	private enum class Protection(val enchant: RegistryKey<Enchantment>) {
 		Protection(Enchantments.PROTECTION),

@@ -28,11 +28,11 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.handlers.BaritoneHandler
+import com.lambda.interaction.handlers.FlightStop
 import com.lambda.interaction.handlers.GlideHandler
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.module.hud.Speedometer
-import com.lambda.module.modules.combat.AutoArmor
 import com.lambda.module.modules.movement.elytrafly.ElytraFly
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.FlyMode
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.fakeFly
@@ -196,7 +196,7 @@ class BounceElytraFly(
 	private var hitRoof = false
 
 	private val flightPaused
-		get() = !pauseTimer.hasSurpassed(flagPause) || interrupting || BaritoneHandler.isActive || waitingForChunks || isBraking || isWaiting || noElytra || AutoArmor.pausesFlight
+		get() = !pauseTimer.hasSurpassed(flagPause) || interrupting || BaritoneHandler.isActive || waitingForChunks || isBraking || isWaiting || noElytra || FlightStop.pausesFlight
 
 	private val SafeContext.queuePackets
 		get() = fakeLag && player.isGliding && (!yMotionSetting || !onYMotionAngle) &&
@@ -231,8 +231,8 @@ class BounceElytraFly(
 			if (sendPacketQueue.isEmpty()) queuedTicks = 0
 			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS) flushPackets()
 
-			// AutoArmor lands to mend the elytras or armor, and has the rotation and the inventory meanwhile.
-			if (AutoArmor.pausesFlight) return@listen
+			// Landed to mend or restock, e.g. by AutoArmor, which has the rotation and the inventory meanwhile.
+			if (FlightStop.pausesFlight) return@listen
 
 			if (autoPitch) {
 				val hold = hopPitch()
@@ -323,8 +323,8 @@ class BounceElytraFly(
 
 		listen<MovementEvent.InputUpdate> { event ->
 			val input = event.input
-			// AutoArmor keeps you standing still meanwhile.
-			if (AutoArmor.pausesFlight) return@listen
+			// FlightStop keeps you standing still meanwhile.
+			if (FlightStop.pausesFlight) return@listen
 			val playerInput = input.playerInput
 
 			// Stands still right before chunks that aren't loaded yet, walking on would take you into them too.
