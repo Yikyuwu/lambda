@@ -200,6 +200,9 @@ class BounceElytraFly(
 					isBraking || waitingForChunks -> 90.0
 					// Holding the height over an obstacle instead of bouncing into it.
 					hold != null -> hold
+					// Under a low roof there's no room to climb far, and each bounce while slowing down got set back.
+					// A bit up it keeps its height as high as flying level goes, gliding long without touching the floor.
+					(slowingForChunks || coasting) && pacer.lowRoof -> eased(holdHeightPitch(COAST_PITCH_UP, maxFlightY()))
 					// Looking up turns speed into climbing, and up there no bounce pushes you on.
 					// Turned to bit by bit, the server sets you back for a sudden turn up while climbing.
 					slowingForChunks -> eased(holdHeightPitch(SLOW_PITCH))
@@ -376,14 +379,11 @@ class BounceElytraFly(
 	/**
 	 * [up], climbing as high as there's room, the nether roof's bedrock or a block roof. Once the climb would get there,
 	 * level or a bit down like [coastPitch], and up again once it sank, so it keeps gliding up there without bounces.
-	 * Under a low roof only as high as flying level goes, right under it the server set it back again and again.
 	 */
-	private fun SafeContext.holdHeightPitch(up: Double): Double {
-		val top = when {
-			pacer.lowRoof -> maxFlightY()
-			world.registryKey == World.NETHER -> MAX_NETHER_LAYER_FLIGHT_Y
-			else -> startPos.y + MAX_SLOW_RISE
-		}
+	private fun SafeContext.holdHeightPitch(
+		up: Double,
+		top: Double = if (world.registryKey == World.NETHER) MAX_NETHER_LAYER_FLIGHT_Y else startPos.y + MAX_SLOW_RISE,
+	): Double {
 		val room = ceilingY(top) - player.y
 		val climb = player.velocity.y
 		val rise = if (climb > 0) climb * climb / (2 * player.finalGravity) else 0.0
