@@ -122,7 +122,7 @@ class FlightPacer {
     private companion object {
         const val CHECK_STEP = 4
         /** Flight time the loaded chunks ahead should last while lagging, which sets the safe speed. */
-        const val SAFE_TICKS = 80
+        const val SAFE_TICKS = 60
         /** Flight time loaded ahead below which it lands, about how long landing and stopping takes. */
         const val STOP_TICKS = 30
         const val MIN_STOP_DISTANCE = 12.0
