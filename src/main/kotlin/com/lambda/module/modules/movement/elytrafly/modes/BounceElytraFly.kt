@@ -194,7 +194,11 @@ class BounceElytraFly(
 			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS) flushPackets()
 
 			// Landed to mend or restock, e.g. by AutoArmor, which has the rotation and the inventory meanwhile.
-			if (FlightStop.pausesFlight) return@listen
+			// Its packets are logged with Debug Log, to see what holds it up.
+			if (FlightStop.pausesFlight) {
+				ElytraFly.trace(2)
+				return@listen
+			}
 
 			if (autoPitch) {
 				val hold = hopPitch()
