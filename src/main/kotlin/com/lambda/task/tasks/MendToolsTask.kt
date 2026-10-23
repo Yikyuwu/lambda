@@ -35,9 +35,13 @@ import com.lambda.util.extension.containerSlots
 import com.lambda.util.extension.playerSlots
 import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.player.RotationUtils.lookAtEntity
+import com.lambda.util.EnchantmentUtils.getEnchantment
+import com.lambda.util.player.SlotUtils.allStacks
+import com.lambda.util.player.SlotUtils.armorSlots
 import com.lambda.util.player.SlotUtils.hotbarAndInventorySlots
 import com.lambda.util.player.SlotUtils.hotbarStacks
 import com.lambda.util.world.closestEntity
+import net.minecraft.enchantment.Enchantments
 import net.minecraft.entity.LivingEntity
 import net.minecraft.entity.decoration.ArmorStandEntity
 import net.minecraft.entity.mob.Monster
@@ -67,13 +71,14 @@ interface MendConfig {
 }
 
 /**
- * Mends tools at an XP farm where mobs are swept by hitting an armor stand, with the tool in the offhand.
- * Dumps mended tools into [repairedChest] and takes damaged ones from [damagedChest] until it runs out.
- * Hits the closest armor stand in reach.
+ * Mends items at an XP farm where mobs are swept by hitting an armor stand. A damaged item goes in the offhand,
+ * and armor and elytras are also worn, so several mend at once. What was worn before is put back when done.
+ * With chests, dumps mended items into [repairedChest] and takes damaged ones from [damagedChest] until it runs out.
+ * Without, it mends what's carried and stops. Hits the closest armor stand in reach.
  */
 class MendToolsTask @Ta5kBuilder constructor(
-    private val damagedChest: BlockPos,
-    private val repairedChest: BlockPos,
+    private val damagedChest: BlockPos?,
+    private val repairedChest: BlockPos?,
     private val standPos: BlockPos,
     private val config: MendConfig,
     automated: Automated,
@@ -97,6 +102,9 @@ class MendToolsTask @Ta5kBuilder constructor(
     private val settle = RotationSettle()
     private var lastDamage = -1
     private var mended = 0
+    private var damagedAtStart = 0
+    /** What was worn before mending, by armor slot id, to put back when done. Empty for a slot that was empty. */
+    private val originalArmor = mutableMapOf<Int, ItemStack>()
     private val hitTimer = TickTimer()
     private val stallTimer = TickTimer()
 
@@ -131,7 +139,8 @@ class MendToolsTask @Ta5kBuilder constructor(
         }
         val extraTicks = (player.hotbarAndInventorySlots.size + 1) * moveDelay
         when {
-            carried(::isDamagedTool) > 0 -> startMending()
+            damagedCount() > 0 -> startMending()
+            damagedChest == null || repairedChest == null -> finish()
             carried(::isMendedTool) > 0 -> open(repairedChest, Phase.Dumping, extraTicks)
             else -> open(damagedChest, Phase.Taking, extraTicks)
         }
@@ -161,19 +170,26 @@ class MendToolsTask @Ta5kBuilder constructor(
     }
 
     private fun SafeContext.finishTaking() {
-        if (carried(::isDamagedTool) > 0) return startMending()
+        if (damagedCount() > 0) return startMending()
         // Only undamaged ones this trip, they go straight to the repaired chest.
         if (carried(::isMendedTool) > 0) return resumeAfterClose()
         when {
             leftInChest > config.leaveInChest && player.hotbarAndInventorySlots.none { it.stack.isEmpty } ->
                 return failure("No free inventory slot to take tools into")
-            leftInChest > 0 -> info("Left $leftInChest tool(s) in the chest to keep the farm running")
-            else -> info("No tools left to mend")
+            leftInChest > 0 -> info("Left $leftInChest item(s) in the chest to keep the farm running")
+            else -> info("Nothing left in the chest to mend")
         }
-        info("Mended $mended tool(s)")
+        finish()
+    }
+
+    private fun SafeContext.finish() {
+        info(if (mended > 0) "Mended $mended item(s)" else "Nothing to mend")
         restoreOffhand()
         success()
     }
+
+    /** Damaged items carried, worn or held. */
+    private fun SafeContext.damagedCount() = player.allStacks.count(::isDamagedTool)
 
     /** Swaps what was in the offhand before back in, and a tool still there out. */
     private fun SafeContext.restoreOffhand() {
@@ -187,7 +203,8 @@ class MendToolsTask @Ta5kBuilder constructor(
         phaseDone()
         settle.reset()
         restartStallWatch()
-        info("Mending ${carried(::isDamagedTool)} tool(s)")
+        damagedAtStart = damagedCount()
+        info("Mending $damagedAtStart item(s)")
         enter(Phase.Mending)
     }
 
@@ -216,18 +233,16 @@ class MendToolsTask @Ta5kBuilder constructor(
         walkTicks = 0
         if (BaritoneHandler.isActive) BaritoneHandler.cancel()
 
-        val offhand = player.offHandStack
-        if (!isDamagedTool(offhand)) {
-            swapInNextTool(offhand)
-            return false
-        }
+        if (!equipDamaged()) return false
 
-        if (offhand.damage != lastDamage) {
-            lastDamage = offhand.damage
+        val mending = (player.armorSlots.map { it.stack } + player.offHandStack).filter(::isDamagedTool)
+        val damage = mending.sumOf { it.damage }
+        if (damage != lastDamage) {
+            lastDamage = damage
             stallTimer.reset()
         }
         if (stallTimer.hasSurpassed(config.stallTimeout * 20)) {
-            failure("${offhand.name.string} wasn't mended for ${config.stallTimeout}s. Is the farm still running?")
+            failure("${mending.joinToString { it.name.string }} wasn't mended for ${config.stallTimeout}s. Is the farm still running?")
             return false
         }
 
@@ -267,13 +282,60 @@ class MendToolsTask @Ta5kBuilder constructor(
         return true
     }
 
-    /** Swaps the next damaged tool into the offhand, or resumes once there is none. */
-    private fun SafeContext.swapInNextTool(offhand: ItemStack) {
-        val damaged = player.hotbarAndInventorySlots.firstOrNull { isDamagedTool(it.stack) }
-        if (damaged != null && !submit { swap(damaged.id, OFFHAND_BUTTON) }) return
-        if (isMendedTool(offhand)) mended++
-        if (damaged == null) return resume()
-        restartStallWatch()
+    /**
+     * Puts damaged items on in their armor slot and in the offhand, swapping out mended ones, one click at a time.
+     * True once that's done and something is left to mend. Once nothing is, puts back what was worn and resumes.
+     */
+    private fun SafeContext.equipDamaged(): Boolean {
+        val inventory = player.hotbarAndInventorySlots
+        player.armorSlots.forEach { armor ->
+            // Curse of Binding can't be taken off.
+            if (isDamagedTool(armor.stack) || armor.stack.getEnchantment(Enchantments.BINDING_CURSE) > 0) return@forEach
+            val damaged = inventory.firstOrNull { isDamagedTool(it.stack) && armor.canInsert(it.stack) } ?: return@forEach
+            if (armor.id !in originalArmor && !config.isTool(armor.stack)) originalArmor[armor.id] = armor.stack.copy()
+            // Three clicks swap it in, with or without something worn there.
+            submit {
+                pickup(damaged.id)
+                pickup(armor.id)
+                pickup(damaged.id)
+            }
+            return false
+        }
+        if (!isDamagedTool(player.offHandStack)) {
+            inventory.firstOrNull { isDamagedTool(it.stack) }?.let { damaged ->
+                submit { swap(damaged.id, OFFHAND_BUTTON) }
+                return false
+            }
+        }
+        if (damagedCount() > 0) return true
+        if (restoreArmor()) return false
+        mended += damagedAtStart
+        resume()
+        return false
+    }
+
+    /** Puts back what was worn before mending, one click at a time. False once it's all back. */
+    private fun SafeContext.restoreArmor(): Boolean {
+        val handler = player.playerScreenHandler
+        val (id, original) = originalArmor.entries
+            .firstOrNull { (id, original) -> !ItemStack.areItemsAndComponentsEqual(handler.getSlot(id).stack, original) }
+            ?.toPair() ?: run {
+                originalArmor.clear()
+                return false
+            }
+        val from = player.hotbarAndInventorySlots.firstOrNull { ItemStack.areItemsAndComponentsEqual(it.stack, original) }
+        // Gone or no room for what's worn now, then it stays on.
+        val done = when {
+            original.isEmpty -> player.hotbarAndInventorySlots.none { it.stack.isEmpty } || submit { quickMove(id) }
+            from == null -> true
+            else -> submit {
+                pickup(from.id)
+                pickup(id)
+                pickup(from.id)
+            }
+        }
+        if (done) originalArmor.remove(id)
+        return true
     }
 
     private fun restartStallWatch() {
