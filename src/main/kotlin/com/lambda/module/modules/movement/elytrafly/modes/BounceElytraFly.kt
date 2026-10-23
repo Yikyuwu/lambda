@@ -81,6 +81,8 @@ class BounceElytraFly(
 		/** Flight time loaded ahead below which it lands, about how long landing and stopping takes. */
 		private const val CHUNK_STOP_TICKS = 30
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
+		/** Looking this far up slows you down, about a quarter block a tick each second. */
+		private const val SLOW_PITCH = -15.0
 		/** Flight time the loaded chunks ahead should last, which sets the safe speed. */
 		private const val CHUNK_SAFE_TICKS = 80
 		/** Slowing down until this share of the safe speed. */
@@ -207,8 +209,10 @@ class BounceElytraFly(
 						isBraking || waitingForChunks -> pitch(90.0)
 						// Holding the height over an obstacle instead of bouncing into it.
 						hold != null -> pitch(hold)
+						// Looking up turns speed into climbing, and up there no bounce pushes you on. Up against a roof it still slows.
+						slowingForChunks -> pitch(SLOW_PITCH)
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
-						slowingForChunks || coasting || isDodging -> pitch(coastPitch())
+						coasting || isDodging -> pitch(coastPitch())
 						!smartPitch -> pitch(pitch)
 						player.velocity.y > -0.2 -> pitch(90.0)
 						else -> pitch(4.0)
@@ -409,10 +413,10 @@ class BounceElytraFly(
 
 	/**
 	 * Flies only so fast that the loaded chunks ahead last [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the
-	 * unloaded ones are, and never faster than [chunkLookAhead] allows since slowing down takes long. Faster than that or
-	 * a bit below it coasts, flying level so the bounces don't speed it up, and well below it flies on. Not sprinting would
-	 * slow it down more, but sprint changes around a bounce get you set back.
-	 * Only when they come within stopping distance after all it lands and stands still.
+	 * unloaded ones are, and never faster than [chunkLookAhead] allows since slowing down takes long. Faster than that it
+	 * looks up, which turns speed into climbing, a bit below it coasts level, and well below it flies on. Only when they
+	 * come within stopping distance after all it lands and stands still. Not sprinting would slow it down too, but sprint
+	 * changes around a bounce get you set back.
 	 */
 	private fun SafeContext.updateWaitingForChunks() {
 		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
