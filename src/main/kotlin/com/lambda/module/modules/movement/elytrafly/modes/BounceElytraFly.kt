@@ -44,7 +44,6 @@ import com.lambda.util.SpeedUnit
 import com.lambda.util.TickTimer
 import com.lambda.util.math.dist
 import com.lambda.util.math.distSq
-import com.lambda.util.math.isLoaded
 import com.lambda.util.math.minus
 import com.lambda.util.player.PlayerUtils.canStartGliding
 import com.lambda.util.player.PlayerUtils.canTakeoff
@@ -54,7 +53,6 @@ import net.minecraft.network.packet.Packet
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket
 import net.minecraft.util.PlayerInput
-import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Vec2f
 import net.minecraft.util.math.Vec3d
 import net.minecraft.world.World
@@ -63,7 +61,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.cos
-import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
@@ -75,46 +72,27 @@ class BounceElytraFly(
 	companion object {
 		private const val Y_MOTION_GROUP = "Y Motion"
 		private const val BOUNCE_OBSTACLE_PASSER_GROUP = "Bounce Obstacle Passer"
+
 		private const val MAX_FAKE_LAG_TICKS = 10
 		private const val MAX_TAKEOFF_WAIT_TICKS = 10
-		private const val CHUNK_CHECK_STEP = 4
-		/** Flight time loaded ahead below which it lands, about how long landing and stopping takes. */
-		private const val CHUNK_STOP_TICKS = 30
-		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
-		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
-		private const val SLOW_PITCH = -10.0
-		/** Under a roof this low it flies no faster than [LOW_ROOF_SPEED], about 21 blocks a second. */
-		private const val LOW_ROOF_HEIGHT = 4
-		private const val LOW_ROOF_SPEED = 1.05
-		/** Most the pitch turns a tick when slowing down or coasting. */
-		private const val MAX_PITCH_STEP = 15.0
-		/** Slowest it slows down to, below that a glide almost stalls. */
-		private const val MIN_PACE_SPEED = 0.5
+		/** The server ignored starts up to 0.67 above the ground and took them from 0.83. */
+		private const val MIN_TAKEOFF_HEIGHT = 0.75
+
+		/** Level, so you keep bouncing but don't speed up. */
+		private const val COAST_PITCH = 0.0
 		/** Looking this slightly up while coasting keeps the height for a while, so it glides long instead of bouncing. */
 		private const val COAST_PITCH_UP = -3.0
+		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
+		private const val SLOW_PITCH = -10.0
+		/** Most the pitch turns a tick when slowing down or coasting. */
+		private const val MAX_PITCH_STEP = 15.0
+
+		/** How far above the flight line flying level may carry you. */
+		private const val MAX_COAST_RISE = 2.0
 		/** How far above the flight line slowing down may climb, outside the nether. */
 		private const val MAX_SLOW_RISE = 4.0
 		/** Room kept below the roof when looking up to slow down. */
 		private const val SLOW_ROOM = 0.5
-		/** Flight time the loaded chunks ahead should last, which sets the safe speed. */
-		private const val CHUNK_SAFE_TICKS = 80
-		/** Slowing down until this share of the safe speed. */
-		private const val SLOW_UNTIL = 0.9
-		/** Coasting from this share of the safe speed, and flying on again below the other. */
-		private const val COAST_ABOVE = 0.8
-		private const val FLY_BELOW = 0.7
-		/** How much less than usually loaded ahead counts as the server lagging, and how much less still does once it does. */
-		private const val CHUNK_LAG_MARGIN = 16.0
-		private const val CHUNK_LAG_END_MARGIN = 8.0
-		/** How fast the usual distance is forgotten, half a block a second, so a turn doesn't count as lag for long. */
-		private const val USUAL_LOADED_DECAY = 0.025
-		/** How much more has to be loaded to stop coasting or waiting again. */
-		private const val CHUNK_MARGIN = 16.0
-		/** Most ticks to wait for the server to end the glide after landing from a wait. */
-		private const val MAX_LANDED_TICKS = 10
-		private const val COAST_PITCH = 0.0
-		/** How far above the flight line flying level may carry you. */
-		private const val MAX_COAST_RISE = 2.0
 		/** The lowest nether roof bedrock is at y 123, so flying level any higher bumps your head on it. */
 		private const val MAX_NETHER_FLIGHT_Y = 121.5
 		/** Up on a layer, as high as the gliding box stays clear of that roof by a bit. */
@@ -124,8 +102,6 @@ class BounceElytraFly(
 		private const val ROOF_SCAN_STEP = 0.25
 		/** Room kept below a block roof. */
 		private const val ROOF_MARGIN = 0.2
-		/** The server ignored starts up to 0.67 above the ground and took them from 0.83. */
-		private const val MIN_TAKEOFF_HEIGHT = 0.75
 	}
 
 	private val takeoff by c.setting("Takeoff", true, "Automatically jumps and initiates gliding")
@@ -172,29 +148,11 @@ class BounceElytraFly(
 	private var groundY = 0.0
 	private var queuedTicks = 0
 	private var takeoffWait = 0
-	/** How fast the chunks ahead let it fly, see [updateChunkSpeed]. */
-	private enum class ChunkPace(val description: String) {
-		Free("Flying on"),
-		/** Lagging but well below the safe speed, the bounces flatten out as it nears it. */
-		Throttled("Flying on, easing into the safe speed"),
-		/** A bit below the safe speed, keeping its height so the bounces don't push it on. */
-		Coasting("Coasting, near the safe speed"),
-		/** Faster than the safe speed, climbing to slow down. */
-		Slowing("Slowing down for the chunks"),
-		/** They're within stopping distance, landed until enough more are loaded. */
-		Waiting("Waiting for the chunks"),
-	}
-
-	private var pace = ChunkPace.Free
-	private val waitingForChunks get() = pace == ChunkPace.Waiting
-	private val slowingForChunks get() = pace == ChunkPace.Slowing
-	private val coasting get() = pace == ChunkPace.Coasting
-	/** How much of the bounce pitch to use while [ChunkPace.Throttled], from 0 for level to 1 for all of it. */
-	private var chunkThrottle = 1.0
-	/** How far ahead the chunks are usually loaded, forgotten slowly. */
-	private var usualLoaded = 0.0
-	private var laggingChunks = false
-	private var landedTicks = 0
+	private val pacer = FlightPacer()
+	private val waitingForChunks get() = pacer.pace == FlightPacer.Pace.Waiting
+	private val slowingForChunks get() = pacer.pace == FlightPacer.Pace.Slowing
+	private val coasting get() = pacer.pace == FlightPacer.Pace.Coasting
+	/** The pitch asked for last tick, to turn from it bit by bit. */
 	private var lastPitch = 0.0
 	private var hitRoof = false
 
@@ -224,7 +182,7 @@ class BounceElytraFly(
 		listen<TickEvent.Pre> {
 			pauseTimer.tick()
 			wantJump = false
-			updateChunkSpeed()
+			with(pacer) { update(chunkLookAhead.takeIf { waitForChunks }, groundY) }
 			// The floor you're bouncing on, it may be higher or lower than where you started.
 			if (player.isOnGround) groundY = player.y
 			val roof = player.isGliding && player.verticalCollision && !player.isOnGround
@@ -249,8 +207,8 @@ class BounceElytraFly(
 					coasting -> eased(holdHeightPitch(COAST_PITCH_UP))
 					// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
 					isDodging -> coastPitch()
-					!smartPitch -> throttled(pitch, coastPitch())
-					player.velocity.y > -0.2 -> throttled(90.0, coastPitch())
+					!smartPitch -> pacer.throttled(pitch, coastPitch())
+					player.velocity.y > -0.2 -> pacer.throttled(90.0, coastPitch())
 					else -> 4.0
 				}
 				lastPitch = target
@@ -383,9 +341,7 @@ class BounceElytraFly(
 		onFlag { pauseTimer.reset() }
 
 		onEnable {
-			pace = ChunkPace.Free
-			usualLoaded = 0.0
-			laggingChunks = false
+			pacer.reset()
 			hitRoof = false
 			// The floor below when started in the air, else packets would be held back up there.
 			groundY = startPos.y
@@ -437,8 +393,8 @@ class BounceElytraFly(
 			when {
 				// Slowing down climbs at first, flying level is the lower one to plan with.
 				slowingForChunks || coasting || isDodging -> level
-				!smartPitch -> throttled(pitch, level)
-				climb > -0.2 -> throttled(90.0, level)
+				!smartPitch -> pacer.throttled(pitch, level)
+				climb > -0.2 -> pacer.throttled(90.0, level)
 				else -> 4.0
 			}
 		}
@@ -459,77 +415,8 @@ class BounceElytraFly(
 		return ceiling
 	}
 
-	/**
-	 * While the server lags, with fewer chunks loaded ahead than usual, it flies only so fast that the loaded ones last
-	 * [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the unloaded ones are. Else it flies like always.
-	 * Faster than that safe speed it climbs and glides high, a bit below it keeps its height, and well below it bounces on.
-	 * Only when they come within stopping distance after all it lands and stands still, lagging or not. Not sprinting
-	 * would slow it down too, but sprint changes around a bounce get you set back.
-	 */
-	private fun SafeContext.updateChunkSpeed() {
-		if (!waitForChunks) {
-			pace = ChunkPace.Free
-			return
-		}
-		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
-		val missing = (CHUNK_CHECK_STEP..chunkLookAhead step CHUNK_CHECK_STEP).firstOrNull { distance ->
-			!player.pos.add(ahead.multiply(distance.toDouble())).isLoaded
-		}?.toDouble()
-		val loaded = missing ?: (chunkLookAhead + CHUNK_CHECK_STEP).toDouble()
-		val speed = player.velocity.dotProduct(ahead).coerceAtLeast(0.0)
-
-		// How far the chunks usually reach ahead, the server's view distance or the look-ahead. Only when they fall behind
-		// that the server lags and it slows down, else it flies like always. It lags until nearly as many are loaded
-		// again, else it flips between slowing down and flying on at the margin.
-		usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
-		laggingChunks = loaded < usualLoaded - if (laggingChunks) CHUNK_LAG_END_MARGIN else CHUNK_LAG_MARGIN
-		// Under a low roof every fast bounce goes right up to it, and the server sets you back for that more often.
-		val lowRoof = hasLowRoof()
-		val limited = laggingChunks || lowRoof
-		val safeSpeed = min(
-			if (laggingChunks) ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE,
-			if (lowRoof) LOW_ROOF_SPEED else Double.MAX_VALUE,
-		)
-		val stopDistance = max(MIN_CHUNK_STOP_DISTANCE, speed * CHUNK_STOP_TICKS)
-
-		// Each holds a bit longer than it starts, else it flips back and forth.
-		if (pace != ChunkPace.Waiting || !player.isOnGround) landedTicks = 0
-		val next = when {
-			// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
-			pace == ChunkPace.Waiting && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS -> ChunkPace.Waiting
-			missing != null && missing <= stopDistance + if (pace == ChunkPace.Waiting) CHUNK_MARGIN else 0.0 -> ChunkPace.Waiting
-			// Never slower than a glide holds, almost stalled up there the server sets you back.
-			speed < MIN_PACE_SPEED -> if (limited) ChunkPace.Throttled else ChunkPace.Free
-			speed > safeSpeed * if (pace == ChunkPace.Slowing) SLOW_UNTIL else 1.0 -> ChunkPace.Slowing
-			speed > safeSpeed * if (pace == ChunkPace.Coasting) FLY_BELOW else COAST_ABOVE -> ChunkPace.Coasting
-			limited -> ChunkPace.Throttled
-			else -> ChunkPace.Free
-		}
-		// Nearing the safe speed, the bounces flatten out so it eases into it, not past it.
-		chunkThrottle = (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
-		if (next != pace) ElytraFly.debug {
-			"${next.description}: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead, usually %.0f, at %.2f a tick, safe %s".format(
-				usualLoaded, speed, if (limited) "%.2f".format(safeSpeed) + (if (lowRoof) " low roof" else "") else "any",
-			)
-		}
-		pace = next
-	}
-
-	/** A block within [LOW_ROOF_HEIGHT] above the floor you bounce on, e.g. a tunnel or the nether's bedrock roof. */
-	private fun SafeContext.hasLowRoof(): Boolean {
-		val floor = BlockPos.ofFloored(player.x, groundY, player.z)
-		return (1..LOW_ROOF_HEIGHT).any { !world.getBlockState(floor.up(it)).getCollisionShape(world, floor.up(it)).isEmpty }
-	}
-
-	/**
-	 * [bounce] flattened towards [level] by [chunkThrottle]. Looking down less you glide longer and bounce less often,
-	 * and each bounce, a sprint jump, pushes you on.
-	 */
 	/** At most [MAX_PITCH_STEP] from the last pitch towards [target]. */
 	private fun eased(target: Double) = lastPitch + (target - lastPitch).coerceIn(-MAX_PITCH_STEP, MAX_PITCH_STEP)
-
-	private fun throttled(bounce: Double, level: Double) =
-		if (pace == ChunkPace.Throttled) level + (bounce - level) * chunkThrottle else bounce
 
 	private fun SafeContext.flushPackets() {
 		while (sendPacketQueue.isNotEmpty()) {
