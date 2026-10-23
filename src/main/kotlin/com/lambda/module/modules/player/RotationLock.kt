@@ -23,6 +23,7 @@ import com.lambda.config.hideAllExcept
 import com.lambda.config.withEdits
 import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
+import com.lambda.interaction.handlers.FlightStop
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.RotationMode
 import com.lambda.module.Module
@@ -51,6 +52,8 @@ object RotationLock : Module(
 	        }
 
         listen<TickEvent.Pre> {
+            // Landed to mend or restock, placing and opening the container has to look at it.
+            if (FlightStop.pausesFlight) return@listen
             val yaw = when (yawMode) {
                 Mode.Custom -> customYaw
                 Mode.Snap -> {
