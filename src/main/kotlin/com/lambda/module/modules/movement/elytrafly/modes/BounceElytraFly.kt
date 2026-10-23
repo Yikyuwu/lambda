@@ -83,6 +83,8 @@ class BounceElytraFly(
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
 		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
 		private const val SLOW_PITCH = -10.0
+		/** Looking this slightly up while coasting keeps the height for a while, so it glides long instead of bouncing. */
+		private const val COAST_PITCH_UP = -3.0
 		/** How far above the flight line slowing down may climb, outside the nether. */
 		private const val MAX_SLOW_RISE = 4.0
 		/** Room kept below the roof when looking up to slow down. */
@@ -216,9 +218,11 @@ class BounceElytraFly(
 						// Holding the height over an obstacle instead of bouncing into it.
 						hold != null -> pitch(hold)
 						// Looking up turns speed into climbing, and up there no bounce pushes you on.
-						slowingForChunks -> pitch(slowPitch())
+						slowingForChunks -> pitch(holdHeightPitch(SLOW_PITCH))
+						// Just enough up to keep the height, gliding long without bounces pushing you on.
+						coasting -> pitch(holdHeightPitch(COAST_PITCH_UP))
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
-						coasting || isDodging -> pitch(coastPitch())
+						isDodging -> pitch(coastPitch())
 						!smartPitch -> pitch(throttled(pitch, coastPitch()))
 						player.velocity.y > -0.2 -> pitch(throttled(90.0, coastPitch()))
 						else -> pitch(4.0)
@@ -389,15 +393,15 @@ class BounceElytraFly(
 	}
 
 	/**
-	 * Up, climbing as high as there's room while slowing down, the nether roof's bedrock or a block roof. Once the climb
-	 * would get there, level or a bit down like [coastPitch], gliding on up there without bounces pushing you on.
+	 * [up], climbing as high as there's room, the nether roof's bedrock or a block roof. Once the climb would get there,
+	 * level or a bit down like [coastPitch], and up again once it sank, so it keeps gliding up there without bounces.
 	 */
-	private fun SafeContext.slowPitch(): Double {
+	private fun SafeContext.holdHeightPitch(up: Double): Double {
 		val top = if (world.registryKey == World.NETHER) MAX_NETHER_LAYER_FLIGHT_Y else startPos.y + MAX_SLOW_RISE
 		val room = ceilingY(top) - player.y
 		val climb = player.velocity.y
 		val rise = if (climb > 0) climb * climb / (2 * player.finalGravity) else 0.0
-		return if (room - rise > SLOW_ROOM) SLOW_PITCH else coastPitch(room, climb)
+		return if (room - rise > SLOW_ROOM) up else coastPitch(room, climb)
 	}
 
 	/** Like the rotation request above, with the roof over you now. */
