@@ -82,6 +82,10 @@ class BounceElytraFly(
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
 		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
 		private const val SLOW_PITCH = -10.0
+		/** Most the pitch turns a tick when slowing down or coasting. */
+		private const val MAX_PITCH_STEP = 15.0
+		/** Slowest it slows down to, below that a glide almost stalls. */
+		private const val MIN_PACE_SPEED = 0.5
 		/** Looking this slightly up while coasting keeps the height for a while, so it glides long instead of bouncing. */
 		private const val COAST_PITCH_UP = -3.0
 		/** How far above the flight line slowing down may climb, outside the nether. */
@@ -187,6 +191,7 @@ class BounceElytraFly(
 	private var usualLoaded = 0.0
 	private var laggingChunks = false
 	private var landedTicks = 0
+	private var lastPitch = 0.0
 	private var hitRoof = false
 
 	private val flightPaused
@@ -227,24 +232,25 @@ class BounceElytraFly(
 
 			if (autoPitch) {
 				val hold = hopPitch()
-				rotationRequest {
-					when {
-						// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
-						// Also right before chunks that aren't loaded yet, gliding on would carry you into them.
-						isBraking || waitingForChunks -> pitch(90.0)
-						// Holding the height over an obstacle instead of bouncing into it.
-						hold != null -> pitch(hold)
-						// Looking up turns speed into climbing, and up there no bounce pushes you on.
-						slowingForChunks -> pitch(holdHeightPitch(SLOW_PITCH))
-						// Just enough up to keep the height, gliding long without bounces pushing you on.
-						coasting -> pitch(holdHeightPitch(COAST_PITCH_UP))
-						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
-						isDodging -> pitch(coastPitch())
-						!smartPitch -> pitch(throttled(pitch, coastPitch()))
-						player.velocity.y > -0.2 -> pitch(throttled(90.0, coastPitch()))
-						else -> pitch(4.0)
-					}
-				}.submit()
+				val target = when {
+					// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
+					// Also right before chunks that aren't loaded yet, gliding on would carry you into them.
+					isBraking || waitingForChunks -> 90.0
+					// Holding the height over an obstacle instead of bouncing into it.
+					hold != null -> hold
+					// Looking up turns speed into climbing, and up there no bounce pushes you on.
+					// Turned to bit by bit, the server sets you back for a sudden turn up while climbing.
+					slowingForChunks -> eased(holdHeightPitch(SLOW_PITCH))
+					// Just enough up to keep the height, gliding long without bounces pushing you on.
+					coasting -> eased(holdHeightPitch(COAST_PITCH_UP))
+					// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
+					isDodging -> coastPitch()
+					!smartPitch -> throttled(pitch, coastPitch())
+					player.velocity.y > -0.2 -> throttled(90.0, coastPitch())
+					else -> 4.0
+				}
+				lastPitch = target
+				rotationRequest { pitch(target) }.submit()
 			}
 
 			if (handlePassingObstacles()) return@listen
@@ -482,6 +488,8 @@ class BounceElytraFly(
 			// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
 			pace == ChunkPace.Waiting && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS -> ChunkPace.Waiting
 			missing != null && missing <= stopDistance + if (pace == ChunkPace.Waiting) CHUNK_MARGIN else 0.0 -> ChunkPace.Waiting
+			// Never slower than a glide holds, almost stalled up there the server sets you back.
+			speed < MIN_PACE_SPEED -> if (laggingChunks) ChunkPace.Throttled else ChunkPace.Free
 			speed > safeSpeed * if (pace == ChunkPace.Slowing) SLOW_UNTIL else 1.0 -> ChunkPace.Slowing
 			speed > safeSpeed * if (pace == ChunkPace.Coasting) FLY_BELOW else COAST_ABOVE -> ChunkPace.Coasting
 			laggingChunks -> ChunkPace.Throttled
@@ -501,6 +509,9 @@ class BounceElytraFly(
 	 * [bounce] flattened towards [level] by [chunkThrottle]. Looking down less you glide longer and bounce less often,
 	 * and each bounce, a sprint jump, pushes you on.
 	 */
+	/** At most [MAX_PITCH_STEP] from the last pitch towards [target]. */
+	private fun eased(target: Double) = lastPitch + (target - lastPitch).coerceIn(-MAX_PITCH_STEP, MAX_PITCH_STEP)
+
 	private fun throttled(bounce: Double, level: Double) =
 		if (pace == ChunkPace.Throttled) level + (bounce - level) * chunkThrottle else bounce
 
