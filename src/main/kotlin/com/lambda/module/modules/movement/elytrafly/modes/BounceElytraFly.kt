@@ -21,15 +21,18 @@ import com.lambda.config.Config
 import com.lambda.config.Group
 import com.lambda.config.entries.Setting.Companion.onValueChange
 import com.lambda.context.SafeContext
+import com.lambda.event.events.ConnectionEvent
 import com.lambda.event.events.MovementEvent
 import com.lambda.event.events.PacketEvent
 import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
+import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.GlideHandler
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.module.hud.Speedometer
+import com.lambda.module.modules.movement.elytrafly.ElytraFly
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.FlyMode
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.fakeFly
 import com.lambda.module.modules.movement.elytrafly.ObstaclePassingMode
@@ -41,22 +44,28 @@ import com.lambda.util.SpeedUnit
 import com.lambda.util.TickTimer
 import com.lambda.util.math.dist
 import com.lambda.util.math.distSq
+import com.lambda.util.math.isLoaded
 import com.lambda.util.math.minus
 import com.lambda.util.player.PlayerUtils.canStartGliding
 import com.lambda.util.player.PlayerUtils.canTakeoff
 import net.minecraft.client.input.KeyboardInput.getMovementMultiplier
 import net.minecraft.entity.Entity
 import net.minecraft.network.packet.Packet
+import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket
 import net.minecraft.util.PlayerInput
 import net.minecraft.util.math.Vec2f
 import net.minecraft.util.math.Vec3d
+import net.minecraft.world.World
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
+import kotlin.math.acos
 import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 class BounceElytraFly(
 	override val c: Config
@@ -64,17 +73,37 @@ class BounceElytraFly(
 	companion object {
 		private const val Y_MOTION_GROUP = "Y Motion"
 		private const val BOUNCE_OBSTACLE_PASSER_GROUP = "Bounce Obstacle Passer"
+		private const val MAX_FAKE_LAG_TICKS = 10
+		private const val MAX_TAKEOFF_WAIT_TICKS = 10
+		private const val CHUNK_CHECK_STEP = 8
+		private const val CHUNK_STOP_DISTANCE = 24
+		private const val COAST_PITCH = 0.0
+		/** How far above the flight line flying level may carry you. */
+		private const val MAX_COAST_RISE = 2.0
+		/** The lowest nether roof bedrock is at y 123, so flying level any higher bumps your head on it. */
+		private const val MAX_NETHER_FLIGHT_Y = 121.5
+		/** Up on a layer, as high as the gliding box stays clear of that roof by a bit. */
+		private const val MAX_NETHER_LAYER_FLIGHT_Y = 122.2
+		/** How far up a block roof over you is looked for. */
+		private const val ROOF_SCAN_HEIGHT = 4.0
+		private const val ROOF_SCAN_STEP = 0.25
+		/** Room kept below a block roof. */
+		private const val ROOF_MARGIN = 0.2
+		/** The server ignored starts up to 0.67 above the ground and took them from 0.83. */
+		private const val MIN_TAKEOFF_HEIGHT = 0.75
 	}
 
 	private val takeoff by c.setting("Takeoff", true, "Automatically jumps and initiates gliding")
 	private val autoPitch by c.setting("Auto Pitch", true, "Automatically pitches the players rotation down to bounce at faster speeds")
 	private val smartPitch by c.setting("Smart", true, "Calculates the best pitch for bounce") { autoPitch }
-	private val pitch by c.setting("Pitch", 72.0, -90.0..90.0, 0.000001) { autoPitch && !smartPitch }
+	private val pitch by c.setting("Pitch", 80.0, -90.0..90.0, 0.000001) { autoPitch && !smartPitch }
 	private val jump by c.setting("Jump", true, "Automatically jumps")
 	private val flagPause by c.setting("FlagPause Pause", 5, 0..100, 1, "How long to pause if the server flags you for a movement check", "ticks")
 	private val minimizePackets by c.setting("Minimize Packets", true, "Shrinks the amount of start fly packets sent to the server as much as possible")
 	private val fakeLag by c.setting("Fake Lag", true, "Emulates the player lagging to allow flying in 1x2 tunnels")
 		.onValueChange { _, to -> if (!to) flushPackets() }
+	private val waitForChunks by c.setting("Wait For Chunks", true, "Slows down while the chunks ahead aren't loaded yet and stops right before them, the server sets you back for flying into them")
+	private val chunkLookAhead by c.setting("Chunk Look-Ahead", 48, 8..96, 8, "How far ahead the chunks must be loaded to keep speeding up", " blocks") { waitForChunks }
 
 	@Group(Y_MOTION_GROUP) val yMotionSetting by c.setting("Y Motion", false, "Cancels the players y velocity to aid speed")
 	@Group(Y_MOTION_GROUP) val onlyOnDiagonal: Boolean by c.setting("Only On Diagonal", true, "Only use y motion when the player is flying on a non-axial angle") { yMotionSetting }
@@ -82,7 +111,7 @@ class BounceElytraFly(
 	@Group(Y_MOTION_GROUP) val strictYMotionRange by c.setting("Strict Range", true, "provides an extra range check to sneak until within. Typically used for when you need to get within sub-block distances of walls for collision checks") { yMotionSetting }
 	@Group(Y_MOTION_GROUP) val acceptableYMotionRange by c.setting("Acceptable Range", 0.1, 0.01..5.0, 0.01, "The acceptable distance, aside from forward distance, from the start position") { yMotionSetting && strictYMotionRange }
 	@Group(Y_MOTION_GROUP) val yMotionStartSpeed by c.setting("Y Motion Start Speed", 30, 0..40, 1, unit = "bps") { yMotionSetting }
-	@Group(Y_MOTION_GROUP) val speedLimit by c.setting("Speed Limit", 120, 10..400, 1, unit = "bps") { yMotionSetting }
+	@Group(Y_MOTION_GROUP) val speedLimit by c.setting("Speed Limit", 110, 10..400, 1, unit = "bps") { yMotionSetting }
 	private val SafeContext.yMotion
 		get() = yMotionSetting &&
 				onYMotionAngle &&
@@ -105,13 +134,28 @@ class BounceElytraFly(
 	private var sneakLeft = false
 	private var sneakRight = false
 	private var interrupting = false
+	private var groundY = 0.0
+	private var queuedTicks = 0
+	private var takeoffWait = 0
+	private var waitingForChunks = false
+	private var coasting = false
+	private var hitRoof = false
 
 	private val flightPaused
-		get() = !pauseTimer.hasSurpassed(flagPause) || interrupting || BaritoneHandler.isActive
+		get() = !pauseTimer.hasSurpassed(flagPause) || interrupting || BaritoneHandler.isActive || waitingForChunks || isBraking || isWaiting || noElytra
 
 	private val SafeContext.queuePackets
 		get() = fakeLag && player.isGliding && (!yMotionSetting || !onYMotionAngle) &&
-				player.y - startPos.y < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163
+				queuedTicks < MAX_FAKE_LAG_TICKS &&
+				// Only bouncing. Held back after a setback or while landing, the server sees you stand still, sets you back
+				// again and again. Nor falling off a block you bounced on.
+				!flightPaused && player.y >= bounceFloor && player.y - bounceFloor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163
+
+	/**
+	 * The floor you bounce on. The flight line moves up onto a layer before you first touch it, the floor you last
+	 * stood on only after: that first touch the server would see and end the glide.
+	 */
+	private val bounceFloor get() = if (passerConfig.passObstacles) startPos.y else groundY
 
 	private val diagonal: Boolean
 		get() {
@@ -123,10 +167,26 @@ class BounceElytraFly(
 		listen<TickEvent.Pre> {
 			pauseTimer.tick()
 			wantJump = false
+			updateWaitingForChunks()
+			// The floor you're bouncing on, it may be higher or lower than where you started.
+			if (player.isOnGround) groundY = player.y
+			val roof = player.isGliding && player.verticalCollision && !player.isOnGround
+			if (roof && !hitRoof) ElytraFly.debug { "Bumped the roof, %.2f above the floor, pitch %.1f".format(player.y - groundY, RotationManager.activeRotation.pitch) }
+			hitRoof = roof
+			// Held too long, the server would set you back for the burst.
+			if (sendPacketQueue.isEmpty()) queuedTicks = 0
+			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS) flushPackets()
 
 			if (autoPitch) {
+				val hold = hopPitch()
 				rotationRequest {
 					when {
+						// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
+						isBraking -> pitch(90.0)
+						// Holding the height over an obstacle instead of bouncing into it.
+						hold != null -> pitch(hold)
+						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
+						coasting || isDodging -> pitch(coastPitch())
 						!smartPitch -> pitch(pitch)
 						player.velocity.y > -0.2 -> pitch(90.0)
 						else -> pitch(4.0)
@@ -163,7 +223,11 @@ class BounceElytraFly(
 
 			if (!player.isGliding) {
 				if (takeoff && player.canTakeoff) {
+					ElytraFly.trace(ElytraFly.TRACE_TICKS)
 					if (player.canStartGliding) {
+						// Right after the jump the server still takes you for on the ground and ignores the start,
+						// so the client would glide alone and be set back. Unless a ceiling ends the jump early.
+						if (player.y - groundY < MIN_TAKEOFF_HEIGHT && player.velocity.y > 0) return@listen
 						GlideHandler.onGlide()
 						wantJump = jump
 					} else {
@@ -173,8 +237,10 @@ class BounceElytraFly(
 						val vx = player.velocity.x
 						val vz = player.velocity.z
 						val sidewaysSpeed = abs(vx * rightX + vz * rightZ)
-						if (sidewaysSpeed >= 0.001) return@listen
+						// Not forever, e.g. being pushed out of a block never stops.
+						if (sidewaysSpeed >= 0.001 && ++takeoffWait < MAX_TAKEOFF_WAIT_TICKS) return@listen
 
+						takeoffWait = 0
 						wantJump = true
 					}
 				}
@@ -221,8 +287,10 @@ class BounceElytraFly(
 		}
 
 		listen<PacketEvent.Send.Pre>({ 1 }) { event ->
-			if (queuePackets) {
+			// The server ignores your movement until you confirm its setback.
+			if (queuePackets && event.packet !is TeleportConfirmC2SPacket) {
 				sendPacketQueue.add(event.packet)
+				ElytraFly.traceLine { "  held back ${ElytraFly.describe(event.packet)}" }
 				event.cancel()
 				return@listen
 			}
@@ -236,7 +304,23 @@ class BounceElytraFly(
 			}
 		}
 
+		// Held back for the server you left, the next one would get them.
+		listenUnsafe<ConnectionEvent.Connect.Pre> {
+			sendPacketQueue.clear()
+			pingPackets.clear()
+		}
+
 		onFlag { pauseTimer.reset() }
+
+		onEnable {
+			waitingForChunks = false
+			coasting = false
+			hitRoof = false
+			// The floor below when started in the air, else packets would be held back up there.
+			groundY = startPos.y
+			queuedTicks = 0
+			takeoffWait = 0
+		}
 
 		onDisable {
 			wantJump = false
@@ -247,9 +331,76 @@ class BounceElytraFly(
 		}
 	}
 
+	/**
+	 * Level, unless a bounce off the floor still carries you up. Flying level, gravity hardly pulls you down,
+	 * so the bounce would take you up about 2 blocks, into a low roof. Pitched down the wings lift less and you fall
+	 * like without them at 90, so the pitch is just enough down for the climb to top out at [ceilingY].
+	 */
+	private fun SafeContext.coastPitch(room: Double = ceilingY() - player.y, climb: Double = player.velocity.y): Double {
+		if (room <= 0) return 90.0
+		if (climb <= 0) return COAST_PITCH
+		val gravity = player.finalGravity
+		// Topping out after room blocks takes this much pull down, and gliding pulls gravity * (1 - 0.75 * cos² pitch).
+		val needed = climb * climb / (2 * room)
+		val cosSq = ((1 - needed / gravity) / 0.75).coerceIn(0.0, 1.0)
+		return Math.toDegrees(acos(sqrt(cosSq))).coerceAtLeast(COAST_PITCH)
+	}
+
+	/** Like the rotation request above, with the roof over you now. */
+	override fun SafeContext.bouncePitch(): (y: Double, climb: Double) -> Double {
+		val ceiling = ceilingY()
+		return { y, climb ->
+			when {
+				coasting || isDodging -> coastPitch(ceiling - y, climb)
+				!smartPitch -> pitch
+				climb > -0.2 -> 90.0
+				else -> 4.0
+			}
+		}
+	}
+
+	override fun SafeContext.maxFlightY() =
+		if (world.registryKey == World.NETHER) min(startPos.y + MAX_COAST_RISE, min(MAX_NETHER_LAYER_FLIGHT_Y, MAX_NETHER_FLIGHT_Y + layerHeight))
+		else startPos.y + MAX_COAST_RISE
+
+	/** The highest your feet may go while flying level: below a block roof, the nether roof, and not far above the flight line. */
+	private fun SafeContext.ceilingY(): Double {
+		val ceiling = maxFlightY()
+		var rise = ROOF_SCAN_STEP
+		while (rise <= ROOF_SCAN_HEIGHT && player.y + rise - ROOF_SCAN_STEP < ceiling) {
+			if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, rise, 0.0)))
+				return min(ceiling, player.y + rise - ROOF_SCAN_STEP - ROOF_MARGIN)
+			rise += ROOF_SCAN_STEP
+		}
+		return ceiling
+	}
+
+	/**
+	 * Coasts while a chunk up to [chunkLookAhead] blocks ahead isn't loaded yet,
+	 * and stops bouncing once it's within [CHUNK_STOP_DISTANCE].
+	 */
+	private fun SafeContext.updateWaitingForChunks() {
+		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
+		val missing = if (!waitForChunks) null else (CHUNK_CHECK_STEP..chunkLookAhead step CHUNK_CHECK_STEP).firstOrNull { distance ->
+			!player.pos.add(ahead.multiply(distance.toDouble())).isLoaded
+		}
+		val waiting = missing != null && missing <= CHUNK_STOP_DISTANCE
+		val coast = missing != null && !waiting
+		if (waiting != waitingForChunks || coast != coasting) ElytraFly.debug {
+			when {
+				waiting -> "Waiting for the chunks $missing blocks ahead"
+				coast -> "Coasting, chunks $missing blocks ahead missing"
+				else -> "Chunks ahead loaded"
+			}
+		}
+		waitingForChunks = waiting
+		coasting = coast
+	}
+
 	private fun SafeContext.flushPackets() {
 		while (sendPacketQueue.isNotEmpty()) {
 			val packet = sendPacketQueue.poll()
+			ElytraFly.traceLine { "  sent held back ${ElytraFly.describe(packet)}" }
 			connection.sendPacketSilently(packet)
 		}
 		while (pingPackets.isNotEmpty()) {
