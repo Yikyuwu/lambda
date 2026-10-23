@@ -19,9 +19,11 @@ package com.lambda.module.modules.movement.elytrafly
 
 import com.lambda.config.Config
 import com.lambda.config.ConfigBlock
+import com.lambda.config.blocks.HotbarConfig
 import com.lambda.config.blocks.EatConfig.Companion.isHungerFood
 import com.lambda.context.Automated
 import com.lambda.context.SafeContext
+import com.lambda.event.events.TickEvent
 import com.lambda.interaction.handlers.FlightStop
 import com.lambda.task.RootTask.run
 import com.lambda.task.Task
@@ -47,6 +49,17 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
     private val allowEnderChest by c.setting("Allow Ender Chest", true, "Take food or a shulker with food from the ender chest when no carried shulker has any") { enabled }
     private val mobRadius by c.setting("Mob Free Radius", 32, 8..64, 4, "No hostile mob may be this close to land and restock", " blocks") { enabled }
     private val retryDelay by c.setting("Retry Delay", 60, 10..600, 10, "Wait after a restock that found too little food", " s") { enabled }
+
+    /**
+     * ElytraFly's settings, but swapping the hotbar at the usual stage only. ElytraFly swaps at every stage for its
+     * elytras and fireworks, and placing the ender chest like that fights other hotbar users, flipping between the
+     * pickaxe and the ender chest without ever placing it.
+     */
+    private val tasks: Automated = object : Automated by automated {
+        override val hotbarConfig = object : HotbarConfig by automated.hotbarConfig {
+            override val tickStageMask: Collection<TickEvent> = setOf(TickEvent.Input.Post)
+        }
+    }
 
     private var task: Task<*>? = null
     private var retryTicks = 0
@@ -102,7 +115,7 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
         allowEnderChest && player.inventory.mainStacks.sumOf { if (isEnderChest(it)) it.count else 0 } >= MIN_ENDER_CHESTS
 
     private fun SafeContext.start() {
-        fun takeFromShulker() = TakeFromShulkerTask("food", ::isFood, FOOD_TARGET, SWAP_DELAY, this@ElytraFoodRestock)
+        fun takeFromShulker() = TakeFromShulkerTask("food", ::isFood, FOOD_TARGET, SWAP_DELAY, tasks)
         val food = EnderChestRestockTask.Want(
             "food", 2, ::foodIn,
             isLow = { isLow() && !carriesFoodShulker() },
@@ -110,7 +123,7 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
         )
         // A food shulker from the ender chest is emptied next to it before it's broken again.
         task = (if (carriesFoodShulker()) takeFromShulker()
-        else EnderChestRestockTask(listOf(food), SWAP_DELAY, this@ElytraFoodRestock, beforeBreaking = { if (carriesFoodShulker()) takeFromShulker() else null }))
+        else EnderChestRestockTask(listOf(food), SWAP_DELAY, tasks, beforeBreaking = { if (carriesFoodShulker()) takeFromShulker() else null }))
             .onCompletion {
                 end()
                 if (isLow()) retryTicks = retryDelay * 20
