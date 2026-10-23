@@ -302,7 +302,9 @@ class MendToolsTask @Ta5kBuilder constructor(
             return false
         }
         if (!isDamagedTool(player.offHandStack)) {
-            inventory.firstOrNull { isDamagedTool(it.stack) }?.let { damaged ->
+            // The sword it hits with stays in the hotbar, it gets mended in the main hand.
+            val hitter = player.hotbarStacks.firstOrNull(config::isSword)
+            inventory.firstOrNull { isDamagedTool(it.stack) && it.stack !== hitter }?.let { damaged ->
                 submit { swap(damaged.id, OFFHAND_BUTTON) }
                 return false
             }

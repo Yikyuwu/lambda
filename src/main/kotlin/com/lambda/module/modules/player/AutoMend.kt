@@ -35,6 +35,8 @@ import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.Describable
 import com.lambda.util.EnchantmentUtils.getEnchantment
 import com.lambda.util.NamedEnum
+import com.lambda.util.item.GearKind
+import com.lambda.util.item.GearKindChoice
 import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.item.ItemUtils
 import com.lambda.util.player.SlotUtils.hotbarStacks
@@ -56,7 +58,9 @@ object AutoMend : Module(
     private var damagedChest by setting("Damaged Chest", BlockPos.ORIGIN, "Chest to take damaged items from. Without both chests it mends what you carry and stops")
     private var repairedChest by setting("Repaired Chest", BlockPos.ORIGIN, "Chest to put mended and undamaged items into. Without both chests it mends what you carry and stops")
     private var standPos by setting("Stand Pos", BlockPos.ORIGIN, "Where to stand while hitting. At 0 0 0 it uses where you are")
-    private val items by setting("Items", MendItems.AnyPickaxe, "What to mend. Armor and elytras are worn while mending, so several mend at once")
+    private val group by setting("Group", MendGroup.None, "What to mend. Armor and elytras are worn while mending, so several mend at once. At None the Kind below is used")
+    private val kind by setting("Kind", GearKindChoice.Pickaxe, "One kind of item to mend, of any material. At None the Item below is used") { group == MendGroup.None }
+    private val item by setting("Item", MendItem.None, "One diamond or netherite item to mend") { group == MendGroup.None && kind == GearKindChoice.None }
     private val mendTo by setting("Mend To", 100, 1..100, 1, "Durability to mend to", "%")
     override val leaveInChest by setting("Leave In Chest", 1, 0..27, 1, "Items to leave, for farms that stop when the chest is empty")
     override val maxTools by setting("Max Items", 27, 1..36, 1, "Most items to take per trip")
@@ -67,20 +71,61 @@ object AutoMend : Module(
     override val moveDelay by setting("Move Delay", 10, 2..40, 1, "Ticks between inventory clicks", " ticks")
     private val waitForAutoEat by setting("Wait For AutoEat", true, "Pause while AutoEat is eating")
 
-    enum class MendItems(
+    enum class MendGroup(
         override val displayName: String,
         override val description: String,
         val wearable: Boolean,
         val matches: (ItemStack) -> Boolean,
     ) : NamedEnum, Describable {
-        NetheritePickaxe("Netherite Pickaxe", "Only netherite pickaxes", false, { it.isOf(Items.NETHERITE_PICKAXE) }),
-        DiamondPickaxe("Diamond Pickaxe", "Only diamond pickaxes", false, { it.isOf(Items.DIAMOND_PICKAXE) }),
-        AnyPickaxe("Any Pickaxe", "Pickaxes of any material", false, { it.item in ItemUtils.pickaxes }),
-        AnyTool("Any Tool", "Any tool except swords, so the one you hit with stays", false, { it.item in ItemUtils.tools && it.item !in ItemUtils.swords }),
-        Elytra("Elytra", "Elytras, one worn and one in the offhand", true, { it.isOf(Items.ELYTRA) }),
-        Armor("Armor", "Armor pieces, worn and in the offhand", true, { it.isArmor && !it.isOf(Items.ELYTRA) }),
-        AnyWearables("Any Wearables", "Armor pieces and elytras, worn and in the offhand", true, { it.isArmor }),
+        None("None", "Mend the Kind or Item below instead", false, { false }),
+        AnyTool("Any Tool", "Pickaxes, axes, shovels and hoes of any material", false, { stack ->
+            GearKind.entries.any { it.category == GearKind.Category.Tool && it.matches(stack) }
+        }),
+        AnyArmor("Any Armor", "Helmets, chestplates, leggings and boots, worn and in the offhand", true, { it.isArmor && !it.isOf(Items.ELYTRA) }),
+        Elytras("Elytras", "Elytras, one worn and one in the offhand", true, { it.isOf(Items.ELYTRA) }),
+        AnyWearables("Any Wearables", "Armor and elytras, worn and in the offhand", true, { it.isArmor }),
     }
+
+    enum class MendItem(override val displayName: String, val kind: GearKind?, netherite: Boolean = false) : NamedEnum {
+        None("None", null),
+        NetheritePickaxe("Netherite Pickaxe", GearKind.Pickaxe, true),
+        DiamondPickaxe("Diamond Pickaxe", GearKind.Pickaxe),
+        NetheriteAxe("Netherite Axe", GearKind.Axe, true),
+        DiamondAxe("Diamond Axe", GearKind.Axe),
+        NetheriteShovel("Netherite Shovel", GearKind.Shovel, true),
+        DiamondShovel("Diamond Shovel", GearKind.Shovel),
+        NetheriteHoe("Netherite Hoe", GearKind.Hoe, true),
+        DiamondHoe("Diamond Hoe", GearKind.Hoe),
+        NetheriteSword("Netherite Sword", GearKind.Sword, true),
+        DiamondSword("Diamond Sword", GearKind.Sword),
+        NetheriteSpear("Netherite Spear", GearKind.Spear, true),
+        DiamondSpear("Diamond Spear", GearKind.Spear),
+        NetheriteHelmet("Netherite Helmet", GearKind.Helmet, true),
+        DiamondHelmet("Diamond Helmet", GearKind.Helmet),
+        NetheriteChestplate("Netherite Chestplate", GearKind.Chestplate, true),
+        DiamondChestplate("Diamond Chestplate", GearKind.Chestplate),
+        NetheriteLeggings("Netherite Leggings", GearKind.Leggings, true),
+        DiamondLeggings("Diamond Leggings", GearKind.Leggings),
+        NetheriteBoots("Netherite Boots", GearKind.Boots, true),
+        DiamondBoots("Diamond Boots", GearKind.Boots);
+
+        val item = kind?.let { if (netherite) it.netherite else it.diamond }
+    }
+
+    /** Whether [stack] is what the settings pick, the first of Group, Kind and Item that isn't None. */
+    private fun picks(stack: ItemStack) = when {
+        group != MendGroup.None -> group.matches(stack)
+        kind != GearKindChoice.None -> kind.kind?.matches(stack) == true
+        else -> item.item?.let { stack.isOf(it) } == true
+    }
+
+    /** The picked kind of item, none for a group or nothing picked. */
+    private val pickedKind get() = kind.kind ?: item.kind
+
+    private val picksWearables get() =
+        if (group != MendGroup.None) group.wearable else pickedKind?.category == GearKind.Category.Armor
+
+    private val picksNothing get() = group == MendGroup.None && kind == GearKindChoice.None && item == MendItem.None
 
     private var mendTask: Task<*>? = null
 
@@ -105,7 +150,11 @@ object AutoMend : Module(
                 logError("Turn off AutoTotem first, it swaps the offhand back. Your offhand item is put back when done")
                 return@onEnable disable()
             }
-            if (items.wearable && AutoArmor.isEnabled) {
+            if (picksNothing) {
+                logError("Pick what to mend: a Group, a Kind or an Item")
+                return@onEnable disable()
+            }
+            if (picksWearables && AutoArmor.isEnabled) {
                 logError("Turn off AutoArmor first, it swaps the armor back. Your armor is put back when done")
                 return@onEnable disable()
             }
@@ -147,7 +196,7 @@ object AutoMend : Module(
 
     override val waiting get() = waitForAutoEat && AutoEat.isEating
 
-    override fun isTool(stack: ItemStack) = items.matches(stack) && stack.isDamageable
+    override fun isTool(stack: ItemStack) = picks(stack) && stack.isDamageable
 
     override fun canMend(stack: ItemStack) = stack.getEnchantment(Enchantments.MENDING) > 0
 
