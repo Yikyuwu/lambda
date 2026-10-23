@@ -18,6 +18,7 @@
 package com.lambda.module.modules.movement.elytrafly
 
 import com.lambda.Lambda.LOG
+import com.lambda.config.Group
 import com.lambda.config.Tab
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.editSetting
@@ -101,6 +102,7 @@ object ElytraFly : Module(
     private const val GRIM_CONTROL_TAB = "Grim Control"
 //    private const val PACKET_TAB = "Packet"
     private const val GENERAL_TAB = "None"
+    private const val FOOD_RESTOCK_GROUP = "Food Restock"
 
     private const val GRIM_ROCKET_BOOST_RESCALE = 1.65
     const val TRACE_TICKS = 10
@@ -113,6 +115,8 @@ object ElytraFly : Module(
     private const val STUCK_RADIUS = 3.0
     /** About the last 2 seconds of packets and ticks. */
     private const val RECENT_LINES = 300
+
+    @Group(FOOD_RESTOCK_GROUP) private val foodRestock by configBlock(ElytraFoodRestock(this, this))
 
     @Tab(GENERAL_TAB) @JvmStatic val generalMode by configBlock(GeneralElytraFly(this))
         .withEdits { forEachSetting { visibility { old -> { old() && mode == FlyMode.General } } } }
@@ -142,6 +146,7 @@ object ElytraFly : Module(
             }
 
         onEnable {
+            foodRestock.reset()
             mode.elytraFly.onEnableListeners.forEach { it() }
             synchronized(recentSetbacks) { recentSetbacks.clear() }
             stuckAt.clear()
@@ -152,8 +157,14 @@ object ElytraFly : Module(
             lastFireworkDuration = -1.0
         }
         onDisable {
+            // A restock first picks its shulker or the ender chest back up, nothing is left behind.
+            foodRestock.stop()
             mode.elytraFly.onDisableListeners.forEach { it() }
             synchronized(recent) { recent.clear() }
+        }
+
+        listen<TickEvent.Pre> {
+            with(foodRestock) { tick() }
         }
 
         listen<TickEvent.Pre>(priority = { 2 }) {
