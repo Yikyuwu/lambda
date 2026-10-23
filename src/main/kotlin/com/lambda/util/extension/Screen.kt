@@ -30,3 +30,9 @@ val ScreenHandler.craftingSlots: List<Slot> get() = slots.filter { it.inventory 
 
 val ScreenHandler.containerStacks: List<ItemStack> get() = containerSlots.map { it.stack }
 val ScreenHandler.playerStacks: List<ItemStack> get() = playerSlots.map { it.stack }
+
+/** Whether [stack] fits in one of these slots, empty or holding the same item with space left. */
+fun List<Slot>.hasRoomFor(stack: ItemStack) = any {
+    it.canInsert(stack) && (it.stack.isEmpty ||
+        (ItemStack.areItemsAndComponentsEqual(it.stack, stack) && it.stack.count < it.getMaxItemCount(it.stack)))
+}
