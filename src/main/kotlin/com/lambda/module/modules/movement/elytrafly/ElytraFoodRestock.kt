@@ -50,11 +50,7 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
     private val mobRadius by c.setting("Mob Free Radius", 32, 8..64, 4, "No hostile mob may be this close to land and restock", " blocks") { enabled }
     private val retryDelay by c.setting("Retry Delay", 60, 10..600, 10, "Wait after a restock that found too little food", " s") { enabled }
 
-    /**
-     * ElytraFly's settings, but swapping the hotbar at the usual stage only. ElytraFly swaps at every stage for its
-     * elytras and fireworks, and placing the ender chest like that fights other hotbar users, flipping between the
-     * pickaxe and the ender chest without ever placing it.
-     */
+    /** ElytraFly's settings, but swapping the hotbar at the usual stage only, like the tasks expect. ElytraFly swaps at every stage for its elytras and fireworks. */
     private val tasks: Automated = object : Automated by automated {
         override val hotbarConfig = object : HotbarConfig by automated.hotbarConfig {
             override val tickStageMask: Collection<TickEvent> = setOf(TickEvent.Input.Post)
