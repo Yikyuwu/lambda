@@ -25,12 +25,10 @@ import net.minecraft.entity.Entity
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Vec3d
 import kotlin.math.max
-import kotlin.math.min
 
 /**
  * How fast Bounce may fly. While the server lags, with fewer chunks loaded ahead than usual, only so fast that the loaded
- * ones last [SAFE_TICKS] of flight, so the closer the unloaded ones the slower. Under a low roof no faster than
- * [LOW_ROOF_SPEED], since every fast bounce goes right up to it and gets set back more often. Else it flies like always.
+ * ones last [SAFE_TICKS] of flight, so the closer the unloaded ones the slower. Else it flies like always.
  * Missing chunks within stopping distance always land it.
  */
 class FlightPacer {
@@ -54,6 +52,9 @@ class FlightPacer {
     private var usualLoaded = 0.0
     private var lagging = false
     private var landedTicks = 0
+    /** A block within [LOW_ROOF_HEIGHT] above the floor, e.g. a tunnel or the nether's bedrock roof. */
+    var lowRoof = false
+        private set
 
     fun reset() {
         pace = Pace.Free
@@ -74,12 +75,8 @@ class FlightPacer {
         val loaded = missing ?: ((lookAhead ?: 0) + CHECK_STEP).toDouble()
         usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
         lagging = lookAhead != null && loaded < usualLoaded - if (lagging) LAG_END_MARGIN else LAG_MARGIN
-        val lowRoof = hasLowRoof(floorY)
-        val limited = lagging || lowRoof
-        val safeSpeed = min(
-            if (lagging) ((loaded - MIN_STOP_DISTANCE) / SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE,
-            if (lowRoof) LOW_ROOF_SPEED else Double.MAX_VALUE,
-        )
+        lowRoof = hasLowRoof(floorY)
+        val safeSpeed = if (lagging) ((loaded - MIN_STOP_DISTANCE) / SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE
         val stopDistance = max(MIN_STOP_DISTANCE, speed * STOP_TICKS)
 
         // Each holds a bit longer than it starts, else it flips back and forth.
@@ -89,17 +86,17 @@ class FlightPacer {
             pace == Pace.Waiting && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS -> Pace.Waiting
             missing != null && missing <= stopDistance + if (pace == Pace.Waiting) RESUME_MARGIN else 0.0 -> Pace.Waiting
             // Never slower than a glide holds, almost stalled the server sets you back.
-            speed < MIN_SPEED -> if (limited) Pace.Throttled else Pace.Free
+            speed < MIN_SPEED -> if (lagging) Pace.Throttled else Pace.Free
             speed > safeSpeed * if (pace == Pace.Slowing) SLOW_UNTIL else 1.0 -> Pace.Slowing
             speed > safeSpeed * if (pace == Pace.Coasting) FLY_BELOW else COAST_ABOVE -> Pace.Coasting
-            limited -> Pace.Throttled
+            lagging -> Pace.Throttled
             else -> Pace.Free
         }
         // Nearing the safe speed, the bounces flatten out so it eases into it, not past it.
         throttle = (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
         if (next != pace) ElytraFly.debug {
             "${next.description}: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead, usually %.0f, at %.2f a tick, safe %s".format(
-                usualLoaded, speed, if (limited) "%.2f%s".format(safeSpeed, if (lowRoof) " under a low roof" else "") else "any",
+                usualLoaded, speed, if (lagging) "%.2f%s".format(safeSpeed, if (lowRoof) " under a low roof" else "") else "any",
             )
         }
         pace = next
@@ -111,7 +108,6 @@ class FlightPacer {
      */
     fun throttled(bounce: Double, level: Double) = if (pace == Pace.Throttled) level + (bounce - level) * throttle else bounce
 
-    /** A block within [LOW_ROOF_HEIGHT] above the floor you bounce on, e.g. a tunnel or the nether's bedrock roof. */
     private fun SafeContext.hasLowRoof(floorY: Double): Boolean {
         val floor = BlockPos.ofFloored(player.x, floorY, player.z)
         return (1..LOW_ROOF_HEIGHT).any { !world.getBlockState(floor.up(it)).getCollisionShape(world, floor.up(it)).isEmpty }
@@ -133,9 +129,7 @@ class FlightPacer {
         const val LAG_END_MARGIN = 8.0
         /** How fast the usual distance is forgotten, half a block a second, so a turn doesn't count as lag for long. */
         const val USUAL_LOADED_DECAY = 0.025
-        /** Under a roof this low it flies no faster than [LOW_ROOF_SPEED], about 21 blocks a second. */
         const val LOW_ROOF_HEIGHT = 4
-        const val LOW_ROOF_SPEED = 1.05
         /** Slowest it slows down to, below that a glide almost stalls. */
         const val MIN_SPEED = 0.5
         /** Slowing down until this share of the safe speed. */
