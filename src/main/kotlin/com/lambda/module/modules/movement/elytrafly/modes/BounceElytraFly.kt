@@ -210,6 +210,9 @@ class BounceElytraFly(
 					coasting -> eased(holdHeightPitch(COAST_PITCH_UP))
 					// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
 					isDodging -> coastPitch()
+					// Level for the jump off the floor. The server ended the glide there and moves the jump like one on
+					// foot, looking down the glide would take the first 0.42 up as only 0.33 and get set back.
+					player.isOnGround -> COAST_PITCH
 					!smartPitch -> pacer.throttled(pitch, coastPitch())
 					player.velocity.y > -0.2 -> pacer.throttled(90.0, coastPitch())
 					else -> 4.0
