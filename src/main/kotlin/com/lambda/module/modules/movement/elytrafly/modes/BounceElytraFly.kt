@@ -81,7 +81,7 @@ class BounceElytraFly(
 		private const val CHUNK_STOP_TICKS = 30
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
 		/** Flight time the loaded chunks ahead should last, which sets the safe speed. */
-		private const val CHUNK_SAFE_TICKS = 60
+		private const val CHUNK_SAFE_TICKS = 80
 		/** Slowing down until this share of the safe speed. */
 		private const val SLOW_UNTIL = 0.9
 		/** Coasting from this share of the safe speed, and flying on again below the other. */
@@ -203,10 +203,8 @@ class BounceElytraFly(
 						isBraking || waitingForChunks -> pitch(90.0)
 						// Holding the height over an obstacle instead of bouncing into it.
 						hold != null -> pitch(hold)
-						// Bouncing on straight down, the bounces don't push you on, so it slows down for the chunks ahead.
-						slowingForChunks -> pitch(90.0)
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
-						coasting || isDodging -> pitch(coastPitch())
+						slowingForChunks || coasting || isDodging -> pitch(coastPitch())
 						!smartPitch -> pitch(pitch)
 						player.velocity.y > -0.2 -> pitch(90.0)
 						else -> pitch(4.0)
@@ -281,6 +279,14 @@ class BounceElytraFly(
 		listen<MovementEvent.InputUpdate> { event ->
 			val input = event.input
 			val playerInput = input.playerInput
+
+			// The bounces are sprint jumps, each pushes you on. Without sprinting drag slows you down for the chunks ahead.
+			if (slowingForChunks) {
+				player.isSprinting = false
+				input.playerInput = PlayerInput(
+					playerInput.forward, playerInput.backward, playerInput.left, playerInput.right, playerInput.jump, playerInput.sneak, false
+				)
+			}
 
 			// Stands still right before chunks that aren't loaded yet, walking on would take you into them too.
 			if (waitingForChunks && !BaritoneHandler.isActive) {
@@ -405,7 +411,8 @@ class BounceElytraFly(
 
 	/**
 	 * Flies only so fast that the loaded chunks ahead last [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the
-	 * unloaded ones are. Faster than that it slows down while bouncing on, a bit below it coasts, and well below it flies on.
+	 * unloaded ones are. Faster than that it stops sprinting and slows down while bouncing on, a bit below it coasts, and
+	 * well below it flies on.
 	 * Only when they come within stopping distance after all it lands and stands still.
 	 */
 	private fun SafeContext.updateWaitingForChunks() {
