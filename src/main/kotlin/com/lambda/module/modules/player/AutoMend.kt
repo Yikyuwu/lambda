@@ -120,7 +120,8 @@ object AutoMend : Module(
                 return@onEnable disable()
             }
             val stand = standPos.orUnset ?: player.blockPos
-            standPos = stand
+            // The farm's spot is kept for next time, mending what you carry happens wherever you are.
+            if (damaged != null) standPos = stand
             if (damaged != null) info("Taking from ${damaged.toShortString()}, putting into ${repaired?.toShortString()}, standing at ${stand.toShortString()}")
             else info("No chests set, mending what you carry, standing at ${stand.toShortString()}")
 

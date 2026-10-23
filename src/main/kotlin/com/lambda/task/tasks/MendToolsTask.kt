@@ -82,13 +82,13 @@ class MendToolsTask @Ta5kBuilder constructor(
     private val standPos: BlockPos,
     private val config: MendConfig,
     automated: Automated,
-) : StationTask<MendToolsTask.Phase>("Mending tools", Phase.Opening, automated) {
+) : StationTask<MendToolsTask.Phase>("Mending", Phase.Opening, automated) {
     override val moveDelay get() = config.moveDelay
 
     enum class Phase(override val description: String, override val timeoutTicks: Int?) : StationPhase {
         Opening("opening chest", 200),
-        Dumping("dumping mended tools", 200),
-        Taking("taking damaged tools", 200),
+        Dumping("dumping mended items", 200),
+        Taking("taking damaged items", 200),
         Mending("mending", null),
     }
 
@@ -152,7 +152,7 @@ class MendToolsTask @Ta5kBuilder constructor(
         val free = handler.containerSlots.firstOrNull { it.stack.isEmpty }
         when {
             !isMendedTool(player.offHandStack) && tool == null -> return false
-            free == null -> return failAction("The repaired tools chest is full")
+            free == null -> return failAction("The repaired chest is full")
             isMendedTool(player.offHandStack) -> submit { swap(free.id, OFFHAND_BUTTON) }
             tool != null -> submit { quickMove(tool.id) }
         }
@@ -175,7 +175,7 @@ class MendToolsTask @Ta5kBuilder constructor(
         if (carried(::isMendedTool) > 0) return resumeAfterClose()
         when {
             leftInChest > config.leaveInChest && player.hotbarAndInventorySlots.none { it.stack.isEmpty } ->
-                return failure("No free inventory slot to take tools into")
+                return failure("No free inventory slot to take items into")
             leftInChest > 0 -> info("Left $leftInChest item(s) in the chest to keep the farm running")
             else -> info("Nothing left in the chest to mend")
         }
