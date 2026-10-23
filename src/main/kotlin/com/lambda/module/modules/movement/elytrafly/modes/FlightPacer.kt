@@ -51,6 +51,8 @@ class FlightPacer {
     /** How far ahead the chunks are usually loaded, forgotten slowly. */
     private var usualLoaded = 0.0
     private var lagging = false
+    /** How much longer it counts as lagging, see [LAG_HOLD_TICKS]. */
+    private var lagTicks = 0
     private var landedTicks = 0
     /** A block within [LOW_ROOF_HEIGHT] above the floor, e.g. a tunnel or the nether's bedrock roof. */
     var lowRoof = false
@@ -60,6 +62,7 @@ class FlightPacer {
         pace = Pace.Free
         usualLoaded = 0.0
         lagging = false
+        lagTicks = 0
     }
 
     /** Decides the [pace] for this tick. [lookAhead] is how far chunks are looked for, null to not, [floorY] what you bounce on. */
@@ -71,10 +74,13 @@ class FlightPacer {
         val speed = player.velocity.dotProduct(ahead).coerceAtLeast(0.0)
 
         // How far the chunks usually reach ahead, the server's view distance or the look-ahead. It lags until nearly as
-        // many are loaded again, else it flips between slowing down and flying on at the margin.
+        // many are loaded again for a while, else it flips between slowing down and flying on at the margin. Flying
+        // faster than the server sends chunks, the distance loaded jumps by a chunk at each chunk border.
         val loaded = missing ?: ((lookAhead ?: 0) + CHECK_STEP).toDouble()
         usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
-        lagging = lookAhead != null && loaded < usualLoaded - if (lagging) LAG_END_MARGIN else LAG_MARGIN
+        if (lookAhead != null && loaded < usualLoaded - if (lagging) LAG_END_MARGIN else LAG_MARGIN) lagTicks = LAG_HOLD_TICKS
+        else if (lagTicks > 0) lagTicks--
+        lagging = lagTicks > 0
         lowRoof = hasLowRoof(floorY)
         val safeSpeed = if (lagging) ((loaded - MIN_STOP_DISTANCE) / SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE
         val stopDistance = max(MIN_STOP_DISTANCE, speed * STOP_TICKS)
@@ -127,6 +133,8 @@ class FlightPacer {
         /** How much less than usually loaded ahead counts as lagging, and how much less still does once it does. */
         const val LAG_MARGIN = 16.0
         const val LAG_END_MARGIN = 8.0
+        /** How long the chunks have to keep up before it flies on, each switch turns it around and risks a setback. */
+        const val LAG_HOLD_TICKS = 40
         /** How fast the usual distance is forgotten, half a block a second, so a turn doesn't count as lag for long. */
         const val USUAL_LOADED_DECAY = 0.025
         const val LOW_ROOF_HEIGHT = 4
