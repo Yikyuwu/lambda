@@ -72,4 +72,19 @@ class KeepOldDefaultsTest {
         assertEquals("""{"ElytraFly":{"Settings":{"Bounce":true}}}""", json)
         assertEquals(0, count)
     }
+
+    @Test
+    fun `moves HWTAura and the tool restock into HighwayTools`() {
+        val root = mapper.readTree(
+            """{"HWTAura":{"Settings":{"Enabled":true,"Keybind":{"key":86},"Weapon":"NetheriteSword"}},""" +
+                """"ToolSaver":{"Settings":{"Enabled":true,"Min Durability":1,"Max Shulkers":2}},"HighwayTools":{"Settings":{"Width":6}}}""",
+        ) as ObjectNode
+        val count = MigrationUtils.moveIntoHighwayTools(root)
+        assertEquals(
+            """{"ToolSaver":{"Settings":{"Enabled":true,"Min Durability":1}},""" +
+                """"HighwayTools":{"Settings":{"Width":6,"Aura":{"Weapon":"NetheriteSword"},"Tool Restock":{"Max Shulkers":2}}}}""",
+            mapper.writeValueAsString(root),
+        )
+        assertEquals(2, count)
+    }
 }

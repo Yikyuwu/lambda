@@ -51,6 +51,32 @@ object MigrationUtils {
 		return written
 	}
 
+	/**
+	 * Moves the HWTAura module's settings into HighwayTools' "Aura" group and ToolSaver's shulker restock into its "Tool Restock" group.
+	 * Whether those modules were on isn't kept, they shared a keybind and got toggled by accident. Returns how many were moved.
+	 */
+	fun moveIntoHighwayTools(rootNode: ObjectNode): Int {
+		var moved = 0
+		fun move(from: ObjectNode, to: () -> ObjectNode?, key: String, newKey: String = key) {
+			val value = from.remove(key) ?: return
+			to()?.set(newKey, value)
+			moved++
+		}
+		fun group(name: String) = rootNode.childObject("HighwayTools")?.childObject("Settings")?.childObject(name)
+
+		(rootNode.remove("HWTAura")?.get("Settings") as? ObjectNode)?.let { aura ->
+			aura.propertyStream().map { it.key }.toList()
+				.filter { it != "Enabled" && it != "Keybind" }
+				.forEach { move(aura, { group("Aura") }, it) }
+		}
+
+		(rootNode.get("ToolSaver")?.get("Settings") as? ObjectNode)?.let { toolSaver ->
+			move(toolSaver, { group("Tool Restock") }, "Shulker Restock", "Restock Tools")
+			listOf("Restock Tool", "Max Shulkers", "Swap Delay", "Retry Delay").forEach { move(toolSaver, { group("Tool Restock") }, it) }
+		}
+		return moved
+	}
+
 	/** The object at [key], created when missing. Null when something else is there. */
 	private fun ObjectNode.childObject(key: String): ObjectNode? = when (val node = get(key)) {
 		null -> putObject(key)

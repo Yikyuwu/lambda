@@ -52,6 +52,10 @@ import net.minecraft.util.math.ChunkSectionPos
  * @see com.lambda.interaction.managers.breaking.BreakManager
  */
 object BrokenBlockHandler : PostActionHandler<BreakInfo>() {
+	/** How many breaks the server rejected or never confirmed, e.g. for the debug log of what builds. */
+	var failedBreaks = 0
+		private set
+
 	override val pendingActions = LimitedDecayQueue<BreakInfo>(
 		DEFAULT.buildConfig.maxPendingActions, DEFAULT.buildConfig.actionTimeout * 50L
 	) { info ->
@@ -64,6 +68,7 @@ object BrokenBlockHandler : PostActionHandler<BreakInfo>() {
 			if (!info.broken) {
 				val message = "${info.type} ${info::class.simpleName} at ${info.context.blockPos.toShortString()} timed out with cached state ${info.context.cachedState}"
 				if (verboseDebug) this@BrokenBlockHandler.warn(message)
+				failedBreaks++
 			} else if (!Client.ignoreItemDropWarnings) {
 				val message = "${info.type} ${info::class.simpleName}'s item drop at ${info.context.blockPos.toShortString()} timed out"
 				if (verboseDebug) this@BrokenBlockHandler.warn(message)
@@ -99,6 +104,7 @@ object BrokenBlockHandler : PostActionHandler<BreakInfo>() {
 					} else {
 						val message = "Broken block at ${event.pos.toShortString()} was rejected with ${event.newState} instead of ${pending.context.cachedState.emptyState}"
 						if (verboseDebug) this@BrokenBlockHandler.warn(message)
+						failedBreaks++
 						pending.stopPending()
 					}
 					return@listen

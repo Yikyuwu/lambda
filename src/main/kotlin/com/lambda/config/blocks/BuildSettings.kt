@@ -37,6 +37,9 @@ class BuildSettings(override val c: Config) : BuildConfig, ConfigBlock {
     @Group(GENERAL_GROUP) override val pathing by c.setting("Pathing", false, "Path to blocks")
     @Group(GENERAL_GROUP) override val collectDrops by c.setting("Collect All Drops", false, "Collect all drops when breaking blocks")
     @Group(GENERAL_GROUP) override val spleefEntities by c.setting("Spleef Entities", false, "Breaks blocks beneath entities blocking placements to get them out of the way")
+    @Group(GENERAL_GROUP) override val spleefMaxWidth by c.setting("Spleef Max Width", 0.6, 0.1..3.0, 0.1, "Wider entities are waited out instead", unit = " blocks") { spleefEntities }
+    @Group(GENERAL_GROUP) override val spleefMaxHeight by c.setting("Spleef Max Height", 2.0, 0.5..4.0, 0.1, "Taller entities are waited out instead", unit = " blocks") { spleefEntities }
+    @Group(GENERAL_GROUP) override val spleefEdgeGuard by c.setting("Spleef Edge Guard", 60, 0..400, 5, "How long to stay crouched on the ledge after a spleef", unit = " ticks") { spleefEntities }
     @Group(GENERAL_GROUP) override val cautionDoubleBlocks by c.setting("Caution Double Blocks", true, "Prevents spamming double blocks like doors, chests, etc when configured to interact more than once per tick")
     @Group(GENERAL_GROUP) override val maxPendingActions by c.setting("Max Pending Actions", 59, 1..60, 1, "The maximum count of pending interactions to allow before pausing future interactions")
     @Group(GENERAL_GROUP) override val actionTimeout by c.setting("Action Timeout", 10, 1..30, 1, "Timeout for block breaks in ticks", unit = " ticks")

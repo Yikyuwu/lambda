@@ -27,6 +27,7 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
 import com.lambda.module.Module
+import com.lambda.module.modules.world.HighwayTools
 import com.lambda.module.tag.ModuleTag
 import com.lambda.util.EnchantmentUtils.getEnchantment
 import com.lambda.util.item.ItemUtils.armorSlot
@@ -35,10 +36,11 @@ import com.lambda.util.player.SlotUtils.hotbarAndInventorySlots
 import net.minecraft.component.DataComponentTypes
 import net.minecraft.enchantment.Enchantment
 import net.minecraft.enchantment.Enchantments
+import net.minecraft.entity.attribute.EntityAttribute
 import net.minecraft.entity.attribute.EntityAttributes
-import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.registry.RegistryKey
+import net.minecraft.registry.entry.RegistryEntry
 import net.minecraft.registry.tag.ItemTags
 import net.minecraft.screen.slot.Slot
 
@@ -48,13 +50,13 @@ object AutoArmor : Module(
 	description = "Automatically equips armor",
 	tag = ModuleTag.COMBAT
 ) {
-	var elytraPriority by setting("Elytra Priority", true, "Prioritizes elytra's over other armor pieces in the chest slot")
+	var elytraPriority by setting("Elytra Priority", false, "Prioritizes elytra's over other armor pieces in the chest slot")
 	private val toggleElytraPriority by setting("Toggle Elytra Priority", Bind.EMPTY)
 		.onPress { elytraPriority = !elytraPriority }
-	private val minDurabilityPercentage by setting("Min Durability", 5, 0..100, 1, "Minimum durability percentage before being swapped for a new piece", "%")
+	private val minDurabilityPercentage by setting("Min Durability", 1, 0..100, 1, "Minimum durability percentage before being swapped for a new piece", "%")
 	private val headProtection by setting("Preferred Head Protection", Protection.Protection)
 	private val chestProtection by setting("Preferred Chest Protection", Protection.Protection)
-	private val legProtection by setting("Preferred Leg Protection", Protection.BlastProtection)
+	private val legProtection by setting("Preferred Leg Protection", Protection.Protection)
 	private val feetProtection by setting("Preferred Feet Protection", Protection.Protection)
 	private val ignoreBinding by setting("Ignore Binding", true, "Ignores curse of binding armor pieces")
 
@@ -62,44 +64,37 @@ object AutoArmor : Module(
 
 	var overriddenElytraPriority: Boolean? = null
 
-	val SORTER = compareByDescending<Slot> {
-		if (it.stack.isDamageable && 1 - (it.stack.damage.toFloat() / it.stack.maxDamage) < minDurabilityPercentage.toFloat() / 100)
-			-Double.MAX_VALUE
-		else 0.0
-	}.thenByDescending {
-		if (overriddenElytraPriority ?: elytraPriority) {
-			if (it.stack.item == Items.ELYTRA) 1.0
-			else 0.0
-		} else 0.0
-	}.thenByDescending {
-		it.stack.getOrDefault(DataComponentTypes.ATTRIBUTE_MODIFIERS, null)
+	/** The better piece first: one that's not about to break, then elytra priority, armor, toughness, enchantments, the hotbar. */
+	val SORTER = Comparator<Slot> { a, b -> compareScores(score(b), score(a)) }
+
+	/** What [SORTER] compares, best first, one after the other. */
+	private fun score(slot: Slot): DoubleArray {
+		val stack = slot.stack
+		fun attribute(attribute: RegistryEntry<EntityAttribute>) = stack.getOrDefault(DataComponentTypes.ATTRIBUTE_MODIFIERS, null)
 			?.modifiers
-			?.find { modifier -> modifier.attribute == EntityAttributes.ARMOR }
+			?.find { modifier -> modifier.attribute == attribute }
 			?.modifier?.value
 			?: 0.0
-	}.thenByDescending {
-		it.stack.getOrDefault(DataComponentTypes.ATTRIBUTE_MODIFIERS, null)
-			?.modifiers
-			?.find { modifier -> modifier.attribute == EntityAttributes.ARMOR_TOUGHNESS }
-			?.modifier?.value
-			?: 0.0
-	}.thenByDescending {
-		val stack = it.stack
-		when {
-			stack.isIn(ItemTags.FOOT_ARMOR) -> stack.getEnchantment(feetProtection.enchant)
-			stack.isIn(ItemTags.LEG_ARMOR) -> stack.getEnchantment(legProtection.enchant)
-			stack.isIn(ItemTags.CHEST_ARMOR) -> stack.getEnchantment(chestProtection.enchant)
-			else -> stack.getEnchantment(headProtection.enchant)
-		}
-	}.thenByDescending { slot ->
-		Protection.entries.fold(0) { acc, protection ->
-			acc + slot.stack.getEnchantment(protection.enchant)
-		}
-	}.thenByDescending { slot ->
-		slot.stack.getEnchantment(Enchantments.UNBREAKING) +
-				slot.stack.getEnchantment(Enchantments.MENDING)
-	}.thenByDescending { slot ->
-		slot.index in 0..8
+		return doubleArrayOf(
+			if (stack.isDamageable && 1 - (stack.damage.toFloat() / stack.maxDamage) < minDurabilityPercentage.toFloat() / 100) -Double.MAX_VALUE else 0.0,
+			if ((overriddenElytraPriority ?: elytraPriority) && stack.item == Items.ELYTRA) 1.0 else 0.0,
+			attribute(EntityAttributes.ARMOR),
+			attribute(EntityAttributes.ARMOR_TOUGHNESS),
+			when {
+				stack.isIn(ItemTags.FOOT_ARMOR) -> stack.getEnchantment(feetProtection.enchant)
+				stack.isIn(ItemTags.LEG_ARMOR) -> stack.getEnchantment(legProtection.enchant)
+				stack.isIn(ItemTags.CHEST_ARMOR) -> stack.getEnchantment(chestProtection.enchant)
+				else -> stack.getEnchantment(headProtection.enchant)
+			}.toDouble(),
+			Protection.entries.sumOf { stack.getEnchantment(it.enchant) }.toDouble(),
+			(stack.getEnchantment(Enchantments.UNBREAKING) + stack.getEnchantment(Enchantments.MENDING)).toDouble(),
+			if (slot.index in 0..8) 1.0 else 0.0,
+		)
+	}
+
+	private fun compareScores(a: DoubleArray, b: DoubleArray): Int {
+		for (i in a.indices) a[i].compareTo(b[i]).let { if (it != 0) return it }
+		return 0
 	}
 
 	init {
@@ -119,17 +114,25 @@ object AutoArmor : Module(
 
 	fun SafeContext.tick() {
 		tickedThisTick = true
+		// Its clicks would go to the wrong slots while a shulker or the ender chest is open.
+		if (HighwayTools.isUsingContainer) return
 		val armorSlots = player.armorSlots
+		// Each slot scored once, sorting compares them again and again. The same order as SORTER.
+		val scores = HashMap<Slot, DoubleArray>()
+		val sorter = Comparator<Slot> { a, b -> compareScores(scores.getOrPut(b) { score(b) }, scores.getOrPut(a) { score(a) }) }
 
 		val swappable = player.hotbarAndInventorySlots
-			.filter { it.stack.isEquipable && (!ignoreBinding || it.stack.getEnchantment(Enchantments.BINDING_CURSE) <= 0) }
-			.sortedWith(SORTER)
+			.filter { slot ->
+				!slot.stack.isEmpty && armorSlots.any { it.canInsert(slot.stack) } &&
+					(!ignoreBinding || slot.stack.getEnchantment(Enchantments.BINDING_CURSE) <= 0)
+			}
+			.sortedWith(sorter)
 			.distinctBy { it.stack.armorSlot }
 
 		val swaps = mutableListOf<Pair<Slot, Slot>>()
 		armorSlots.forEach { equipped ->
 			val new = swappable.find { new ->
-				equipped.canInsert(new.stack) && SORTER.compare(equipped, new) > 0
+				equipped.canInsert(new.stack) && sorter.compare(equipped, new) > 0
 			} ?: return@forEach
 
 			swaps.add(Pair(new, equipped))
@@ -143,10 +146,6 @@ object AutoArmor : Module(
 			}
 		}.submit()
 	}
-
-	context(safeContext: SafeContext)
-	private val ItemStack.isEquipable
-		get() = safeContext.player.armorSlots.any { it.canInsert(this) }
 
 	private enum class Protection(val enchant: RegistryKey<Enchantment>) {
 		Protection(Enchantments.PROTECTION),

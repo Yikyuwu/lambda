@@ -28,6 +28,10 @@ import com.lambda.interaction.construction.simulation.result.results.InteractRes
 import com.lambda.interaction.construction.simulation.sim
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.ContainerHandler.findContainersWithMaterial
+import com.lambda.interaction.handlers.SpleefGuard.canSpleef
+import com.lambda.interaction.handlers.SpleefGuard.isUnderPlayer
+import com.lambda.interaction.handlers.SpleefGuard.onSpleef
+import com.lambda.interaction.handlers.SpleefGuard.reportUnspleefable
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.interaction.managers.rotating.Rotation.Companion.rotation
@@ -37,6 +41,7 @@ import com.lambda.interaction.material.StackSelection
 import com.lambda.interaction.material.StackSelection.Companion.select
 import com.lambda.interaction.material.container.MaterialContainer
 import com.lambda.util.BlockUtils.blockState
+import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.EntityUtils.getPositionsWithinHitboxXZ
 import com.lambda.util.PlaceDirection
 import com.lambda.util.item.ItemStackUtils.inventoryIndex
@@ -301,12 +306,23 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 							result(InteractResult.BlockedBySelf(pos))
 							return@mapNotNull null
 						}
+						if (!buildConfig.canSpleef(entity)) {
+							reportUnspleefable(entity)
+							return@mapNotNull null
+						}
 						val hitbox = entity.boundingBox
-						entity.getPositionsWithinHitboxXZ(
+						val supports = entity.getPositionsWithinHitboxXZ(
 							(pos.y - (hitbox.maxY - hitbox.minY)).floorToInt(),
 							pos.y
 						)
+						// Never dig out the player's footing, wait for the entity to move instead.
+						if (supports.any { isUnderPlayer(it) }) {
+							reportUnspleefable(entity)
+							return@mapNotNull null
+						}
+						supports
 					}.flatten()
+						.also { supports -> buildConfig.onSpleef(supports.filter { !isPassable(it) }) }
 						.forEach { support ->
 							sim(support, blockState(support), TargetState.Empty)
 						}

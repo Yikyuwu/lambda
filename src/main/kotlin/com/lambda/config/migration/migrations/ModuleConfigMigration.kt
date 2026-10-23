@@ -25,7 +25,7 @@ import com.lambda.config.migration.StepConfigMigration
 @Suppress("unused")
 object ModuleConfigMigration : StepConfigMigration() {
 	override val category = ModuleCategory
-	override val latestVersion = 4
+	override val latestVersion = 5
 
 	init {
 		step(1, 2) { root ->
@@ -89,6 +89,12 @@ object ModuleConfigMigration : StepConfigMigration() {
 				),
 			))
 			LOG.info("Migrated Module config category schema v3 -> v4: $count old defaults kept")
+		}
+
+		// HWTAura and ToolSaver's shulker restock are part of HighwayTools now.
+		step(4, 5) { root ->
+			val count = MigrationUtils.moveIntoHighwayTools(root)
+			LOG.info("Migrated Module config category schema v4 -> v5: $count settings moved into HighwayTools")
 		}
 	}
 }

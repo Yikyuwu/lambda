@@ -33,6 +33,9 @@ interface BuildConfig {
     val pathing: Boolean
     val collectDrops: Boolean
     val spleefEntities: Boolean
+    val spleefMaxWidth: Double
+    val spleefMaxHeight: Double
+    val spleefEdgeGuard: Int
     val cautionDoubleBlocks: Boolean
     val maxPendingActions: Int
     val actionTimeout: Int

@@ -26,9 +26,11 @@ import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
 import com.lambda.interaction.material.container.containers.HotbarContainer
 import com.lambda.module.Module
+import com.lambda.module.modules.world.HighwayTools
 import com.lambda.module.tag.ModuleTag
 import com.lambda.util.EnchantmentUtils.forEachEnchantment
 import com.lambda.util.EnchantmentUtils.getEnchantment
+import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.player.SlotUtils.hotbarSlots
 import com.lambda.util.player.SlotUtils.inventorySlots
 import net.minecraft.item.ItemStack
@@ -40,7 +42,7 @@ object ToolSaver : Module(
 	description = "Moves tools from your hotbar into your inventory when they get too damaged",
 	ModuleTag.PLAYER
 ) {
-	private val minDurabilityPercentage by setting("Min Durability", 5, 0..100, 1, "Minimum durability percentage before being swapped for a new piece", "%")
+	private val minDurabilityPercentage by setting("Min Durability", 1, 0..100, 1, "Minimum durability percentage before being swapped for a new piece", "%")
 	private val replace by setting("Replace", true, "Replaces the tool with the one of the same kind")
 
 	init {
@@ -50,6 +52,8 @@ object ToolSaver : Module(
 			}
 
 		listen<TickEvent.Pre> {
+			// The slots are the inventory's, clicks would hit the wrong ones while a shulker or the ender chest is open.
+			if (player.currentScreenHandler != player.playerScreenHandler) return@listen
 			val endangeredStacks = player.hotbarSlots.filter { it.stack.isEndangered }
 
 			val inventorySlots = player.inventorySlots
@@ -94,11 +98,16 @@ object ToolSaver : Module(
 		}
 
 		listen<ContainerEvent.Transfer> { event ->
+			// Breaking the shulker needs a pickaxe, also when all of them are worn.
+			if (HighwayTools.isRestockingTools) return@listen
 			if (event.to is HotbarContainer && event.fromSlot.stack.isEndangered) event.cancel()
 			else if (event.from is HotbarContainer && event.toSlot.stack.isEndangered) event.cancel()
 		}
 	}
 
+	/** Whether [stack] is too worn to be used, so it's kept out of the hotbar. */
+	fun keepsOut(stack: ItemStack) = isEnabled && stack.isEndangered
+
 	private val ItemStack.isEndangered get() =
-		isDamageable && 1 - (damage.toFloat() / maxDamage) < minDurabilityPercentage.toFloat() / 100
+		isDamageable && durabilityFraction < minDurabilityPercentage.toFloat() / 100
 }
