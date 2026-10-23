@@ -81,8 +81,10 @@ class BounceElytraFly(
 		/** Flight time loaded ahead below which it lands, about how long landing and stopping takes. */
 		private const val CHUNK_STOP_TICKS = 30
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
-		/** Looking this far up slows you down, about a quarter block a tick each second. */
-		private const val SLOW_PITCH = -15.0
+		/** Looking this slightly up slows you down while gliding long, steeper climbs into the roof. */
+		private const val SLOW_PITCH = -1.0
+		/** Room kept below the roof when looking up to slow down. */
+		private const val SLOW_ROOM = 0.5
 		/** Flight time the loaded chunks ahead should last, which sets the safe speed. */
 		private const val CHUNK_SAFE_TICKS = 80
 		/** Slowing down until this share of the safe speed. */
@@ -209,8 +211,8 @@ class BounceElytraFly(
 						isBraking || waitingForChunks -> pitch(90.0)
 						// Holding the height over an obstacle instead of bouncing into it.
 						hold != null -> pitch(hold)
-						// Looking up turns speed into climbing, and up there no bounce pushes you on. Up against a roof it still slows.
-						slowingForChunks -> pitch(SLOW_PITCH)
+						// Looking up turns speed into climbing, and up there no bounce pushes you on.
+						slowingForChunks -> pitch(slowPitch())
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
 						coasting || isDodging -> pitch(coastPitch())
 						!smartPitch -> pitch(pitch)
@@ -380,6 +382,14 @@ class BounceElytraFly(
 		val needed = climb * climb / (2 * room)
 		val cosSq = ((1 - needed / gravity) / 0.75).coerceIn(0.0, 1.0)
 		return Math.toDegrees(acos(sqrt(cosSq))).coerceAtLeast(COAST_PITCH)
+	}
+
+	/** Slightly up, gliding long while slowing down, unless the climb would reach the roof. Then like [coastPitch]. */
+	private fun SafeContext.slowPitch(): Double {
+		val room = ceilingY() - player.y
+		val climb = player.velocity.y
+		val rise = if (climb > 0) climb * climb / (2 * player.finalGravity) else 0.0
+		return if (room - rise > SLOW_ROOM) SLOW_PITCH else coastPitch(room, climb)
 	}
 
 	/** Like the rotation request above, with the roof over you now. */
