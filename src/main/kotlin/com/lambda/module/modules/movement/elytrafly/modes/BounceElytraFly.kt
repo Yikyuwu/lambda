@@ -80,8 +80,10 @@ class BounceElytraFly(
 		/** Flight time loaded ahead below which it lands, about how long landing and stopping takes. */
 		private const val CHUNK_STOP_TICKS = 30
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
-		/** Looking this slightly up slows you down while gliding long, steeper climbs into the roof. */
-		private const val SLOW_PITCH = -1.0
+		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
+		private const val SLOW_PITCH = -10.0
+		/** How far above the flight line slowing down may climb, outside the nether. */
+		private const val MAX_SLOW_RISE = 4.0
 		/** Room kept below the roof when looking up to slow down. */
 		private const val SLOW_ROOM = 0.5
 		/** Flight time the loaded chunks ahead should last, which sets the safe speed. */
@@ -378,9 +380,13 @@ class BounceElytraFly(
 		return Math.toDegrees(acos(sqrt(cosSq))).coerceAtLeast(COAST_PITCH)
 	}
 
-	/** Slightly up, gliding long while slowing down, unless the climb would reach the roof. Then like [coastPitch]. */
+	/**
+	 * Up, climbing as high as there's room while slowing down, the nether roof's bedrock or a block roof. Once the climb
+	 * would get there, level or a bit down like [coastPitch], gliding on up there without bounces pushing you on.
+	 */
 	private fun SafeContext.slowPitch(): Double {
-		val room = ceilingY() - player.y
+		val top = if (world.registryKey == World.NETHER) MAX_NETHER_LAYER_FLIGHT_Y else startPos.y + MAX_SLOW_RISE
+		val room = ceilingY(top) - player.y
 		val climb = player.velocity.y
 		val rise = if (climb > 0) climb * climb / (2 * player.finalGravity) else 0.0
 		return if (room - rise > SLOW_ROOM) SLOW_PITCH else coastPitch(room, climb)
@@ -404,8 +410,7 @@ class BounceElytraFly(
 		else startPos.y + MAX_COAST_RISE
 
 	/** The highest your feet may go while flying level: below a block roof, the nether roof, and not far above the flight line. */
-	private fun SafeContext.ceilingY(): Double {
-		val ceiling = maxFlightY()
+	private fun SafeContext.ceilingY(ceiling: Double = maxFlightY()): Double {
 		var rise = ROOF_SCAN_STEP
 		while (rise <= ROOF_SCAN_HEIGHT && player.y + rise - ROOF_SCAN_STEP < ceiling) {
 			if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, rise, 0.0)))
