@@ -99,7 +99,7 @@ class BreakSim internal constructor(simInfo: SimInfo)
 		val shape = state.getOutlineShape(world, pos)
 
 		if (shape.boundingBoxes.map { it.offset(pos) }.any { it.contains(pov) }) {
-			val currentCast = RotationManager.activeRotation.rayCast(buildConfig.blockReach, pov)
+			val currentCast = RotationManager.activeRotation.blockRayCast(buildConfig.blockReach, pov)
 			currentCast?.blockResult?.let { blockHit ->
 				val rotationRequest = lookAtBlock(pos)?.rotation?.let { rotationRequest { rotation(it) } } ?: return
 				val breakContext = BreakContext(

@@ -30,11 +30,13 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.hotbar.HotbarRequest
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
+import com.lambda.interaction.managers.rotating.RotationSettle
 import com.lambda.interaction.material.StackSelection.Companion.selectStack
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
 import com.lambda.threading.runSafeAutomated
 import com.lambda.util.NamedEnum
+import com.lambda.util.combat.CombatUtils.attackEntity
 import com.lambda.util.item.ItemStackUtils.attackDamage
 import com.lambda.util.item.ItemStackUtils.attackSpeed
 import com.lambda.util.math.random
@@ -42,9 +44,6 @@ import com.lambda.util.player.RotationUtils.lookAtEntity
 import com.lambda.util.player.SlotUtils.hotbarStacks
 import net.minecraft.entity.Entity
 import net.minecraft.item.ItemStack
-import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket
-import net.minecraft.util.Hand
-import net.minecraft.world.GameMode
 
 object KillAura : Module(
     name = "KillAura",
@@ -70,7 +69,7 @@ object KillAura : Module(
         get() = targetingSettings.target<Entity>()
 
     private var prevEntity = target
-    private var validServerRot = false
+    private val settle = RotationSettle()
 
     private var lastAttackTime = 0L
     private var hitDelay = 100.0
@@ -113,9 +112,9 @@ object KillAura : Module(
                 var rotated = true
                 if (rotate) runSafeAutomated {
                     val rotationRequest = lookAtEntity(entity)?.rotation?.let { rotationRequest { rotation(it) } }?.submit() ?: return@listen
-                    rotated = rotationRequest.done && entity === prevEntity && validServerRot
+                    if (entity !== prevEntity) settle.reset()
                     prevEntity = entity
-                    validServerRot = rotationRequest.done
+                    rotated = settle.ready(rotationRequest.done)
                 }
 
                 if (swap) {
@@ -140,12 +139,7 @@ object KillAura : Module(
                 cooldownFromSwap = false
 
                 // Attack
-                connection.sendPacket(PlayerInteractEntityC2SPacket.attack(target, player.isSneaking))
-                if (interaction.gameMode != GameMode.SPECTATOR) {
-                    player.attack(target)
-                    player.resetTicksSince()
-                }
-                if (interactConfig.swing) player.swingHand(Hand.MAIN_HAND)
+                attackEntity(entity, interactConfig.swing)
 
                 lastAttackTime = System.currentTimeMillis()
                 hitDelay = (hitDelay1..hitDelay2).random() * 50

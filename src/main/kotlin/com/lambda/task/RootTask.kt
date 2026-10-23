@@ -23,6 +23,11 @@ import com.lambda.threading.runSafe
 object RootTask : Task<Unit>() {
     override val name get() = "Root Task"
 
+    val isBusy get() = subTasks.any { it.isActive }
+
+    // The failed task is done, the others running next to it, e.g. a build and eating, carry on.
+    override fun onSubTaskFailure(subTask: Task<*>, cause: Throwable) {}
+
     @Ta5kBuilder
     inline fun <reified T : Task<*>> T.run(): T {
         execute(this@RootTask)

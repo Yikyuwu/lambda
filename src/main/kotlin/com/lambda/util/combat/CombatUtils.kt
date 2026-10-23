@@ -22,13 +22,27 @@ import com.lambda.util.combat.DamageUtils.scale
 import com.lambda.util.extension.fullHealth
 import com.lambda.util.math.dist
 import com.lambda.util.world.fastEntitySearch
+import net.minecraft.entity.Entity
 import net.minecraft.entity.LivingEntity
 import net.minecraft.entity.decoration.EndCrystalEntity
+import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket
+import net.minecraft.util.Hand
 import net.minecraft.util.math.Vec3d
+import net.minecraft.world.GameMode
 import net.minecraft.world.explosion.Explosion
 import net.minecraft.world.explosion.ExplosionImpl
 
 object CombatUtils {
+    /** Attacks [target] the way a left click does. */
+    fun SafeContext.attackEntity(target: Entity, swing: Boolean) {
+        connection.sendPacket(PlayerInteractEntityC2SPacket.attack(target, player.isSneaking))
+        if (interaction.gameMode != GameMode.SPECTATOR) {
+            player.attack(target)
+            player.resetTicksSince()
+        }
+        if (swing) player.swingHand(Hand.MAIN_HAND)
+    }
+
     /**
      * Returns whether there is a deadly end crystal in proximity of the player
      *

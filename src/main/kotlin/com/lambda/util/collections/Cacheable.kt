@@ -17,10 +17,13 @@
 
 package com.lambda.util.collections
 
+import java.util.Collections
+import java.util.WeakHashMap
 import kotlin.reflect.KProperty
 
 /**
  * This structure lazily evaluates the [getter] lambda and stores its result in its [cache].
+ * Entries are dropped once their key isn't used anymore. Safe to use from several threads, e.g. simulations.
  *
  * Example:
  * ```kt
@@ -32,7 +35,7 @@ import kotlin.reflect.KProperty
  * ```
  */
 class Cacheable<K, V> private constructor(private val getter: (K) -> V) {
-    private val cache = mutableMapOf<K, V>()
+    private val cache: MutableMap<K, V> = Collections.synchronizedMap(WeakHashMap())
 
     operator fun getValue(thisRef: K, property: KProperty<*>) =
         cache.getOrPut(thisRef) { getter(thisRef) }

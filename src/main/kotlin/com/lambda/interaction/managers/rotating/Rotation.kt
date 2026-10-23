@@ -72,6 +72,9 @@ data class Rotation(val yaw: Double, val pitch: Double) {
         rayCast(eye ?: player.eyePos, vector, reach, mask, shapeType, fluidHandling)
     }
 
+    /** Ray cast for targeting blocks, through entities like the server allows. */
+    fun blockRayCast(reach: Double, eye: Vec3d? = null) = rayCast(reach, eye, InteractionMask.Block)
+
     fun castBox(
         box: Box,
         reach: Double,

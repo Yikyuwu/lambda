@@ -56,10 +56,12 @@ import net.minecraft.block.BlockState
 import net.minecraft.block.ShapeContext
 import net.minecraft.block.pattern.CachedBlockPosition
 import net.minecraft.client.network.ClientPlayerEntity
+import net.minecraft.component.DataComponentTypes
 import net.minecraft.entity.Entity
 import net.minecraft.item.BlockItem
 import net.minecraft.item.Item
 import net.minecraft.item.ItemPlacementContext
+import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.screen.slot.Slot
 import net.minecraft.state.property.Properties
@@ -95,8 +97,9 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 		if (!world.worldBorder.contains(pos)) return
 
 		val testBlockState = blockState(pos)
+		// Only the target itself can be air placed, clicking an empty neighbor would place into that neighbor.
 		val shape = testBlockState.getOutlineShape(world, pos).let { outlineShape ->
-			if (!outlineShape.isEmpty || !interactConfig.airPlace.isEnabled) outlineShape
+			if (!outlineShape.isEmpty || !interactConfig.airPlace.isEnabled || pos != this@InteractSim.pos) outlineShape
 			else VoxelShapes.fullCube()
 		}
 		if (shape.isEmpty) return
@@ -205,7 +208,10 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 			supervisorScope.cancel()
 			return null
 		}
-		val stackSelection = item?.select()?.apply { if (item == Items.AIR) count = 0 }
+		// Containers are told apart by what's in them, so e.g. the shulker with the tools gets placed.
+		val withContents = (targetState as? TargetState.Stack)?.itemStack?.takeIf { it.contains(DataComponentTypes.CONTAINER) }
+		val stackSelection = withContents?.let { target -> StackSelection.selectStack { { ItemStack.areItemsAndComponentsEqual(it, target) } } }
+			?: item?.select()?.apply { if (item == Items.AIR) count = 0 }
 			?: StackSelection.selectStack(0, sorter = compareByDescending { it.inventoryIndex == player.inventory.selectedSlot })
 		val containerSelection = selectContainer { ofAnyType(MaterialContainer.Rank.Hotbar) }
 		val container = stackSelection.findContainersWithMaterial(containerSelection).firstOrNull() ?: run {
@@ -281,8 +287,9 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 			world, pos, ShapeContext.ofPlacement(player)
 		).offset(pos)
 
+		// Like the server, only entities that are checked for intersection block a placement, not e.g. items.
 		val collidingEntities = collisionShape.boundingBoxes.flatMap { box ->
-			world.entities.filter { it.boundingBox.intersects(box) }
+			world.entities.filter { it.intersectionChecked && !it.isSpectator && it.boundingBox.intersects(box) }
 		}
 
 		if (collidingEntities.isNotEmpty()) {

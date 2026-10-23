@@ -68,7 +68,16 @@ class EatTask @Ta5kBuilder constructor(
                 if (!request.done) return@listen
             } else {
                 val inventorySlot = foodFinder.filterSlots(InventoryContainer.slots).firstOrNull()
-                if (inventorySlot != null) runSafeAutomated {
+                // Out of food, so there's nothing left to wait for.
+                if (inventorySlot == null) {
+                    if (holdingUse) {
+                        mc.options.useKey.isPressed = false
+                        holdingUse = false
+                    }
+                    success()
+                    return@listen
+                }
+                runSafeAutomated {
                     InventoryContainer.transfer(foodFinder, HotbarContainer)
                 }
                 if (holdingUse) {

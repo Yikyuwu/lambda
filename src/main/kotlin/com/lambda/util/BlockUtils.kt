@@ -272,6 +272,13 @@ object BlockUtils {
     fun SafeContext.fluidState(pos: BlockPos): FluidState = world.getFluidState(pos)
     fun SafeContext.blockEntity(pos: BlockPos) = world.getBlockEntity(pos)
 
+    /** Whether the block below [pos] has a full solid top to stand or drop an item on. */
+    fun SafeContext.hasSolidGround(pos: BlockPos) =
+        blockState(pos.down()).isSideSolidFullSquare(world, pos.down(), Direction.UP)
+
+    /** Whether nothing at [pos] stops a player or an item, e.g. air, fluids or grass. */
+    fun SafeContext.isPassable(pos: BlockPos) = blockState(pos).getCollisionShape(world, pos).isEmpty
+
     fun BlockState.matches(state: BlockState, ignoredProperties: Collection<Property<*>> = emptySet()) =
         this.block == state.block && this.properties.all {
             this[it] == state[it] || it in ignoredProperties

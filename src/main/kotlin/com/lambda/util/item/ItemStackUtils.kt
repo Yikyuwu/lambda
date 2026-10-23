@@ -76,6 +76,9 @@ object ItemStackUtils {
     val ItemStack.hasSpace get() = spaceLeft > 0
     val List<ItemStack>.spaceLeft get() = sumOf { it.spaceLeft }
     val List<Slot>.spaceLeft @JvmName("slotSpaceLeft") get() = sumOf { it.stack.spaceLeft }
+
+    /** Durability left, from 0 (about to break) to 1 (undamaged). */
+    val ItemStack.durabilityFraction get() = 1 - damage.toFloat() / maxDamage
     val List<ItemStack>.empty: Int get() = count { it.isEmpty }
     val List<Slot>.empty: Int @JvmName("slotEmpty") get() = count { it.stack.isEmpty }
     val List<ItemStack>.count: Int get() = if (isEmpty()) -1 else sumOf { it.count }

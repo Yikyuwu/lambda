@@ -126,7 +126,7 @@ abstract class Sim<T : BuildResult> : Results<T> {
                         }
 
                         val newRotation = pov.rotationTo(vec)
-                        val hit = newRotation.rayCast(buildConfig.blockReach, pov)?.blockResult ?: return@scanSurfaces
+                        val hit = newRotation.blockRayCast(buildConfig.blockReach, pov)?.blockResult ?: return@scanSurfaces
 
                         if (hit.blockPos != pos || hit.side != side) return@scanSurfaces
                         val checked = CheckedHit(hit, newRotation)

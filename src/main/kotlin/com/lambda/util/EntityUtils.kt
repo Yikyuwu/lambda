@@ -63,6 +63,9 @@ object EntityUtils {
         return EntityGroup.entries.firstOrNull { simpleName in it.nameToDisplayNameMap } ?: EntityGroup.Misc
     }
 
+    /** Whether the closest point of the hitbox is within [reach] of [eye], the way the server measures attacks. */
+    fun Entity.isInReach(eye: Vec3d, reach: Double) = boundingBox.getClosestPointTo(eye).squaredDistanceTo(eye) <= reach * reach
+
     fun Box.getClosestPointTo(vec: Vec3d) =
         Vec3d(
             vec.x.coerceIn(minX, maxX),

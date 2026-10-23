@@ -42,6 +42,8 @@ abstract class Task<Result> : Nameable, Muteable {
     var age = 0
     private val depth: Int get() = parent?.depth?.plus(1) ?: 0
     val isCompleted get() = state == State.Completed
+    /** Running, or paused while a sub task runs. */
+    val isActive get() = state == State.Running || state == State.Paused
     val size: Int get() = subTasks.sumOf { it.size } + 1
 
     private val successCallbacks = mutableListOf<SafeContext.(Result) -> Unit>()

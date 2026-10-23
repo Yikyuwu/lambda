@@ -42,8 +42,8 @@ abstract class PostActionHandler<T : ActionInfo> {
     }
 
 	fun T.startPending() {
-		pendingActions.add(this)
-		pendingInteractionsList.add(context)
+		// A full queue won't time it out, so the owner would wait on it forever.
+		if (pendingActions.add(this)) pendingInteractionsList.add(context)
 	}
 
 	fun T.stopPending() {

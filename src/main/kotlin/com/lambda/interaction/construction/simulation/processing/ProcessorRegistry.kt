@@ -34,7 +34,7 @@ object ProcessorRegistry : Loadable {
 	private val stateProcessors = getInstances<StateProcessor>()
 	private val propertyPreProcessors = getInstances<PropertyPreProcessor>()
 	private val propertyPostProcessors = getInstances<PropertyPostProcessor>()
-	private val processorCache = Collections.synchronizedMap<Pair<BlockState, BlockState>, PreProcessingInfo?>(mutableMapOf())
+	private val processorCache = Collections.synchronizedMap<Triple<BlockState, BlockState, Boolean>, PreProcessingInfo?>(mutableMapOf())
 
 	/**
 	 * List of properties that can be processed after the block is placed. This is often used to ignore these properties
@@ -134,9 +134,11 @@ object ProcessorRegistry : Loadable {
 	@SimDsl
 	fun AutomatedSafeContext.getProcessingInfo(state: BlockState, targetState: TargetState, pos: BlockPos): PreProcessingData? {
 		val targetBlockState = targetState.getState(pos)
-		val processorCacheKey = state to targetBlockState
+		// Any solid block will do, so e.g. basalt can be placed sideways where only a side can be clicked.
+		val anyOrientation = targetState is TargetState.Solid || targetState is TargetState.Support
+		val processorCacheKey = Triple(state, targetBlockState, anyOrientation)
 		val preProcessingInfo = processorCache.getOrElse(processorCacheKey) {
-			preProcess(pos, state, targetBlockState, targetState.getStack(pos)).also { info ->
+			preProcess(pos, state, targetBlockState, targetState.getStack(pos), anyOrientation).also { info ->
 				if (info?.noCaching != true) processorCache[processorCacheKey] = info
 			}
 		} ?: return null
@@ -145,7 +147,7 @@ object ProcessorRegistry : Loadable {
 	}
 
 	context(safeContext: SafeContext)
-	private fun preProcess(pos: BlockPos, state: BlockState, targetState: BlockState, itemStack: ItemStack) =
+	private fun preProcess(pos: BlockPos, state: BlockState, targetState: BlockState, itemStack: ItemStack, anyOrientation: Boolean) =
 		PreProcessingInfoAccumulator(targetState, itemStack.item).run {
 			var stateProcessing = false
 			stateProcessors.forEach { processor ->
@@ -156,7 +158,9 @@ object ProcessorRegistry : Loadable {
 			}
 			if (!omitInteraction) {
 				if (state.block != expectedState.block) {
-					if (state.isReplaceable)  {
+					if (state.isReplaceable && anyOrientation) {
+						addIgnores(*expectedState.properties.toTypedArray())
+					} else if (state.isReplaceable)  {
 						propertyPreProcessors.forEach { processor ->
 							if (processor.acceptsState(state, expectedState)) {
 								with(processor) { preProcess(state, expectedState, pos) }

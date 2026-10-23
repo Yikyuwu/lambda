@@ -145,7 +145,7 @@ object RotationUtils {
 
 		if (shape.boundingBoxes.any { it.contains(pov) }) {
 			val currentRotation = RotationManager.activeRotation
-			currentRotation.rayCast(reach, pov)?.let { hit ->
+			currentRotation.blockRayCast(reach, pov)?.let { hit ->
 				return CheckedHit(hit, currentRotation)
 			}
 		}
@@ -158,7 +158,7 @@ object RotationUtils {
 				if (pov distSq pos > reachSq) return@scanClosestPoints
 
 				val newRotation = pov.rotationTo(pos)
-				val hit = if (buildConfig.strictRayCast) newRotation.rayCast(reach, pov) ?: return@scanClosestPoints
+				val hit = if (buildConfig.strictRayCast) newRotation.blockRayCast(reach, pov) ?: return@scanClosestPoints
 				else BlockHitResult(pos, side, this@findRotation, interactConfig.airPlace.isEnabled)
 
 				if (hit.blockResult?.blockPos != this@findRotation) return@scanClosestPoints

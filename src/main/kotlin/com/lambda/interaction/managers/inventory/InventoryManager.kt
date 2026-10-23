@@ -75,7 +75,6 @@ object InventoryManager : Manager<InventoryRequest>(
 		super.load()
 
         listen<TickEvent.Post>({ Int.MIN_VALUE }) {
-            if (Client.avoidInventoryDesync) indexInventoryChanges()
             actionsThisTick = 0
             activeRequest = null
             actions = mutableListOf()
@@ -134,6 +133,8 @@ object InventoryManager : Manager<InventoryRequest>(
 		val active = activeRequest ?: return
 		active.runSafeAutomated {
 			if (tickStage !in active.inventoryConfig.tickStageMask && active.nowOrNothing) return
+			// Only changes made by the actions below get indexed, not earlier ones from the server.
+			if (Client.avoidInventoryDesync) snapshotSlots()
 			val iterator = actions.iterator()
 			while (iterator.hasNext()) {
 				val action = iterator.next()
@@ -173,6 +174,22 @@ object InventoryManager : Manager<InventoryRequest>(
 				?: emptyList()
 			if (player.currentScreenHandler.syncId == 0) alteredPlayerSlots.addAll(changes)
 			else alteredSlots.addAll(changes)
+		}
+		snapshotSlots()
+	}
+
+	/** Whether [stack] is what our latest action on [slot] made it. Clears that slot's pending changes. */
+	private fun MutableCollection<InventoryChange>.confirms(slot: Int, stack: ItemStack): Boolean {
+		val latest = lastOrNull { it.slotId == slot } ?: return false
+		removeIf { it.slotId == slot }
+		return latest.after.equal(stack)
+	}
+
+	/** Remembers the slots, so [indexInventoryChanges] only sees what changes after this. */
+	context(safeContext: SafeContext)
+	fun snapshotSlots() {
+		with(safeContext) {
+			if (player.currentScreenHandler.syncId != screenHandler?.syncId) return
 			slots = getStacks(player.currentScreenHandler.slots)
 		}
 	}
@@ -200,9 +217,7 @@ object InventoryManager : Manager<InventoryRequest>(
 			val alteredContents = mutableListOf<ItemStack>()
 			val alteredSlots = if (packet.syncId == 0) alteredPlayerSlots else alteredSlots
 			packet.contents.forEachIndexed { index, incomingStack ->
-				val matches = alteredSlots.removeIf { cached ->
-					incomingStack.equal(cached.after)
-				}
+				val matches = alteredSlots.confirms(index, incomingStack)
 				if (matches) alteredContents.add(packetScreenHandler.slots[index].stack)
 				else alteredContents.add(incomingStack)
 			}
@@ -232,9 +247,7 @@ object InventoryManager : Manager<InventoryRequest>(
 			} ?: false
 
 			val alteredSlots = if (packet.syncId == 0) alteredPlayerSlots else alteredSlots
-			val matches = alteredSlots.removeIf {
-				it.slotId == packet.slot && it.after.equal(itemStack)
-			}
+			val matches = alteredSlots.confirms(packet.slot, itemStack)
 
 			if (packet.syncId == 0) {
 				if (PlayerScreenHandler.isInHotbar(packet.slot) && !itemStack.isEmpty) {

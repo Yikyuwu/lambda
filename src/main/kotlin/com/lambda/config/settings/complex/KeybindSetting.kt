@@ -39,6 +39,7 @@ import com.lambda.gui.dsl.ImGuiBuilder
 import com.lambda.imgui.flag.ImGuiCol
 import com.lambda.imgui.flag.ImGuiHoveredFlags
 import com.lambda.imgui.flag.ImGuiMouseButton
+import com.lambda.task.tasks.OpenContainerTask
 import com.lambda.threading.runSafe
 import com.lambda.util.InputUtils
 import com.lambda.util.KeyCode
@@ -97,7 +98,7 @@ class KeybindSetting(
 
     private fun onButtonEvent(event: ButtonEvent) {
         if (mc.options.commandKey.isPressed ||
-            (screenCheck && mc.currentScreen != null) ||
+            (screenCheck && blockedByScreen) ||
             !event.satisfies(value)) return
 
         if (event.isPressed) {
@@ -113,6 +114,9 @@ class KeybindSetting(
             runSafe { releaseListeners.forEach { it(event) } }
         }
     }
+
+    /** Binds still work in containers a task opened, so a module working in one can be turned off. */
+    private val blockedByScreen get() = mc.currentScreen.let { it != null && !OpenContainerTask.isAutomated(it) }
 
     override fun ImGuiBuilder.buildLayout() {
         text(name)

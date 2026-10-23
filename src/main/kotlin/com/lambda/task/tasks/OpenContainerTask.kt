@@ -19,6 +19,7 @@ package com.lambda.task.tasks
 
 import baritone.api.pathing.goals.GoalNear
 import com.lambda.context.Automated
+import com.lambda.context.SafeContext
 import com.lambda.event.events.InventoryEvent
 import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
@@ -29,10 +30,15 @@ import com.lambda.threading.runSafeAutomated
 import com.lambda.util.TickTimer
 import com.lambda.util.player.RotationUtils.lookAtBlock
 import com.lambda.util.world.raycast.RayCastUtils.blockResult
+import net.minecraft.client.gui.screen.Screen
+import net.minecraft.client.gui.screen.ingame.HandledScreen
 import net.minecraft.screen.ScreenHandler
 import net.minecraft.util.Hand
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
+import java.lang.ref.WeakReference
+import java.util.Collections
+import java.util.WeakHashMap
 
 class OpenContainerTask @Ta5kBuilder constructor(
     private val blockPos: BlockPos,
@@ -44,6 +50,7 @@ class OpenContainerTask @Ta5kBuilder constructor(
 
     private var screenHandler: ScreenHandler? = null
     private var containerState = State.Scoping
+    private var pathed = false
 
     private val retryTimer = TickTimer()
 
@@ -61,11 +68,20 @@ class OpenContainerTask @Ta5kBuilder constructor(
         }
     }
 
+    override fun SafeContext.onStart() {
+        opening += this@OpenContainerTask
+    }
+
+    override fun SafeContext.onCancel() = stopPathing()
+
     init {
+        onSuccess { stopPathing() }
+
         listen<InventoryEvent.Open> {
             if (containerState != State.Opening) return@listen
 
             screenHandler = it.screenHandler
+            opened = WeakReference(it.screenHandler)
             containerState = State.SlotLoading
 
             if (!waitForSlotLoad) success(it.screenHandler)
@@ -101,15 +117,40 @@ class OpenContainerTask @Ta5kBuilder constructor(
             val checkedHit = runSafeAutomated { lookAtBlock(blockPos, sides) }
                 ?: run {
                     containerState = State.Pathing
+                    pathed = true
                     if (!BaritoneHandler.isActive) BaritoneHandler.setGoalAndPath(GoalNear(blockPos, 3))
                     return@listen
                 }
+            stopPathing()
             if (interactConfig.rotate && !rotationRequest { rotation(checkedHit.rotation) }.submit().done) return@listen
+            // Sneaking with an item in hand would use it on the container instead of opening it.
+            if (player.isSneaking) return@listen
 
             interaction.interactBlock(player, Hand.MAIN_HAND, checkedHit.hit.blockResult ?: return@listen)
             player.swingHand(Hand.MAIN_HAND)
 
             containerState = State.Opening
         }
+    }
+
+    private fun stopPathing() {
+        if (!pathed) return
+        pathed = false
+        BaritoneHandler.cancel()
+    }
+
+    companion object {
+        private var opened = WeakReference<ScreenHandler>(null)
+        private val opening: MutableSet<OpenContainerTask> = Collections.newSetFromMap(WeakHashMap())
+
+        /** Whether a task is opening a container, so nothing else should make the player sneak. */
+        val isOpening: Boolean
+            get() {
+                opening.removeIf { !it.isActive }
+                return opening.isNotEmpty()
+            }
+
+        /** Whether [screen] is a container a task opened, not the player. */
+        fun isAutomated(screen: Screen?) = screen is HandledScreen<*> && screen.screenHandler === opened.get()
     }
 }

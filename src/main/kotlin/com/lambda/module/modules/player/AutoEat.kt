@@ -39,6 +39,9 @@ object AutoEat : Module(
 ) {
     private var eatTask: Task<*>? = null
 
+    /** Eating until done, which can take several items in a row. */
+    val isEating get() = eatTask?.isActive == true
+
     init {
 		setDefaultAutomationConfig()
             .withEdits {
@@ -47,7 +50,7 @@ object AutoEat : Module(
 
         listen<TickEvent.Pre> {
             val reason = runSafeAutomated { reasonEating() }
-            if (eatTask != null || !reason.shouldEat()) return@listen
+            if (isEating || !reason.shouldEat()) return@listen
 
             eatTask = eat().thenAction { eatTask = null }.run()
         }

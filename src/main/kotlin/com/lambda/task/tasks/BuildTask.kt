@@ -47,6 +47,8 @@ import com.lambda.interaction.construction.simulation.result.results.PreSimResul
 import com.lambda.interaction.construction.simulation.sim
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
+import com.lambda.interaction.handlers.breaking.BrokenBlockHandler
+import com.lambda.interaction.handlers.interacting.InteractedBlockHandler
 import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakRequest
 import com.lambda.interaction.managers.interacting.InteractRequest.Companion.interactRequest
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
@@ -96,6 +98,16 @@ class BuildTask private constructor(
 
     private var placements = 0
     private var breaks = 0
+
+    val actions get() = placements + breaks
+    /** Whether placements or breaks were sent and are waiting for the server. */
+    val isWorking get() = pendingInteractions.isNotEmpty()
+    /** Whether an action on [pos] still waits for the server to confirm it. */
+    fun isPending(pos: BlockPos) = pendingInteractions.any { it.blockPos == pos }
+    /** Whether the build may path to blocks out of reach, off while the owner walks the player itself. */
+    var allowPathing: () -> Boolean = { true }
+    private val canPath get() = buildConfig.pathing && allowPathing()
+
     private val dropsToCollect = mutableSetOf<ItemEntity>()
     var eatTask: Task<*>? = null
 
@@ -109,6 +121,8 @@ class BuildTask private constructor(
     private var results: Collection<BuildResult> = mutableSetOf()
     private var reSimPositions = Collections.synchronizedSet(linkedSetOf<BlockPos>())
     private var viableResults: Sequence<BuildResult> = emptySequence()
+    /** What the build would do next, or what keeps it from going on. */
+    val nextResult get() = viableResults.firstOrNull()
 
     override fun SafeContext.onStart() {
         iteratePropagating()
@@ -130,6 +144,7 @@ class BuildTask private constructor(
         }
 
         listen<TickEvent.Pre> {
+            dropUntracked()
             runSafeAutomated {
                 if (async) {
                     if (job != null) {
@@ -202,14 +217,14 @@ class BuildTask private constructor(
 
     private fun AutomatedSafeContext.preSim(): Boolean {
         when {
-            lifeMaintenance && eatTask == null && runSafeAutomated { reasonEating() }.shouldEat() -> {
+            lifeMaintenance && eatTask?.isActive != true && runSafeAutomated { reasonEating() }.shouldEat() -> {
                 eatTask = eat()
                     .thenAction { eatTask = null }
                     .execute(this@BuildTask)
 
                 return true
             }
-            eatTask != null -> return true
+            eatTask?.isActive == true -> return true
         }
 
         if (blueprint is TickingBlueprint) {
@@ -250,6 +265,17 @@ class BuildTask private constructor(
         handleResult(bestResult, viableResults)
     }
 
+    /**
+     * Drops pending actions neither handler tracks any more. Nothing would time them out,
+     * so the build would skip their blocks and wait on them forever.
+     */
+    private fun dropUntracked() {
+        pendingInteractions.removeIf { context ->
+            BrokenBlockHandler.pendingActions.none { it.context === context } &&
+                InteractedBlockHandler.pendingActions.none { it.context === context }
+        }
+    }
+
     private fun checkEmpty(): Boolean {
         if (finishOnDone && blueprint.structure.isEmpty()) {
             failure("Structure is empty")
@@ -273,14 +299,14 @@ class BuildTask private constructor(
 
             is GenericResult.NotVisible,
             is InteractResult.NoIntegrity -> {
-                if (!buildConfig.pathing) return
+                if (!canPath) return
                 val sim = blueprint.simulation()
                 val goal = BuildGoal(sim, player.blockPos)
                 BaritoneHandler.setGoalAndPath(goal)
             }
 
             is Navigable -> {
-                if (buildConfig.pathing) BaritoneHandler.setGoalAndPath(result.goal ?: return)
+                if (canPath) BaritoneHandler.setGoalAndPath(result.goal ?: return)
             }
 
             is Contextual -> {

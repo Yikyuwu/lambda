@@ -45,6 +45,7 @@ class BlockPosSetting(
 		button("Set##$name") {
 			mc.crosshairTarget?.blockResult?.blockPos?.let {
 				value = it
+				info("$name set to ${it.toShortString()}")
 			} ?: info("No block under crosshair")
 		}
 		lambdaTooltip("Set the coordinates to the block you are currently looking at")
@@ -67,3 +68,6 @@ class BlockPosSetting(
 		}
 	}
 }
+
+/** Null for the unset position 0 0 0, so a fallback can be chained with `?:`. */
+val BlockPos.orUnset: BlockPos? get() = takeIf { it != BlockPos.ORIGIN }

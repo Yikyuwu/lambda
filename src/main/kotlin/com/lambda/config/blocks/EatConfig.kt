@@ -20,6 +20,8 @@ package com.lambda.config.blocks
 import com.lambda.context.Automated
 import com.lambda.context.AutomatedSafeContext
 import com.lambda.interaction.material.StackSelection.Companion.selectStack
+import com.lambda.interaction.material.container.containers.HotbarContainer
+import com.lambda.interaction.material.container.containers.InventoryContainer
 import com.lambda.threading.runSafe
 import com.lambda.util.Describable
 import com.lambda.util.NamedEnum
@@ -97,7 +99,7 @@ interface EatConfig {
         fun selector() = selectStack(sorter = c.eatConfig.selectionPriority.comparator) {
             when(this@Reason) {
                 None -> any()
-                Hunger -> isOneOfItems(c.eatConfig.nutritiousFood)
+                Hunger -> isOneOfItems(c.eatConfig.nutritiousFood.filter { c.eatConfig.isHungerFood(it) })
                 Damage -> isOneOfItems(c.eatConfig.regenerationFood)
                 Fire -> isOneOfItems(c.eatConfig.resistanceFood)
             } and if (c.eatConfig.ignoreBadFood) isNoneOfItems(c.eatConfig.badFood) else any()
@@ -105,11 +107,15 @@ interface EatConfig {
     }
 
     companion object {
-        fun AutomatedSafeContext.reasonEating() = when {
-            eatConfig.eatOnHunger && player.hungerManager.foodLevel <= eatConfig.minFoodLevel -> Reason.Hunger
-            eatConfig.eatOnDamage && player.health <= eatConfig.minDamage && !player.hasStatusEffect(StatusEffects.REGENERATION) -> Reason.Damage
-            eatConfig.eatOnFire && player.isOnFire && !player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE) -> Reason.Fire
-            else -> Reason.None
-        }
+        /** Food eaten for hunger. Regeneration and fire resistance food like golden apples is kept for damage and fire. */
+        fun EatConfig.isHungerFood(item: Item) =
+            item in nutritiousFood && item !in regenerationFood && item !in resistanceFood && !(ignoreBadFood && item in badFood)
+
+        /** The first reason to eat now that there's food for, or [Reason.None]. */
+        fun AutomatedSafeContext.reasonEating() = listOfNotNull(
+            Reason.Hunger.takeIf { eatConfig.eatOnHunger && player.hungerManager.foodLevel <= eatConfig.minFoodLevel },
+            Reason.Damage.takeIf { eatConfig.eatOnDamage && player.health <= eatConfig.minDamage && !player.hasStatusEffect(StatusEffects.REGENERATION) },
+            Reason.Fire.takeIf { eatConfig.eatOnFire && player.isOnFire && !player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE) },
+        ).firstOrNull { it.selector().filterSlots(HotbarContainer.slots + InventoryContainer.slots).isNotEmpty() } ?: Reason.None
     }
 }
