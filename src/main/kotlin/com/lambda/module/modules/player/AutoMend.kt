@@ -40,9 +40,7 @@ import com.lambda.util.item.GearKindChoice
 import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.item.ItemUtils
 import com.lambda.util.player.SlotUtils.hotbarStacks
-import net.minecraft.component.DataComponentTypes
 import net.minecraft.enchantment.Enchantments
-import net.minecraft.entity.EquipmentSlot
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
@@ -78,12 +76,10 @@ object AutoMend : Module(
         val matches: (ItemStack) -> Boolean,
     ) : NamedEnum, Describable {
         None("None", "Mend the Kind or Item below instead", false, { false }),
-        AnyTool("Any Tool", "Pickaxes, axes, shovels and hoes of any material", false, { stack ->
-            GearKind.entries.any { it.category == GearKind.Category.Tool && it.matches(stack) }
-        }),
-        AnyArmor("Any Armor", "Helmets, chestplates, leggings and boots, worn and in the offhand", true, { it.isArmor && !it.isOf(Items.ELYTRA) }),
+        AnyTool("Any Tool", "Pickaxes, axes, shovels and hoes of any material", false, { it.isGear(GearKind.Category.Tool) }),
+        AnyArmor("Any Armor", "Helmets, chestplates, leggings and boots, worn and in the offhand", true, { it.isGear(GearKind.Category.Armor) }),
         Elytras("Elytras", "Elytras, one worn and one in the offhand", true, { it.isOf(Items.ELYTRA) }),
-        AnyWearables("Any Wearables", "Armor and elytras, worn and in the offhand", true, { it.isArmor }),
+        AnyWearables("Any Wearables", "Armor and elytras, worn and in the offhand", true, { it.isGear(GearKind.Category.Armor) || it.isOf(Items.ELYTRA) }),
     }
 
     enum class MendItem(override val displayName: String, val kind: GearKind?, netherite: Boolean = false) : NamedEnum {
@@ -112,20 +108,16 @@ object AutoMend : Module(
         val item = kind?.let { if (netherite) it.netherite else it.diamond }
     }
 
-    /** Whether [stack] is what the settings pick, the first of Group, Kind and Item that isn't None. */
-    private fun picks(stack: ItemStack) = when {
-        group != MendGroup.None -> group.matches(stack)
-        kind != GearKindChoice.None -> kind.kind?.matches(stack) == true
-        else -> item.item?.let { stack.isOf(it) } == true
-    }
-
-    /** The picked kind of item, none for a group or nothing picked. */
-    private val pickedKind get() = kind.kind ?: item.kind
+    /** What the settings pick, the first of Group, Kind and Item that isn't None. Null when all are. */
+    private val picked: ((ItemStack) -> Boolean)?
+        get() {
+            if (group != MendGroup.None) return group.matches
+            val kind = kind.kind ?: return item.item?.let { picked -> { it.isOf(picked) } }
+            return kind::matches
+        }
 
     private val picksWearables get() =
-        if (group != MendGroup.None) group.wearable else pickedKind?.category == GearKind.Category.Armor
-
-    private val picksNothing get() = group == MendGroup.None && kind == GearKindChoice.None && item == MendItem.None
+        if (group != MendGroup.None) group.wearable else (kind.kind ?: item.kind)?.category == GearKind.Category.Armor
 
     private var mendTask: Task<*>? = null
 
@@ -150,7 +142,7 @@ object AutoMend : Module(
                 logError("Turn off AutoTotem first, it swaps the offhand back. Your offhand item is put back when done")
                 return@onEnable disable()
             }
-            if (picksNothing) {
+            if (picked == null) {
                 logError("Pick what to mend: a Group, a Kind or an Item")
                 return@onEnable disable()
             }
@@ -169,10 +161,11 @@ object AutoMend : Module(
                 return@onEnable disable()
             }
             val stand = standPos.orUnset ?: player.blockPos
-            // The farm's spot is kept for next time, mending what you carry happens wherever you are.
-            if (damaged != null) standPos = stand
-            if (damaged != null) info("Taking from ${damaged.toShortString()}, putting into ${repaired?.toShortString()}, standing at ${stand.toShortString()}")
-            else info("No chests set, mending what you carry, standing at ${stand.toShortString()}")
+            if (damaged != null) {
+                // The farm's spot is kept for next time, mending what you carry happens wherever you are.
+                standPos = stand
+                info("Taking from ${damaged.toShortString()}, putting into ${repaired?.toShortString()}, standing at ${stand.toShortString()}")
+            } else info("No chests set, mending what you carry, standing at ${stand.toShortString()}")
 
             mendTask = MendToolsTask(
                 damagedChest = damaged,
@@ -196,7 +189,7 @@ object AutoMend : Module(
 
     override val waiting get() = waitForAutoEat && AutoEat.isEating
 
-    override fun isTool(stack: ItemStack) = picks(stack) && stack.isDamageable
+    override fun isTool(stack: ItemStack) = picked?.invoke(stack) == true && stack.isDamageable
 
     override fun canMend(stack: ItemStack) = stack.getEnchantment(Enchantments.MENDING) > 0
 
@@ -205,7 +198,5 @@ object AutoMend : Module(
     override fun isSword(stack: ItemStack) = stack.item in ItemUtils.swords &&
         stack.getEnchantment(Enchantments.SWEEPING_EDGE) >= 3 && stack.getEnchantment(Enchantments.FIRE_ASPECT) == 0
 
-    /** Worn in an armor slot, which elytras are too. */
-    private val ItemStack.isArmor get() =
-        get(DataComponentTypes.EQUIPPABLE)?.slot()?.type == EquipmentSlot.Type.HUMANOID_ARMOR
+    private fun ItemStack.isGear(category: GearKind.Category) = GearKind.entries.any { it.category == category && it.matches(this) }
 }
