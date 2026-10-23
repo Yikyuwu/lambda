@@ -52,6 +52,7 @@ object NetheriteUpgrade : Module(
     tag = ModuleTag.PLAYER,
 ), UpgradeConfig {
     private val setup by setting("Setup", { clickSetup.toggle() }, "Set the chests and the smithing table by clicking them")
+    private val reset by setting("Reset", { clickSetup.reset() }, "Set all positions back to 0 0 0, so they're found again")
     private var diamondChest by setting("Diamond Chest", BlockPos.ORIGIN, "Chest to take diamond items from. At 0 0 0 it uses the one with a \"diamond\" sign")
     private var templateChest by setting("Template Chest", BlockPos.ORIGIN, "Chest to take smithing templates from. At 0 0 0 it uses the one with a \"template\" sign")
     private var ingotChest by setting("Ingot Chest", BlockPos.ORIGIN, "Chest to take netherite ingots from. At 0 0 0 it uses the one with an \"ingot\" sign")
