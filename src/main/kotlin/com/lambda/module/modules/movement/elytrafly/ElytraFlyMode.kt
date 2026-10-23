@@ -24,6 +24,7 @@ import com.lambda.event.Muteable
 import com.lambda.event.events.PacketEvent
 import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
+import com.lambda.interaction.handlers.GlideHandler
 import com.lambda.interaction.handlers.GlideHandler.ELYTRA_SELECTION
 import com.lambda.interaction.managers.hotbar.HotbarRequest
 import com.lambda.interaction.managers.inventory.InventoryManager
@@ -33,6 +34,7 @@ import com.lambda.module.modules.movement.elytrafly.ElytraFly.FlyMode
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.fakeFly
 import com.lambda.threading.runSafe
 import com.lambda.util.CommunicationUtils.logError
+import com.lambda.util.player.PlayerUtils.isIn2b2tQueue
 import com.lambda.util.player.SlotUtils.armorSlots
 import com.lambda.util.player.SlotUtils.hotbarAndInventorySlots
 import net.minecraft.entity.Entity
@@ -53,12 +55,24 @@ abstract class ElytraFlyMode(
 	val onEnableListeners = mutableListOf<SafeContext.() -> Unit>()
 	val onDisableListeners = mutableListOf<SafeContext.() -> Unit>()
 	val onFlagListeners = mutableListOf<SafeContext.() -> Unit>()
+	/** Set back over and over, whatever it was at gets nowhere. */
+	val onStuckListeners = mutableListOf<SafeContext.() -> Unit>()
 
 	var fakeGliding = false
+	/** No usable elytra, broken or gone. It waits for one instead of turning off, a hotkey shared with other modules stays in step. */
+	var noElytra = false
+		private set
 
 	init {
+		onEnable { noElytra = false }
 		listen<TickEvent.Pre>({ 100 }) {
 			fakeGliding = fakeFly && fakeGliding && player.canGlide()
+			// Broken or gone, gliding stops and the server sets you back, then it stands still with nothing said.
+			// In the queue you have no inventory, not a broken elytra.
+			val none = !fakeFly && !isIn2b2tQueue() && !GlideHandler.canGlide()
+			if (none && !noElytra) logError("You have no usable elytra anymore, it's broken or gone. Waiting for one")
+			if (!none && noElytra) ElytraFly.debug { "Usable elytra again, flying on" }
+			noElytra = none
 		}
 
 		listen<PacketEvent.Receive.Pre>({ 100 }) { event ->
@@ -71,6 +85,7 @@ abstract class ElytraFlyMode(
 	protected fun onDisable(callback: SafeContext.() -> Unit) { onDisableListeners.add(callback) }
 
 	protected fun onFlag(callback: SafeContext.() -> Unit) { onFlagListeners.add(callback) }
+	protected fun onStuck(callback: SafeContext.() -> Unit) { onStuckListeners.add(callback) }
 
 	fun SafeContext.flyOrFakeFly(): Boolean {
 		if (!fakeFly) {
@@ -106,6 +121,7 @@ abstract class ElytraFlyMode(
 		}
 		fun InventoryRequest.InvRequestBuilder.swapChest() {
 			if (elytraInHotbar) {
+				InventoryManager.snapshotSlots()
 				interaction.interactItem(player, Hand.MAIN_HAND)
 				InventoryManager.indexInventoryChanges()
 			} else {
