@@ -17,6 +17,7 @@
 
 package com.lambda.module.modules.combat
 
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.editTypedSettings
 import com.lambda.config.hideBlock
@@ -55,6 +56,7 @@ object Surround : Module(
 					) { defaultValue(false); hide() }
 				}
 				hideBlock(::eatConfig)
+				grimPacing()
 			}
 
 		onEnable {

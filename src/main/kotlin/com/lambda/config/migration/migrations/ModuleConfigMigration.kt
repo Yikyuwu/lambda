@@ -25,7 +25,7 @@ import com.lambda.config.migration.StepConfigMigration
 @Suppress("unused")
 object ModuleConfigMigration : StepConfigMigration() {
 	override val category = ModuleCategory
-	override val latestVersion = 3
+	override val latestVersion = 4
 
 	init {
 		step(1, 2) { root ->
@@ -53,6 +53,42 @@ object ModuleConfigMigration : StepConfigMigration() {
 			if (!loaderBranch.isString) return@step
 			if (loaderBranch.asString() != "Snapshot") return@step
 			settings.asObject().put("Loader Branch", "Dev")
+		}
+
+		// The defaults changed to ones that work well on 2b2t, existing setups keep the ones they had.
+		step(3, 4) { root ->
+			val count = MigrationUtils.keepOldDefaults(root, mapOf(
+				"FancyChat" to mapOf("uwu" to false, ">" to true),
+				"AutoArmor" to mapOf("Elytra Priority" to true, "Min Durability" to 5, "Preferred Leg Protection" to "BlastProtection"),
+				"AutoDisconnect" to mapOf(
+					"Triggers/Health Settings/Min Health" to 10,
+					"Triggers/Totem Settings/Min Totems" to 2,
+					"Triggers/Players" to false,
+					"Triggers/Players Settings/Player Distance" to 64,
+				),
+				"CrystalAura" to mapOf("General/Update Mode" to "Ticked"),
+				"SafeWalk" to mapOf("Step Height" to 0.5),
+				"ElytraFly" to mapOf(
+					"Rocket Speed" to 1.0,
+					"Bounce/Pitch" to 72.0,
+					"Bounce/Y Motion/Speed Limit" to 120,
+					"Bounce/Bounce Obstacle Passer/Walk When Flagged" to true,
+					"Bounce/Bounce Obstacle Passer/Direction Step" to 22.5,
+				),
+				"ESP" to mapOf("General/Outline/Screen Width" to 20),
+				"ToolSaver" to mapOf("Min Durability" to 5, "Max Shulkers" to 2),
+				"HWTAura" to mapOf("Weapon" to "NetheriteSword", "Any Weapon" to true),
+				"HighwayTools" to mapOf(
+					"Width" to 6,
+					"Pavement" to "Block",
+					"Floor" to "None",
+					"Left Wall" to "None",
+					"Ceiling" to "None",
+					"Seal Border" to false,
+					"Slice Size" to 3,
+				),
+			))
+			LOG.info("Migrated Module config category schema v3 -> v4: $count old defaults kept")
 		}
 	}
 }

@@ -34,9 +34,9 @@ object FancyChat : Module(
 	description = "Makes messages you send - fancy",
 	tag = ModuleTag.CHAT,
 ) {
-	private val uwu by setting("uwu", false)
+	private val uwu by setting("uwu", true)
 	private val leet by setting("1337", false)
-	private val green by setting(">", true)
+	private val green by setting(">", false)
 	private val blue by setting("`", false)
 
 	init {

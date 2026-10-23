@@ -19,8 +19,11 @@ package com.lambda.module.modules.world
 
 import com.lambda.Lambda.mc
 import com.lambda.config.Group
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
+import com.lambda.config.blocks.HotbarConfig
 import com.lambda.config.blocks.WorldLineSettings
+import com.lambda.config.editSetting
 import com.lambda.config.entries.Setting.Companion.onValueChange
 import com.lambda.config.forEachSetting
 import com.lambda.config.hideAllExcept
@@ -102,6 +105,10 @@ object Printer : Module(
 
 	init {
 		setDefaultAutomationConfig()
+			.withEdits {
+				grimPacing()
+				hotbarConfig::swapMode.editSetting { defaultValue(HotbarConfig.SwapMode.Permanent) }
+			}
 
 		onEnable {
 			startBuildTask()

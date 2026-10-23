@@ -18,7 +18,9 @@
 package com.lambda.module.modules.player
 
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
+import com.lambda.config.blocks.EatConfig
 import com.lambda.config.blocks.EatConfig.Companion.reasonEating
+import com.lambda.config.editSetting
 import com.lambda.config.hideAllExcept
 import com.lambda.config.withEdits
 import com.lambda.event.events.TickEvent
@@ -46,6 +48,10 @@ object AutoEat : Module(
 		setDefaultAutomationConfig()
             .withEdits {
 			    hideAllExcept(::eatConfig)
+			    eatConfig.apply {
+				    ::minFoodLevel.editSetting { defaultValue(8) }
+				    ::saturated.editSetting { defaultValue(EatConfig.Saturation.EatUntilFull) }
+			    }
 		    }
 
         listen<TickEvent.Pre> {

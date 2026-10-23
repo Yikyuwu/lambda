@@ -18,6 +18,7 @@
 package com.lambda.module.modules.world
 
 import com.lambda.config.Group
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.hideAllExcept
 import com.lambda.config.settings.complex.Bind
@@ -97,6 +98,7 @@ object AutoVillagerCycle : Module(
 		setDefaultAutomationConfig()
 			.withEdits {
 				hideAllExcept(::rotationConfig, ::inventoryConfig, ::breakConfig, ::interactConfig, ::buildConfig)
+				grimPacing(breaksPerTick = 30, interactionsPerTick = null)
 			}
 
 		onEnable {

@@ -26,6 +26,38 @@ import tools.jackson.databind.JsonNode
 import tools.jackson.databind.node.ObjectNode
 
 object MigrationUtils {
+	/**
+	 * Writes the [old] defaults into an existing file where they aren't set, so a changed default doesn't change it.
+	 * Only what differs from the default is saved, so an unsaved setting would take the new one.
+	 * Configs map to setting paths below their "Settings", separated by "/", and the old value. Returns how many were written.
+	 */
+	fun keepOldDefaults(rootNode: ObjectNode, old: Map<String, Map<String, Any>>): Int {
+		var written = 0
+		old.forEach { (configName, settings) ->
+			val settingsNode = rootNode.childObject(configName)?.childObject("Settings") ?: return@forEach
+			settings.forEach settings@{ (path, value) ->
+				val keys = path.split("/")
+				val parent = keys.dropLast(1).fold(settingsNode as ObjectNode?) { node, key -> node?.childObject(key) } ?: return@settings
+				if (parent.has(keys.last())) return@settings
+				when (value) {
+					is Boolean -> parent.put(keys.last(), value)
+					is Int -> parent.put(keys.last(), value)
+					is Double -> parent.put(keys.last(), value)
+					else -> parent.put(keys.last(), value.toString())
+				}
+				written++
+			}
+		}
+		return written
+	}
+
+	/** The object at [key], created when missing. Null when something else is there. */
+	private fun ObjectNode.childObject(key: String): ObjectNode? = when (val node = get(key)) {
+		null -> putObject(key)
+		is ObjectNode -> node
+		else -> null
+	}
+
 	fun locateAndMoveMisplacedSettings(category: ConfigCategory, rootNode: ObjectNode): Int {
 		var settingsMoved = 0
 		category.configs.forEach { config ->

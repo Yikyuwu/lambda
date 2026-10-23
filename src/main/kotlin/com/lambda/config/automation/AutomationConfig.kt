@@ -19,15 +19,19 @@ package com.lambda.config.automation
 
 import com.lambda.config.Config
 import com.lambda.config.ConfigCategory
+import com.lambda.config.EditContext
 import com.lambda.config.Tab
 import com.lambda.config.blocks.BreakSettings
 import com.lambda.config.blocks.BuildSettings
 import com.lambda.config.blocks.EatSettings
 import com.lambda.config.blocks.HotbarSettings
+import com.lambda.config.blocks.InteractConfig.AirPlaceMode
 import com.lambda.config.blocks.InteractSettings
 import com.lambda.config.blocks.InventorySettings
 import com.lambda.config.blocks.RotationSettings
 import com.lambda.config.categories.AutomationCategory
+import com.lambda.config.editSetting
+import com.lambda.config.withEdits
 import com.lambda.context.Automated
 import com.lambda.module.Module
 
@@ -69,6 +73,23 @@ open class AutomationConfig(
 	        name: String
 		) = AutomationConfig("$name Automation Config").also { this.defaultAutomationConfig = it }
 
-		val DEFAULT = AutomationConfig("Default")
+		/**
+		 * Pacing that holds up on Grim servers like 2b2t: few pending actions, few breaks and places per tick, Grim air place.
+		 * A null keeps that setting's default.
+		 */
+		context(_: EditContext)
+		fun AutomationConfig.grimPacing(
+			maxPendingActions: Int? = 15,
+			breaksPerTick: Int? = 5,
+			airPlace: AirPlaceMode? = AirPlaceMode.Grim,
+			interactionsPerTick: Int? = 1,
+		) {
+			maxPendingActions?.let { value -> buildConfig::maxPendingActions.editSetting { defaultValue(value) } }
+			breaksPerTick?.let { value -> breakConfig::breaksPerTick.editSetting { defaultValue(value) } }
+			airPlace?.let { value -> interactConfig::airPlace.editSetting { defaultValue(value) } }
+			interactionsPerTick?.let { value -> interactConfig::interactionsPerTick.editSetting { defaultValue(value) } }
+		}
+
+		val DEFAULT = AutomationConfig("Default").withEdits { grimPacing() }
     }
 }

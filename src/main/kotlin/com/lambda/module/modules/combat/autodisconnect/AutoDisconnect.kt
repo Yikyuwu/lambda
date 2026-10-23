@@ -138,7 +138,7 @@ object AutoDisconnect : Module(
     private const val ENTITY_GROUP = "Entity Settings"
 
     @Tab(TRIGGERS_TAB) private val health by setting("Health", true, "Disconnect from the server when health is below the set limit.")
-    @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val minimumHealth by setting("Min Health", 10, 1..36, 1, "Set the minimum health threshold for disconnection.", unit = " half-hearts") { health }
+    @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val minimumHealth by setting("Min Health", 6, 1..36, 1, "Set the minimum health threshold for disconnection.", unit = " half-hearts") { health }
     @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val healthSmart by setting("Smart Toggle", true, "Stop re-triggering on health until it climbs back above the minimum.") { health }
     @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val reEnableThreshold by setting("Re-enable Threshold", 14, 1..36, 1, "Once health climbs above this, the Health trigger re-arms. Never lower than Min Health.", unit = " half-hearts") { health && healthSmart }
 
@@ -160,11 +160,11 @@ object AutoDisconnect : Module(
     @Tab(TRIGGERS_TAB) @Group(CREEPERS_GROUP) private val creeperSmart by setting("Smart Toggle", true, "Stop re-triggering on creepers until none are nearby.") { creeper }
 
     @Tab(TRIGGERS_TAB) private val totem by setting("Totem", false, "Disconnect if the number of Totems is below the required amount.")
-    @Tab(TRIGGERS_TAB) @Group(TOTEM_GROUP) private val minTotems by setting("Min Totems", 2, 1..10, 1, "Set the minimum number of Totems of Undying required to prevent disconnection.") { totem }
+    @Tab(TRIGGERS_TAB) @Group(TOTEM_GROUP) private val minTotems by setting("Min Totems", 1, 1..10, 1, "Set the minimum number of Totems of Undying required to prevent disconnection.") { totem }
     @Tab(TRIGGERS_TAB) @Group(TOTEM_GROUP) private val totemSmart by setting("Smart Toggle", true, "Stop re-triggering on totems until you're back above the minimum.") { totem }
 
-    @Tab(TRIGGERS_TAB) private val players by setting("Players", false, "Disconnect if a nearby player is detected within the set distance.")
-    @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val minPlayerDistance by setting("Player Distance", 64, 32..128, 4, "Set the distance to detect players for disconnection.") { players }
+    @Tab(TRIGGERS_TAB) private val players by setting("Players", true, "Disconnect if a nearby player is detected within the set distance.")
+    @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val minPlayerDistance by setting("Player Distance", 128, 32..128, 4, "Set the distance to detect players for disconnection.") { players }
     @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val ignoreFriends by setting("Ignore Friends", false, "Exclude friends from triggering player-based disconnections.") { players }
     @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val playersSmart by setting("Smart Toggle", false, "Stop re-triggering on players until none are within range.") { players }
 

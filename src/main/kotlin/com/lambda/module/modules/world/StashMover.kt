@@ -20,7 +20,9 @@ package com.lambda.module.modules.world
 import baritone.api.pathing.goals.GoalBlock
 import com.lambda.Lambda.mc
 import com.lambda.config.Tab
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
+import com.lambda.config.blocks.InteractConfig.AirPlaceMode
 import com.lambda.config.editTypedSettings
 import com.lambda.config.entries.Setting.Companion.onValueChange
 import com.lambda.config.hide
@@ -189,6 +191,7 @@ object StashMover : Module(
 				breakConfig.apply {
 					editTypedSettings(::suitableToolsOnly, ::efficientOnly) { defaultValue(false) }
 				}
+				grimPacing(breaksPerTick = 30, airPlace = AirPlaceMode.None, interactionsPerTick = null)
 			}
 
 		listen<ButtonEvent.Mouse.Click> { event ->

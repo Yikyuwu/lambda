@@ -23,6 +23,7 @@ import com.lambda.config.blocks.EntityColorSettings
 import com.lambda.config.blocks.EntitySelectionSettings
 import com.lambda.config.blocks.OutlineSettings
 import com.lambda.config.blocks.WorldLineSettings
+import com.lambda.config.editSetting
 import com.lambda.config.entries.Setting.Companion.onValueChange
 import com.lambda.config.forEachSetting
 import com.lambda.config.hide
@@ -82,6 +83,7 @@ object Esp : Module(
 		.withEdits {
 			forEachSetting { visibility { old -> { old() && mode == EspMode.Box && drawOutline } } }
 			hide(::startColor, ::endColor)
+			::screenWidthSetting.editSetting { defaultValue(10) }
 		}
 
 	@Tab(ENTITIES_TAB) private val entitySettings by configBlock(EntitySelectionSettings(this))

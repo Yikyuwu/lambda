@@ -78,7 +78,7 @@ object CrystalAura : Module(
     private const val RENDERING_TAB = "Rendering"
 
     @Tab(GENERAL_TAB) val rotate by setting("Rotate", true)
-    @Tab(GENERAL_TAB) private val updateMode by setting("Update Mode", UpdateMode.Ticked)
+    @Tab(GENERAL_TAB) private val updateMode by setting("Update Mode", UpdateMode.Async)
     @Tab(GENERAL_TAB) private val updateDelaySetting by setting("Update Delay", 25L, 5L..200L, 5L, unit = " ms") { updateMode == UpdateMode.Async }
     @Tab(GENERAL_TAB) private val maxUpdatesPerFrame by setting("Max Updates Per Frame", 5, 1..20, 1) { updateMode == UpdateMode.Async }
     @Tab(GENERAL_TAB) private val updateDelay get() = if (updateMode == UpdateMode.Async) updateDelaySetting else 0L

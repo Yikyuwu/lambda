@@ -17,8 +17,11 @@
 
 package com.lambda.module.modules.world
 
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.blocks.BreakConfig
+import com.lambda.config.blocks.HotbarConfig
+import com.lambda.config.editSetting
 import com.lambda.config.editTypedSettings
 import com.lambda.config.entries.Setting.Companion.onValueChange
 import com.lambda.config.settings.complex.Bind
@@ -75,6 +78,8 @@ object Nuker : Module(
 				buildConfig.apply {
 					editTypedSettings(::pathing) { defaultValue(false) }
 				}
+				grimPacing()
+				hotbarConfig::swapMode.editSetting { defaultValue(HotbarConfig.SwapMode.Permanent) }
 			}
 
 		onEnable {

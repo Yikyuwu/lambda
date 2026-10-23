@@ -19,6 +19,7 @@ package com.lambda.module.modules.world
 
 import baritone.api.pathing.goals.GoalBlock
 import com.lambda.config.Group
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.blocks.WorldLineSettings
 import com.lambda.config.editSetting
@@ -139,6 +140,7 @@ object AutoPortal : Module(
 				hotbarConfig::tickStageMask.editSetting {
 					defaultValue(mutableSetOf(TickEvent.Pre, TickEvent.Input.Post))
 				}
+				grimPacing(breaksPerTick = 30, interactionsPerTick = null)
 			}
 
 		listen<TickEvent.Pre> {

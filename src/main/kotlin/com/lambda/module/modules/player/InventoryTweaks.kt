@@ -17,6 +17,7 @@
 
 package com.lambda.module.modules.player
 
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.hideAllExcept
 import com.lambda.config.withEdits
@@ -54,6 +55,7 @@ object InventoryTweaks : Module(
         setDefaultAutomationConfig()
             .withEdits {
                 hideAllExcept(::breakConfig, ::interactConfig, ::inventoryConfig, ::hotbarConfig)
+                grimPacing(maxPendingActions = null)
             }
 
         listen<PlayerEvent.SlotClick> {

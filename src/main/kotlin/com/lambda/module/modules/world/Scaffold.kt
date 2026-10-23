@@ -17,6 +17,7 @@
 
 package com.lambda.module.modules.world
 
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.editSetting
 import com.lambda.config.editTypedSettings
@@ -69,7 +70,13 @@ object Scaffold : Module(
 					}
 					hide(::breakBlocks)
 				}
-				hotbarConfig::keepTicks.editSetting { defaultValue(0) }
+				hotbarConfig::keepTicks.editSetting { defaultValue(1) }
+				grimPacing(breaksPerTick = null)
+				rotationConfig.apply {
+					::instant.editSetting { defaultValue(false) }
+					::mean.editSetting { defaultValue(120.0) }
+					::spread.editSetting { defaultValue(0.0) }
+				}
 				hideAllExcept(::buildConfig, ::interactConfig, ::rotationConfig, ::hotbarConfig)
 			}
 

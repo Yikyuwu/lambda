@@ -18,6 +18,7 @@
 package com.lambda.module.modules.player
 
 import com.lambda.config.Group
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.blocks.BreakConfig.SwingMode
 import com.lambda.config.editSetting
@@ -130,6 +131,7 @@ object PacketMine : Module(
 					::swing.editSetting { defaultValue(SwingMode.Start) }
 				}
 				hotbarConfig::keepTicks.editSetting { defaultValue(0) }
+				grimPacing(airPlace = null, interactionsPerTick = null)
 			}
 
 		listen<TickEvent.Post> {

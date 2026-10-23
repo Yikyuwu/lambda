@@ -17,6 +17,7 @@
 
 package com.lambda.module.modules.player
 
+import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.editSetting
 import com.lambda.config.editTypedSettings
@@ -80,6 +81,7 @@ object FastBreak : Module(
 					hide(::sorter, ::unsafeCancels)
 				}
 				hotbarConfig::tickStageMask.editSetting { defaultValue(mutableSetOf(TickEvent.Input.Post)); hide() }
+				grimPacing(breaksPerTick = null, airPlace = null, interactionsPerTick = null)
 			}
 
 		listen<PlayerEvent.Attack.Block> { it.cancel() }
