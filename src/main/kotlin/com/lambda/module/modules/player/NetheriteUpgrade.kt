@@ -43,7 +43,7 @@ import net.minecraft.util.math.BlockPos
 @Suppress("unused")
 object NetheriteUpgrade : Module(
     name = "NetheriteUpgrade",
-    description = "Upgrades diamond items to netherite at a smithing table, fed from chests",
+    description = "Upgrades diamond items to netherite at a smithing table, from chests or what you carry",
     tag = ModuleTag.PLAYER,
 ), UpgradeConfig {
     private val setup by setting("Setup", { clickSetup.toggle() }, "Set the chests and the smithing table by clicking them")
