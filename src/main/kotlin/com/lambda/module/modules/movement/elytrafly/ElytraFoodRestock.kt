@@ -63,12 +63,16 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
 
     private var task: Task<*>? = null
     private var retryTicks = 0
+    /** Ticks since it last ate, see [EAT_WAIT_TICKS]. */
+    private var eatWait = 0
     private var announced = false
     /** A restock failed, so it's not tried again until ElytraFly is turned on again. */
     private var failed = false
 
     fun SafeContext.tick() {
         if (retryTicks > 0) retryTicks--
+        if (player.isUsingItem && isFood(player.activeItem)) eatWait = EAT_WAIT_TICKS
+        else if (eatWait > 0) eatWait--
         task?.let {
             // Picks its shulker or the ender chest back up, so nobody can take it.
             if (it.isActive && with(FlightStop) { hasDanger(mobRadius) }) it.stopSafely()
@@ -76,7 +80,8 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
             // Ended without its callbacks, e.g. cancelled.
             end()
         }
-        val needed = enabled && !failed && retryTicks <= 0 && isLow() && (carriesFoodShulker() || canUseEnderChest())
+        // Eating first, else each bite would be a trip of its own.
+        val needed = enabled && !failed && retryTicks <= 0 && eatWait <= 0 && isLow() && (carriesFoodShulker() || canUseEnderChest())
         if (needed && !announced) info("Food runs low, looking for a safe spot to restock")
         announced = needed
         if (!needed) return FlightStop.release(this@ElytraFoodRestock)
@@ -86,6 +91,7 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
     fun reset() {
         failed = false
         retryTicks = 0
+        eatWait = 0
     }
 
     /** Stops a restock, which first picks its shulker or the ender chest back up. */
@@ -142,5 +148,7 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
     private companion object {
         const val FOOD_TARGET = 64
         const val SWAP_DELAY = 5
+        /** How long after eating it waits before restocking, in case another bite follows. */
+        const val EAT_WAIT_TICKS = 40
     }
 }
