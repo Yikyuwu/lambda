@@ -53,22 +53,46 @@ object NetheriteUpgrade : Module(
     private var ingotChest by setting("Ingot Chest", BlockPos.ORIGIN, "Chest to take netherite ingots from. At 0 0 0 only carried ones are used")
     private var dumpChest by setting("Dump Chest", BlockPos.ORIGIN, "Chest to put upgraded items into. At 0 0 0 they stay in the inventory")
     private var smithingTable by setting("Smithing Table", BlockPos.ORIGIN, "Smithing table to use. At 0 0 0 it uses the closest one")
-    private val upgrade by setting("Upgrade", Upgrade.Pickaxes, "Diamond items to upgrade")
+    private val upgrade by setting("Upgrade", Upgrade.SpecificItem, "Diamond items to upgrade")
+    private val item by setting("Item", UpgradeItem.Pickaxe, "The one kind of diamond item to upgrade") { upgrade == Upgrade.SpecificItem }
     override val maxItems by setting("Max Items", 27, 1..34, 1, "Most diamond items to take per trip")
     override val moveDelay by setting("Move Delay", 10, 2..40, 1, "Ticks between inventory clicks", " ticks")
     private val dumpDamaged by setting("Dump Damaged", true, "Also dump damaged upgraded items instead of keeping them")
     override val returnLeftovers by setting("Return Leftovers", true, "Put leftover templates and ingots back when done")
 
+    enum class Kind { Tool, Weapon, Armor }
+
     enum class Upgrade(
         override val displayName: String,
         override val description: String,
-        val items: Map<Item, Item>,
+        val kinds: Set<Kind>,
     ) : NamedEnum, Describable {
-        Pickaxes("Pickaxes", "Only pickaxes", mapOf(Items.DIAMOND_PICKAXE to Items.NETHERITE_PICKAXE)),
-        Tools("Tools", "Pickaxes, axes, shovels, hoes and swords", TOOLS),
-        Armor("Armor", "Only armor", ARMOR),
-        ToolsAndArmor("Tools And Armor", "All tools and armor", TOOLS + ARMOR),
+        Tools("Tools", "Pickaxes, axes, shovels and hoes", setOf(Kind.Tool)),
+        Weapons("Weapons", "Swords and spears", setOf(Kind.Weapon)),
+        Armor("Armor", "Helmets, chestplates, leggings and boots", setOf(Kind.Armor)),
+        ToolsAndWeapons("Tools And Weapons", "All tools and weapons", setOf(Kind.Tool, Kind.Weapon)),
+        ToolsAndArmor("Tools And Armor", "All tools and armor", setOf(Kind.Tool, Kind.Armor)),
+        WeaponsAndArmor("Weapons And Armor", "All weapons and armor", setOf(Kind.Weapon, Kind.Armor)),
+        Everything("Everything", "All tools, weapons and armor", Kind.entries.toSet()),
+        SpecificItem("Specific Item", "Only the kind of item picked below", emptySet()),
     }
+
+    enum class UpgradeItem(override val displayName: String, val kind: Kind, val diamond: Item, val netherite: Item) : NamedEnum {
+        Pickaxe("Pickaxe", Kind.Tool, Items.DIAMOND_PICKAXE, Items.NETHERITE_PICKAXE),
+        Axe("Axe", Kind.Tool, Items.DIAMOND_AXE, Items.NETHERITE_AXE),
+        Shovel("Shovel", Kind.Tool, Items.DIAMOND_SHOVEL, Items.NETHERITE_SHOVEL),
+        Hoe("Hoe", Kind.Tool, Items.DIAMOND_HOE, Items.NETHERITE_HOE),
+        Sword("Sword", Kind.Weapon, Items.DIAMOND_SWORD, Items.NETHERITE_SWORD),
+        Spear("Spear", Kind.Weapon, Items.DIAMOND_SPEAR, Items.NETHERITE_SPEAR),
+        Helmet("Helmet", Kind.Armor, Items.DIAMOND_HELMET, Items.NETHERITE_HELMET),
+        Chestplate("Chestplate", Kind.Armor, Items.DIAMOND_CHESTPLATE, Items.NETHERITE_CHESTPLATE),
+        Leggings("Leggings", Kind.Armor, Items.DIAMOND_LEGGINGS, Items.NETHERITE_LEGGINGS),
+        Boots("Boots", Kind.Armor, Items.DIAMOND_BOOTS, Items.NETHERITE_BOOTS),
+    }
+
+    /** The kinds of items picked by [upgrade] and [item]. */
+    private val upgradeItems
+        get() = if (upgrade == Upgrade.SpecificItem) listOf(item) else UpgradeItem.entries.filter { it.kind in upgrade.kinds }
 
     private var upgradeTask: Task<*>? = null
 
@@ -132,9 +156,9 @@ object NetheriteUpgrade : Module(
         }
     }
 
-    override fun isDiamond(stack: ItemStack) = stack.item in upgrade.items.keys
+    override fun isDiamond(stack: ItemStack) = upgradeItems.any { stack.isOf(it.diamond) }
 
-    override fun isUpgraded(stack: ItemStack) = stack.item in upgrade.items.values
+    override fun isUpgraded(stack: ItemStack) = upgradeItems.any { stack.isOf(it.netherite) }
 
     override fun shouldDump(stack: ItemStack) = isUpgraded(stack) && (dumpDamaged || !stack.isDamaged)
 
@@ -144,18 +168,3 @@ object NetheriteUpgrade : Module(
 
     private const val SEARCH_RADIUS = 6
 }
-
-private val TOOLS = mapOf(
-    Items.DIAMOND_PICKAXE to Items.NETHERITE_PICKAXE,
-    Items.DIAMOND_AXE to Items.NETHERITE_AXE,
-    Items.DIAMOND_SHOVEL to Items.NETHERITE_SHOVEL,
-    Items.DIAMOND_HOE to Items.NETHERITE_HOE,
-    Items.DIAMOND_SWORD to Items.NETHERITE_SWORD,
-)
-
-private val ARMOR = mapOf(
-    Items.DIAMOND_HELMET to Items.NETHERITE_HELMET,
-    Items.DIAMOND_CHESTPLATE to Items.NETHERITE_CHESTPLATE,
-    Items.DIAMOND_LEGGINGS to Items.NETHERITE_LEGGINGS,
-    Items.DIAMOND_BOOTS to Items.NETHERITE_BOOTS,
-)
