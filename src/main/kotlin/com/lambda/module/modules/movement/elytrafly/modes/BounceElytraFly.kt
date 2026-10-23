@@ -54,6 +54,7 @@ import net.minecraft.network.packet.Packet
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket
 import net.minecraft.util.PlayerInput
+import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Vec2f
 import net.minecraft.util.math.Vec3d
 import net.minecraft.world.World
@@ -82,6 +83,9 @@ class BounceElytraFly(
 		private const val MIN_CHUNK_STOP_DISTANCE = 12.0
 		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
 		private const val SLOW_PITCH = -10.0
+		/** Under a roof this low it flies no faster than [LOW_ROOF_SPEED], about 21 blocks a second. */
+		private const val LOW_ROOF_HEIGHT = 4
+		private const val LOW_ROOF_SPEED = 1.05
 		/** Most the pitch turns a tick when slowing down or coasting. */
 		private const val MAX_PITCH_STEP = 15.0
 		/** Slowest it slows down to, below that a glide almost stalls. */
@@ -479,7 +483,13 @@ class BounceElytraFly(
 		// again, else it flips between slowing down and flying on at the margin.
 		usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
 		laggingChunks = loaded < usualLoaded - if (laggingChunks) CHUNK_LAG_END_MARGIN else CHUNK_LAG_MARGIN
-		val safeSpeed = if (laggingChunks) ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE
+		// Under a low roof every fast bounce goes right up to it, and the server sets you back for that more often.
+		val lowRoof = hasLowRoof()
+		val limited = laggingChunks || lowRoof
+		val safeSpeed = min(
+			if (laggingChunks) ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE,
+			if (lowRoof) LOW_ROOF_SPEED else Double.MAX_VALUE,
+		)
 		val stopDistance = max(MIN_CHUNK_STOP_DISTANCE, speed * CHUNK_STOP_TICKS)
 
 		// Each holds a bit longer than it starts, else it flips back and forth.
@@ -489,20 +499,26 @@ class BounceElytraFly(
 			pace == ChunkPace.Waiting && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS -> ChunkPace.Waiting
 			missing != null && missing <= stopDistance + if (pace == ChunkPace.Waiting) CHUNK_MARGIN else 0.0 -> ChunkPace.Waiting
 			// Never slower than a glide holds, almost stalled up there the server sets you back.
-			speed < MIN_PACE_SPEED -> if (laggingChunks) ChunkPace.Throttled else ChunkPace.Free
+			speed < MIN_PACE_SPEED -> if (limited) ChunkPace.Throttled else ChunkPace.Free
 			speed > safeSpeed * if (pace == ChunkPace.Slowing) SLOW_UNTIL else 1.0 -> ChunkPace.Slowing
 			speed > safeSpeed * if (pace == ChunkPace.Coasting) FLY_BELOW else COAST_ABOVE -> ChunkPace.Coasting
-			laggingChunks -> ChunkPace.Throttled
+			limited -> ChunkPace.Throttled
 			else -> ChunkPace.Free
 		}
 		// Nearing the safe speed, the bounces flatten out so it eases into it, not past it.
 		chunkThrottle = (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
 		if (next != pace) ElytraFly.debug {
 			"${next.description}: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead, usually %.0f, at %.2f a tick, safe %s".format(
-				usualLoaded, speed, if (laggingChunks) "%.2f".format(safeSpeed) else "any",
+				usualLoaded, speed, if (limited) "%.2f".format(safeSpeed) + (if (lowRoof) " low roof" else "") else "any",
 			)
 		}
 		pace = next
+	}
+
+	/** A block within [LOW_ROOF_HEIGHT] above the floor you bounce on, e.g. a tunnel or the nether's bedrock roof. */
+	private fun SafeContext.hasLowRoof(): Boolean {
+		val floor = BlockPos.ofFloored(player.x, groundY, player.z)
+		return (1..LOW_ROOF_HEIGHT).any { !world.getBlockState(floor.up(it)).getCollisionShape(world, floor.up(it)).isEmpty }
 	}
 
 	/**
