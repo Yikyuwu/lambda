@@ -186,7 +186,8 @@ class BounceElytraFly(
 				rotationRequest {
 					when {
 						// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
-						isBraking -> pitch(90.0)
+						// Also right before chunks that aren't loaded yet, gliding on would carry you into them.
+						isBraking || waitingForChunks -> pitch(90.0)
 						// Holding the height over an obstacle instead of bouncing into it.
 						hold != null -> pitch(hold)
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
@@ -267,6 +268,13 @@ class BounceElytraFly(
 			// AutoArmor keeps you standing still meanwhile.
 			if (AutoArmor.pausesFlight) return@listen
 			val playerInput = input.playerInput
+
+			// Stands still right before chunks that aren't loaded yet, walking on would take you into them too.
+			if (waitingForChunks && !BaritoneHandler.isActive) {
+				input.playerInput = PlayerInput(false, false, false, false, false, playerInput.sneak, false)
+				input.movementVector = Vec2f.ZERO
+				return@listen
+			}
 
 			if (sneakLeft || sneakRight) {
 				val sneak = player.velocity.horizontal.length() > 0.001 || !player.isSneaking
@@ -383,7 +391,7 @@ class BounceElytraFly(
 
 	/**
 	 * Coasts while a chunk up to [chunkLookAhead] blocks ahead isn't loaded yet,
-	 * and stops bouncing once it's within [CHUNK_STOP_DISTANCE].
+	 * and lands and stands still once it's within [CHUNK_STOP_DISTANCE].
 	 */
 	private fun SafeContext.updateWaitingForChunks() {
 		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
