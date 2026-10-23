@@ -417,7 +417,7 @@ class BounceElytraFly(
 
 	/**
 	 * Flies only so fast that the loaded chunks ahead last [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the
-	 * unloaded ones are. Faster than that it stops sprinting and slows down while bouncing on, a bit below it coasts, and
+	 * unloaded ones are, and never faster than [chunkLookAhead] allows since slowing down takes long. Faster than that it stops sprinting and slows down while bouncing on, a bit below it coasts, and
 	 * well below it flies on.
 	 * Only when they come within stopping distance after all it lands and stands still.
 	 */
@@ -428,7 +428,10 @@ class BounceElytraFly(
 		}?.toDouble()
 		val speed = player.velocity.dotProduct(ahead).coerceAtLeast(0.0)
 		val stopDistance = max(MIN_CHUNK_STOP_DISTANCE, speed * CHUNK_STOP_TICKS)
-		val safeSpeed = missing?.let { ((it - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0) } ?: Double.MAX_VALUE
+		// All loaded only means as far as it looks, past that they may be missing too. Speeding up beyond what that allows,
+		// slowing down again takes too long.
+		val loaded = missing ?: if (waitForChunks) chunkLookAhead + CHUNK_CHECK_STEP.toDouble() else Double.MAX_VALUE
+		val safeSpeed = ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0)
 		// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
 		if (!waitingForChunks || !player.isOnGround) landedTicks = 0
 		val ending = waitingForChunks && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS
@@ -445,7 +448,7 @@ class BounceElytraFly(
 			}
 			"$state: %s ahead at %.2f a tick, safe %s".format(
 				missing?.let { "%.0f".format(it) } ?: "all loaded", speed,
-				if (missing == null) "any" else "%.2f".format(safeSpeed),
+				"%.2f".format(safeSpeed),
 			)
 		}
 		waitingForChunks = waiting
