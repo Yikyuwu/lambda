@@ -77,7 +77,6 @@ class BounceElytraFly(
 		private const val MAX_FAKE_LAG_TICKS = 10
 		private const val MAX_TAKEOFF_WAIT_TICKS = 10
 		private const val CHUNK_CHECK_STEP = 8
-		private const val CHUNK_STOP_DISTANCE = 24
 		private const val COAST_PITCH = 0.0
 		/** How far above the flight line flying level may carry you. */
 		private const val MAX_COAST_RISE = 2.0
@@ -104,7 +103,7 @@ class BounceElytraFly(
 	private val fakeLag by c.setting("Fake Lag", true, "Emulates the player lagging to allow flying in 1x2 tunnels")
 		.onValueChange { _, to -> if (!to) flushPackets() }
 	private val waitForChunks by c.setting("Wait For Chunks", true, "Slows down while the chunks ahead aren't loaded yet and stops right before them, the server sets you back for flying into them")
-	private val chunkLookAhead by c.setting("Chunk Look-Ahead", 48, 8..96, 8, "How far ahead the chunks must be loaded to keep speeding up", " blocks") { waitForChunks }
+	private val chunkLookAhead by c.setting("Chunk Look-Ahead", 64, 16..128, 8, "How far ahead the chunks must be loaded to keep speeding up. Within half of it, it lands and waits until all of them are loaded", " blocks") { waitForChunks }
 
 	@Group(Y_MOTION_GROUP) val yMotionSetting by c.setting("Y Motion", false, "Cancels the players y velocity to aid speed")
 	@Group(Y_MOTION_GROUP) val onlyOnDiagonal: Boolean by c.setting("Only On Diagonal", true, "Only use y motion when the player is flying on a non-axial angle") { yMotionSetting }
@@ -391,14 +390,15 @@ class BounceElytraFly(
 
 	/**
 	 * Coasts while a chunk up to [chunkLookAhead] blocks ahead isn't loaded yet,
-	 * and lands and stands still once it's within [CHUNK_STOP_DISTANCE].
+	 * and lands and stands still once it's within half of that.
 	 */
 	private fun SafeContext.updateWaitingForChunks() {
 		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
 		val missing = if (!waitForChunks) null else (CHUNK_CHECK_STEP..chunkLookAhead step CHUNK_CHECK_STEP).firstOrNull { distance ->
 			!player.pos.add(ahead.multiply(distance.toDouble())).isLoaded
 		}
-		val waiting = missing != null && missing <= CHUNK_STOP_DISTANCE
+		// Once waiting, until all of them are loaded, else it bounces on as soon as the closest one is in and waits again.
+		val waiting = missing != null && (waitingForChunks || missing <= chunkLookAhead / 2)
 		val coast = missing != null && !waiting
 		if (waiting != waitingForChunks || coast != coasting) ElytraFly.debug {
 			when {
