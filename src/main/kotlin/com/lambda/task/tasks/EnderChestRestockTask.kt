@@ -83,8 +83,8 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
         Placing("placing the ender chest", 400),
         Opening("opening the ender chest", 200),
         Taking("taking items", 200),
-        // The restock times out by itself.
-        RestockingTools("restocking tools", null),
+        // What runs then, e.g. a tool restock or mending, times out by itself.
+        BeforeBreaking("using what was taken", null),
         MakingRoom("making room for the ender chest", 100),
         Breaking("breaking the ender chest", 400),
         PickingUp("picking up the ender chest", 300),
@@ -122,15 +122,15 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
             Phase.Taking -> containerStep(onDone = { collect() }) { take(it) }
             Phase.MakingRoom -> makeRoom()
             Phase.PickingUp -> pickUp()
-            Phase.Placing, Phase.Opening, Phase.RestockingTools, Phase.Breaking -> {}
+            Phase.Placing, Phase.Opening, Phase.BeforeBreaking, Phase.Breaking -> {}
         }
     }
 
 
     override fun SafeContext.packUp() = when {
         phase == Phase.Placing || phase in COLLECT_PHASES -> true
-        // The tool restock picks its shulker back up first, then the ender chest is broken.
-        phase == Phase.RestockingTools -> {
+        // What runs then, e.g. a tool restock or mending, picks its shulker back up first, then the ender chest is broken.
+        phase == Phase.BeforeBreaking -> {
             currentStep.stopSafely()
             // Nothing of it was placed, so it just ended.
             if (currentStep?.isActive != true) {
@@ -196,7 +196,7 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
         if (!ranBeforeBreaking && !stopping) {
             ranBeforeBreaking = true
             beforeBreaking()?.let { task ->
-                enter(Phase.RestockingTools)
+                enter(Phase.BeforeBreaking)
                 return runStep(task) { enter(Phase.MakingRoom) }
             }
         }
@@ -281,7 +281,7 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
                 warn("Failed while taking items ($reason)")
                 collect()
             }
-            Phase.RestockingTools -> {
+            Phase.BeforeBreaking -> {
                 beforeBreakingFailure = reason
                 enter(Phase.MakingRoom)
             }
@@ -292,7 +292,7 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     }
 
     private fun SafeContext.finish() {
-        beforeBreakingFailure?.let { return failure("Failed while restocking tools ($it)") }
+        beforeBreakingFailure?.let { return failure("Failed while using what was taken from the ender chest ($it)") }
         val took = allWants.mapNotNull { want -> taken[want]?.let { "$it stack(s) for ${want.name}" } }
         if (took.isEmpty()) warn("Found nothing to take in the ender chest")
         else info("Took ${took.joinToString()} from the ender chest")
