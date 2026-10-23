@@ -73,6 +73,13 @@ class ClickSetup(
         module.info("Setup cancelled")
     }
 
+    /** Sets every position back to 0 0 0, so the module finds them itself again. */
+    fun reset() {
+        cancel()
+        steps.forEach { it.property.set(BlockPos.ORIGIN) }
+        module.info("Positions reset to 0 0 0")
+    }
+
     /** Cancels a running setup, or turns the module off and starts one. */
     fun toggle() {
         if (isActive) return cancel()
