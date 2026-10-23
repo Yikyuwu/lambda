@@ -280,14 +280,6 @@ class BounceElytraFly(
 			val input = event.input
 			val playerInput = input.playerInput
 
-			// The bounces are sprint jumps, each pushes you on. Without sprinting drag slows you down for the chunks ahead.
-			if (slowingForChunks) {
-				player.isSprinting = false
-				input.playerInput = PlayerInput(
-					playerInput.forward, playerInput.backward, playerInput.left, playerInput.right, playerInput.jump, playerInput.sneak, false
-				)
-			}
-
 			// Stands still right before chunks that aren't loaded yet, walking on would take you into them too.
 			if (waitingForChunks && !BaritoneHandler.isActive) {
 				input.playerInput = PlayerInput(false, false, false, false, false, playerInput.sneak, false)
@@ -411,8 +403,9 @@ class BounceElytraFly(
 
 	/**
 	 * Flies only so fast that the loaded chunks ahead last [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the
-	 * unloaded ones are, and never faster than [chunkLookAhead] allows since slowing down takes long. Faster than that it stops sprinting and slows down while bouncing on, a bit below it coasts, and
-	 * well below it flies on.
+	 * unloaded ones are, and never faster than [chunkLookAhead] allows since slowing down takes long. Faster than that or
+	 * a bit below it coasts, flying level so the bounces don't speed it up, and well below it flies on. Not sprinting would
+	 * slow it down more, but sprint changes around a bounce get you set back.
 	 * Only when they come within stopping distance after all it lands and stands still.
 	 */
 	private fun SafeContext.updateWaitingForChunks() {
