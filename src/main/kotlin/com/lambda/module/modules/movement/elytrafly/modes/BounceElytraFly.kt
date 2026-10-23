@@ -95,6 +95,10 @@ class BounceElytraFly(
 		/** Coasting from this share of the safe speed, and flying on again below the other. */
 		private const val COAST_ABOVE = 0.8
 		private const val FLY_BELOW = 0.7
+		/** How much less than usually loaded ahead counts as the server lagging. */
+		private const val CHUNK_LAG_MARGIN = 16.0
+		/** How fast the usual distance is forgotten, half a block a second, so a turn doesn't count as lag for long. */
+		private const val USUAL_LOADED_DECAY = 0.025
 		/** How much more has to be loaded to stop coasting or waiting again. */
 		private const val CHUNK_MARGIN = 16.0
 		/** Most ticks to wait for the server to end the glide after landing from a wait. */
@@ -165,6 +169,8 @@ class BounceElytraFly(
 	private var slowingForChunks = false
 	/** How much of the bounce pitch to use while chunks are missing ahead, from 0 for level to 1 for all of it. */
 	private var chunkThrottle: Double? = null
+	/** How far ahead the chunks are usually loaded, forgotten slowly. */
+	private var usualLoaded = 0.0
 	private var landedTicks = 0
 	private var hitRoof = false
 
@@ -354,6 +360,7 @@ class BounceElytraFly(
 		onEnable {
 			waitingForChunks = false
 			slowingForChunks = false
+			usualLoaded = 0.0
 			coasting = false
 			hitRoof = false
 			// The floor below when started in the air, else packets would be held back up there.
@@ -429,11 +436,11 @@ class BounceElytraFly(
 	}
 
 	/**
-	 * Flies only so fast that the loaded chunks ahead last [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the
-	 * unloaded ones are, and never faster than [chunkLookAhead] allows since slowing down takes long. Faster than that it
-	 * looks up, which turns speed into climbing, a bit below it coasts level, and well below it flies on. Only when they
-	 * come within stopping distance after all it lands and stands still. Not sprinting would slow it down too, but sprint
-	 * changes around a bounce get you set back.
+	 * While the server lags, with fewer chunks loaded ahead than usual, it flies only so fast that the loaded ones last
+	 * [CHUNK_SAFE_TICKS] of flight, so it goes slower the closer the unloaded ones are. Else it flies like always.
+	 * Faster than that safe speed it climbs and glides high, a bit below it keeps its height, and well below it bounces on.
+	 * Only when they come within stopping distance after all it lands and stands still, lagging or not. Not sprinting
+	 * would slow it down too, but sprint changes around a bounce get you set back.
 	 */
 	private fun SafeContext.updateChunkSpeed() {
 		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
@@ -442,10 +449,12 @@ class BounceElytraFly(
 		}?.toDouble()
 		val speed = player.velocity.dotProduct(ahead).coerceAtLeast(0.0)
 		val stopDistance = max(MIN_CHUNK_STOP_DISTANCE, speed * CHUNK_STOP_TICKS)
-		// All loaded only means as far as it looks, past that they may be missing too. Speeding up beyond what that allows,
-		// slowing down again takes too long.
-		val loaded = missing ?: if (waitForChunks) chunkLookAhead + CHUNK_CHECK_STEP.toDouble() else Double.MAX_VALUE
-		val safeSpeed = ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0)
+		// How far the chunks usually reach ahead, the server's view distance or the look-ahead. Only when they fall behind
+		// that the server lags and it slows down, else it flies like always.
+		val loaded = missing ?: (chunkLookAhead + CHUNK_CHECK_STEP).toDouble()
+		usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
+		val lagging = waitForChunks && loaded < usualLoaded - CHUNK_LAG_MARGIN
+		val safeSpeed = if (!lagging) Double.MAX_VALUE else ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0)
 		// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
 		if (!waitingForChunks || !player.isOnGround) landedTicks = 0
 		val ending = waitingForChunks && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS
@@ -460,13 +469,15 @@ class BounceElytraFly(
 				coast -> "Coasting, near the safe speed"
 				else -> "Flying on"
 			}
-			"$state: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead at %.2f a tick, safe %.2f".format(speed, safeSpeed)
+			"$state: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead, usually %.0f, at %.2f a tick, safe %s".format(
+				usualLoaded, speed, if (lagging) "%.2f".format(safeSpeed) else "any",
+			)
 		}
 		waitingForChunks = waiting
 		slowingForChunks = slow
 		coasting = coast
 		// Nearing the safe speed with chunks missing ahead, the bounces flatten out so it eases into it, not past it.
-		chunkThrottle = if (missing == null || waiting || slow || coast) null
+		chunkThrottle = if (!lagging || waiting || slow || coast) null
 		else (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
 	}
 
