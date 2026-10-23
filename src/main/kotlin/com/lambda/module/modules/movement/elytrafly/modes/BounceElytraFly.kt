@@ -164,12 +164,25 @@ class BounceElytraFly(
 	private var groundY = 0.0
 	private var queuedTicks = 0
 	private var takeoffWait = 0
-	private var waitingForChunks = false
-	private var coasting = false
-	/** Faster than the chunks ahead allow, so it slows down while bouncing on. */
-	private var slowingForChunks = false
-	/** How much of the bounce pitch to use while chunks are missing ahead, from 0 for level to 1 for all of it. */
-	private var chunkThrottle: Double? = null
+	/** How fast the chunks ahead let it fly, see [updateChunkSpeed]. */
+	private enum class ChunkPace(val description: String) {
+		Free("Flying on"),
+		/** Lagging but well below the safe speed, the bounces flatten out as it nears it. */
+		Throttled("Flying on, easing into the safe speed"),
+		/** A bit below the safe speed, keeping its height so the bounces don't push it on. */
+		Coasting("Coasting, near the safe speed"),
+		/** Faster than the safe speed, climbing to slow down. */
+		Slowing("Slowing down for the chunks"),
+		/** They're within stopping distance, landed until enough more are loaded. */
+		Waiting("Waiting for the chunks"),
+	}
+
+	private var pace = ChunkPace.Free
+	private val waitingForChunks get() = pace == ChunkPace.Waiting
+	private val slowingForChunks get() = pace == ChunkPace.Slowing
+	private val coasting get() = pace == ChunkPace.Coasting
+	/** How much of the bounce pitch to use while [ChunkPace.Throttled], from 0 for level to 1 for all of it. */
+	private var chunkThrottle = 1.0
 	/** How far ahead the chunks are usually loaded, forgotten slowly. */
 	private var usualLoaded = 0.0
 	private var laggingChunks = false
@@ -360,11 +373,9 @@ class BounceElytraFly(
 		onFlag { pauseTimer.reset() }
 
 		onEnable {
-			waitingForChunks = false
-			slowingForChunks = false
+			pace = ChunkPace.Free
 			usualLoaded = 0.0
 			laggingChunks = false
-			coasting = false
 			hitRoof = false
 			// The floor below when started in the air, else packets would be held back up there.
 			groundY = startPos.y
@@ -446,51 +457,52 @@ class BounceElytraFly(
 	 * would slow it down too, but sprint changes around a bounce get you set back.
 	 */
 	private fun SafeContext.updateChunkSpeed() {
+		if (!waitForChunks) {
+			pace = ChunkPace.Free
+			return
+		}
 		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
-		val missing = if (!waitForChunks) null else (CHUNK_CHECK_STEP..chunkLookAhead step CHUNK_CHECK_STEP).firstOrNull { distance ->
+		val missing = (CHUNK_CHECK_STEP..chunkLookAhead step CHUNK_CHECK_STEP).firstOrNull { distance ->
 			!player.pos.add(ahead.multiply(distance.toDouble())).isLoaded
 		}?.toDouble()
-		val speed = player.velocity.dotProduct(ahead).coerceAtLeast(0.0)
-		val stopDistance = max(MIN_CHUNK_STOP_DISTANCE, speed * CHUNK_STOP_TICKS)
-		// How far the chunks usually reach ahead, the server's view distance or the look-ahead. Only when they fall behind
-		// that the server lags and it slows down, else it flies like always.
 		val loaded = missing ?: (chunkLookAhead + CHUNK_CHECK_STEP).toDouble()
+		val speed = player.velocity.dotProduct(ahead).coerceAtLeast(0.0)
+
+		// How far the chunks usually reach ahead, the server's view distance or the look-ahead. Only when they fall behind
+		// that the server lags and it slows down, else it flies like always. It lags until nearly as many are loaded
+		// again, else it flips between slowing down and flying on at the margin.
 		usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
-		// Lags until nearly as many are loaded again, else it flips between slowing down and flying on at the margin.
-		val lagging = waitForChunks && loaded < usualLoaded - if (laggingChunks) CHUNK_LAG_END_MARGIN else CHUNK_LAG_MARGIN
-		laggingChunks = lagging
-		val safeSpeed = if (!lagging) Double.MAX_VALUE else ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0)
-		// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
-		if (!waitingForChunks || !player.isOnGround) landedTicks = 0
-		val ending = waitingForChunks && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS
-		val waiting = ending || missing != null && missing <= stopDistance + if (waitingForChunks) CHUNK_MARGIN else 0.0
-		// Each holds a bit longer than it starts, else it flips back and forth around the safe speed.
-		val slow = !waiting && speed > safeSpeed * if (slowingForChunks) SLOW_UNTIL else 1.0
-		val coast = !waiting && !slow && speed > safeSpeed * if (coasting) FLY_BELOW else COAST_ABOVE
-		if (waiting != waitingForChunks || slow != slowingForChunks || coast != coasting) ElytraFly.debug {
-			val state = when {
-				waiting -> "Waiting for the chunks"
-				slow -> "Slowing down for the chunks"
-				coast -> "Coasting, near the safe speed"
-				else -> "Flying on"
-			}
-			"$state: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead, usually %.0f, at %.2f a tick, safe %s".format(
-				usualLoaded, speed, if (lagging) "%.2f".format(safeSpeed) else "any",
+		laggingChunks = loaded < usualLoaded - if (laggingChunks) CHUNK_LAG_END_MARGIN else CHUNK_LAG_MARGIN
+		val safeSpeed = if (laggingChunks) ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0) else Double.MAX_VALUE
+		val stopDistance = max(MIN_CHUNK_STOP_DISTANCE, speed * CHUNK_STOP_TICKS)
+
+		// Each holds a bit longer than it starts, else it flips back and forth.
+		if (pace != ChunkPace.Waiting || !player.isOnGround) landedTicks = 0
+		val next = when {
+			// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
+			pace == ChunkPace.Waiting && player.isOnGround && player.getFlag(Entity.GLIDING_FLAG_INDEX) && ++landedTicks < MAX_LANDED_TICKS -> ChunkPace.Waiting
+			missing != null && missing <= stopDistance + if (pace == ChunkPace.Waiting) CHUNK_MARGIN else 0.0 -> ChunkPace.Waiting
+			speed > safeSpeed * if (pace == ChunkPace.Slowing) SLOW_UNTIL else 1.0 -> ChunkPace.Slowing
+			speed > safeSpeed * if (pace == ChunkPace.Coasting) FLY_BELOW else COAST_ABOVE -> ChunkPace.Coasting
+			laggingChunks -> ChunkPace.Throttled
+			else -> ChunkPace.Free
+		}
+		// Nearing the safe speed, the bounces flatten out so it eases into it, not past it.
+		chunkThrottle = (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
+		if (next != pace) ElytraFly.debug {
+			"${next.description}: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead, usually %.0f, at %.2f a tick, safe %s".format(
+				usualLoaded, speed, if (laggingChunks) "%.2f".format(safeSpeed) else "any",
 			)
 		}
-		waitingForChunks = waiting
-		slowingForChunks = slow
-		coasting = coast
-		// Nearing the safe speed with chunks missing ahead, the bounces flatten out so it eases into it, not past it.
-		chunkThrottle = if (!lagging || waiting || slow || coast) null
-		else (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
+		pace = next
 	}
 
 	/**
 	 * [bounce] flattened towards [level] by [chunkThrottle]. Looking down less you glide longer and bounce less often,
 	 * and each bounce, a sprint jump, pushes you on.
 	 */
-	private fun throttled(bounce: Double, level: Double) = chunkThrottle?.let { level + (bounce - level) * it } ?: bounce
+	private fun throttled(bounce: Double, level: Double) =
+		if (pace == ChunkPace.Throttled) level + (bounce - level) * chunkThrottle else bounce
 
 	private fun SafeContext.flushPackets() {
 		while (sendPacketQueue.isNotEmpty()) {
