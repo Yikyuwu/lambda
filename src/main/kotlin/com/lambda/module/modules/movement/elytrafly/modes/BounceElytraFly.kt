@@ -161,6 +161,8 @@ class BounceElytraFly(
 	private var coasting = false
 	/** Faster than the chunks ahead allow, so it slows down while bouncing on. */
 	private var slowingForChunks = false
+	/** How much of the bounce pitch to use while chunks are missing ahead, from 0 for level to 1 for all of it. */
+	private var chunkThrottle: Double? = null
 	private var landedTicks = 0
 	private var hitRoof = false
 
@@ -213,8 +215,8 @@ class BounceElytraFly(
 						slowingForChunks -> pitch(slowPitch())
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
 						coasting || isDodging -> pitch(coastPitch())
-						!smartPitch -> pitch(pitch)
-						player.velocity.y > -0.2 -> pitch(90.0)
+						!smartPitch -> pitch(throttled(pitch))
+						player.velocity.y > -0.2 -> pitch(throttled(90.0))
 						else -> pitch(4.0)
 					}
 				}.submit()
@@ -460,7 +462,17 @@ class BounceElytraFly(
 		waitingForChunks = waiting
 		slowingForChunks = slow
 		coasting = coast
+		// Nearing the safe speed with chunks missing ahead, the bounces flatten out so it eases into it, not past it.
+		chunkThrottle = if (missing == null || waiting || slow || coast) null
+		else (1 - speed / (safeSpeed * COAST_ABOVE)).coerceIn(0.0, 1.0)
 	}
+
+	/**
+	 * [bounce] flattened towards [coastPitch] by [chunkThrottle]. Looking down less you glide longer and bounce less often,
+	 * and each bounce, a sprint jump, pushes you on.
+	 */
+	private fun SafeContext.throttled(bounce: Double) =
+		chunkThrottle?.let { throttle -> coastPitch().let { level -> level + (bounce - level) * throttle } } ?: bounce
 
 	private fun SafeContext.flushPackets() {
 		while (sendPacketQueue.isNotEmpty()) {
