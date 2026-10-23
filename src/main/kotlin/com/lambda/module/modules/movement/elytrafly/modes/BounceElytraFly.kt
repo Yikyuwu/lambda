@@ -376,9 +376,14 @@ class BounceElytraFly(
 	/**
 	 * [up], climbing as high as there's room, the nether roof's bedrock or a block roof. Once the climb would get there,
 	 * level or a bit down like [coastPitch], and up again once it sank, so it keeps gliding up there without bounces.
+	 * Under a low roof only as high as flying level goes, right under it the server set it back again and again.
 	 */
 	private fun SafeContext.holdHeightPitch(up: Double): Double {
-		val top = if (world.registryKey == World.NETHER) MAX_NETHER_LAYER_FLIGHT_Y else startPos.y + MAX_SLOW_RISE
+		val top = when {
+			pacer.lowRoof -> maxFlightY()
+			world.registryKey == World.NETHER -> MAX_NETHER_LAYER_FLIGHT_Y
+			else -> startPos.y + MAX_SLOW_RISE
+		}
 		val room = ceilingY(top) - player.y
 		val climb = player.velocity.y
 		val rise = if (climb > 0) climb * climb / (2 * player.finalGravity) else 0.0
