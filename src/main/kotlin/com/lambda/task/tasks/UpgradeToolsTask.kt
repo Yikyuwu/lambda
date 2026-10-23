@@ -46,12 +46,14 @@ interface UpgradeConfig {
 /**
  * Upgrades diamond items from [diamondChest] to netherite at [smithingTable], with templates and ingots
  * from their chests, and dumps them into [dumpChest]. Stops once the diamond chest is empty or the dump chest is full.
+ * A chest that isn't set is left out: without the diamond chest only carried items are upgraded, without the template
+ * or ingot chest only carried ones are used, and without the dump chest upgraded items stay in the inventory.
  */
 class UpgradeToolsTask @Ta5kBuilder constructor(
-    private val diamondChest: BlockPos,
-    private val templateChest: BlockPos,
-    private val ingotChest: BlockPos,
-    private val dumpChest: BlockPos,
+    private val diamondChest: BlockPos?,
+    private val templateChest: BlockPos?,
+    private val ingotChest: BlockPos?,
+    private val dumpChest: BlockPos?,
     private val smithingTable: BlockPos,
     private val config: UpgradeConfig,
     automated: Automated,
@@ -107,22 +109,27 @@ class UpgradeToolsTask @Ta5kBuilder constructor(
         // A failed visit gave back what was in the table, so nothing taken from it before counts.
         resultTakes = 0
         resultResynced = false
-        val canDump = dumpFree != 0
-        val outOfMaterials = materialsOut && (carriedCount(::isTemplate) == 0 || carriedCount(::isIngot) == 0)
-        val canUpgrade = canDump && diamond > 0 && !outOfMaterials
+        val templates = carriedCount(::isTemplate)
+        val ingots = carriedCount(::isIngot)
+        val templateSource = templateChest?.takeIf { !materialsOut }
+        val ingotSource = ingotChest?.takeIf { !materialsOut }
+        val dump = dumpChest?.takeIf { dumpFree != 0 }
+        val dumpFull = dumpChest != null && dump == null
+        val outOfMaterials = templates == 0 && templateSource == null || ingots == 0 && ingotSource == null
+        val canUpgrade = !dumpFull && diamond > 0 && !outOfMaterials
         when {
-            canDump && (diamond == 0 || outOfMaterials) && inInventory(config::shouldDump) > 0 -> open(dumpChest, Phase.Dumping)
-            canUpgrade && !materialsOut && carriedCount(::isTemplate) < diamond -> open(templateChest, Phase.TakingTemplates)
-            canUpgrade && !materialsOut && carriedCount(::isIngot) < diamond -> open(ingotChest, Phase.TakingIngots)
+            dump != null && (diamond == 0 || outOfMaterials) && inInventory(config::shouldDump) > 0 -> open(dump, Phase.Dumping)
+            canUpgrade && templateSource != null && templates < diamond -> open(templateSource, Phase.TakingTemplates)
+            canUpgrade && ingotSource != null && ingots < diamond -> open(ingotSource, Phase.TakingIngots)
             // The timeout restarts for every item, see upgrade().
             canUpgrade -> open(smithingTable, Phase.Upgrading, moveDelay * CLICKS_PER_UPGRADE)
-            canDump && !materialsOut && !diamondChestEmpty -> open(diamondChest, Phase.TakingDiamond)
-            config.returnLeftovers && !canUpgrade && diamond > 0 -> open(diamondChest, Phase.ReturningDiamonds)
-            config.returnLeftovers && inInventory(::isTemplate) > 0 -> open(templateChest, Phase.ReturningTemplates)
-            config.returnLeftovers && inInventory(::isIngot) > 0 -> open(ingotChest, Phase.ReturningIngots)
+            diamondChest != null && !dumpFull && !materialsOut && !diamondChestEmpty -> open(diamondChest, Phase.TakingDiamond)
+            config.returnLeftovers && diamondChest != null && !canUpgrade && diamond > 0 -> open(diamondChest, Phase.ReturningDiamonds)
+            config.returnLeftovers && templateChest != null && inInventory(::isTemplate) > 0 -> open(templateChest, Phase.ReturningTemplates)
+            config.returnLeftovers && ingotChest != null && inInventory(::isIngot) > 0 -> open(ingotChest, Phase.ReturningIngots)
             else -> finish(when {
-                !canDump -> "Dump chest is full"
-                materialsOut -> "Out of smithing templates or netherite ingots"
+                dumpFull -> "Dump chest is full"
+                outOfMaterials && diamond > 0 -> "Out of smithing templates or netherite ingots"
                 diamondChestEmpty -> "Diamond chest is empty"
                 else -> null
             })

@@ -28,18 +28,13 @@ import com.lambda.task.RootTask.run
 import com.lambda.task.Task
 import com.lambda.task.tasks.UpgradeConfig
 import com.lambda.task.tasks.UpgradeToolsTask
-import com.lambda.util.BlockUtils.blockEntity
 import com.lambda.util.ClickSetup
 import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.Describable
 import com.lambda.util.NamedEnum
-import com.lambda.util.world.blockEntitySearch
 import com.lambda.util.world.blockSearch
 import net.minecraft.block.SmithingTableBlock
-import net.minecraft.block.WallSignBlock
-import net.minecraft.block.entity.SignBlockEntity
-import net.minecraft.inventory.Inventory
 import net.minecraft.item.Item
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
@@ -52,11 +47,11 @@ object NetheriteUpgrade : Module(
     tag = ModuleTag.PLAYER,
 ), UpgradeConfig {
     private val setup by setting("Setup", { clickSetup.toggle() }, "Set the chests and the smithing table by clicking them")
-    private val reset by setting("Reset", { clickSetup.reset() }, "Set all positions back to 0 0 0, so they're found again")
-    private var diamondChest by setting("Diamond Chest", BlockPos.ORIGIN, "Chest to take diamond items from. At 0 0 0 it uses the one with a \"diamond\" sign")
-    private var templateChest by setting("Template Chest", BlockPos.ORIGIN, "Chest to take smithing templates from. At 0 0 0 it uses the one with a \"template\" sign")
-    private var ingotChest by setting("Ingot Chest", BlockPos.ORIGIN, "Chest to take netherite ingots from. At 0 0 0 it uses the one with an \"ingot\" sign")
-    private var dumpChest by setting("Dump Chest", BlockPos.ORIGIN, "Chest to put upgraded items into. At 0 0 0 it uses the one with a \"dump\" sign")
+    private val reset by setting("Reset", { clickSetup.reset() }, "Set all positions back to 0 0 0, so it only upgrades what you carry")
+    private var diamondChest by setting("Diamond Chest", BlockPos.ORIGIN, "Chest to take diamond items from. At 0 0 0 only carried ones are upgraded")
+    private var templateChest by setting("Template Chest", BlockPos.ORIGIN, "Chest to take smithing templates from. At 0 0 0 only carried ones are used")
+    private var ingotChest by setting("Ingot Chest", BlockPos.ORIGIN, "Chest to take netherite ingots from. At 0 0 0 only carried ones are used")
+    private var dumpChest by setting("Dump Chest", BlockPos.ORIGIN, "Chest to put upgraded items into. At 0 0 0 they stay in the inventory")
     private var smithingTable by setting("Smithing Table", BlockPos.ORIGIN, "Smithing table to use. At 0 0 0 it uses the closest one")
     private val upgrade by setting("Upgrade", Upgrade.Pickaxes, "Diamond items to upgrade")
     override val maxItems by setting("Max Items", 27, 1..34, 1, "Most diamond items to take per trip")
@@ -71,6 +66,7 @@ object NetheriteUpgrade : Module(
     ) : NamedEnum, Describable {
         Pickaxes("Pickaxes", "Only pickaxes", mapOf(Items.DIAMOND_PICKAXE to Items.NETHERITE_PICKAXE)),
         Tools("Tools", "Pickaxes, axes, shovels, hoes and swords", TOOLS),
+        Armor("Armor", "Only armor", ARMOR),
         ToolsAndArmor("Tools And Armor", "All tools and armor", TOOLS + ARMOR),
     }
 
@@ -95,28 +91,23 @@ object NetheriteUpgrade : Module(
 
         onEnable {
             clickSetup.cancel()
-            fun missing(what: String) {
-                info("Couldn't find the $what next to you, so set them up")
-                disable()
-                clickSetup.start()
-            }
-            val diamond = diamondChest.orUnset ?: findLabeledChest("diamond") ?: return@onEnable missing("Diamond Chest")
-            val template = templateChest.orUnset ?: findLabeledChest("template") ?: return@onEnable missing("Template Chest")
-            val ingot = ingotChest.orUnset ?: findLabeledChest("ingot") ?: return@onEnable missing("Ingot Chest")
-            val dump = dumpChest.orUnset ?: findLabeledChest("dump") ?: return@onEnable missing("Dump Chest")
-            val table = smithingTable.orUnset ?: findSmithingTable() ?: return@onEnable missing("Smithing Table")
-            if (setOf(diamond, template, ingot, dump).size < 4) {
-                logError("Two of the chests are the same one. Check the signs or press Setup")
+            val table = smithingTable.orUnset ?: findSmithingTable() ?: run {
+                logError("No smithing table set or within $SEARCH_RADIUS blocks. Press Setup")
                 return@onEnable disable()
             }
-            diamondChest = diamond
-            templateChest = template
-            ingotChest = ingot
-            dumpChest = dump
-            smithingTable = table
+            val diamond = diamondChest.orUnset
+            val template = templateChest.orUnset
+            val ingot = ingotChest.orUnset
+            val dump = dumpChest.orUnset
+            val chests = listOfNotNull(diamond, template, ingot, dump)
+            if (chests.toSet().size < chests.size) {
+                logError("Two of the chests are the same one. Press Setup or Reset")
+                return@onEnable disable()
+            }
+            fun BlockPos?.short() = this?.toShortString() ?: "none"
             info(
-                "Diamond ${diamond.toShortString()}, templates ${template.toShortString()}, ingots ${ingot.toShortString()}, " +
-                    "dump ${dump.toShortString()}, table ${table.toShortString()}"
+                if (chests.isEmpty()) "No chests set, upgrading what you carry at ${table.toShortString()}"
+                else "Diamond ${diamond.short()}, templates ${template.short()}, ingots ${ingot.short()}, dump ${dump.short()}, table ${table.toShortString()}"
             )
 
             upgradeTask = UpgradeToolsTask(
@@ -146,25 +137,6 @@ object NetheriteUpgrade : Module(
     override fun isUpgraded(stack: ItemStack) = stack.item in upgrade.items.values
 
     override fun shouldDump(stack: ItemStack) = isUpgraded(stack) && (dumpDamaged || !stack.isDamaged)
-
-    /**
-     * The container the closest wall sign with [keyword] labels: the one it hangs on, or else the one below either.
-     * Signs that also say "input" or "output" label unloaders, so they're skipped.
-     */
-    private fun SafeContext.findLabeledChest(keyword: String): BlockPos? {
-        val word = Regex("\\b${Regex.escape(keyword)}")
-        return blockEntitySearch<SignBlockEntity>(SEARCH_RADIUS.toDouble()) { sign ->
-            val text = listOf(sign.frontText, sign.backText)
-                .flatMap { it.getMessages(false).toList() }
-                .joinToString(" ") { it.string }.lowercase()
-            sign.cachedState.block is WallSignBlock && word.containsMatchIn(text) && "input" !in text && "output" !in text
-        }
-            .sortedBy { it.pos.getSquaredDistance(player.pos) }
-            .firstNotNullOfOrNull { sign ->
-                val behind = sign.pos.offset(sign.cachedState.get(WallSignBlock.FACING).opposite)
-                listOf(behind, behind.down(), sign.pos.down()).firstOrNull { blockEntity(it) is Inventory }
-            }
-    }
 
     private fun SafeContext.findSmithingTable(): BlockPos? =
         blockSearch(SEARCH_RADIUS) { _, state -> state.block is SmithingTableBlock }
