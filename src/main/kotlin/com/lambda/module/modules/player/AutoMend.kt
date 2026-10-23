@@ -50,6 +50,7 @@ object AutoMend : Module(
     tag = ModuleTag.PLAYER,
 ), MendConfig {
     private val setup by setting("Setup", { clickSetup.toggle() }, "Set the chests and where to stand by clicking them")
+    private val reset by setting("Reset", { clickSetup.reset() }, "Set all positions back to 0 0 0, so they're found again")
     private var damagedChest by setting("Damaged Chest", BlockPos.ORIGIN, "Chest to take tools from. At 0 0 0 it uses the upper of two stacked chests nearby")
     private var repairedChest by setting("Repaired Chest", BlockPos.ORIGIN, "Chest to put mended and undamaged tools into. At 0 0 0 it uses the lower of two stacked chests nearby")
     private var standPos by setting("Stand Pos", BlockPos.ORIGIN, "Where to stand while hitting. At 0 0 0 it uses where you are")
