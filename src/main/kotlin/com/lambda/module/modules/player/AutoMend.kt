@@ -37,6 +37,7 @@ import com.lambda.util.EnchantmentUtils.getEnchantment
 import com.lambda.util.NamedEnum
 import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.item.ItemUtils
+import com.lambda.util.player.SlotUtils.hotbarStacks
 import net.minecraft.component.DataComponentTypes
 import net.minecraft.enchantment.Enchantments
 import net.minecraft.entity.EquipmentSlot
@@ -108,6 +109,10 @@ object AutoMend : Module(
                 logError("Turn off AutoArmor first, it swaps the armor back. Your armor is put back when done")
                 return@onEnable disable()
             }
+            if (player.hotbarStacks.none(::isSword)) {
+                logError("Put a sword with Sweeping Edge III and no Fire Aspect in your hotbar. Fire Aspect would burn the mobs and lose their XP")
+                return@onEnable disable()
+            }
             val damaged = damagedChest.orUnset
             val repaired = repairedChest.orUnset
             if ((damaged == null) != (repaired == null)) {
@@ -148,7 +153,7 @@ object AutoMend : Module(
     override fun isMended(stack: ItemStack) = stack.durabilityFraction >= mendTo / 100f
 
     override fun isSword(stack: ItemStack) = stack.item in ItemUtils.swords &&
-        stack.getEnchantment(Enchantments.SWEEPING_EDGE) > 0 && stack.getEnchantment(Enchantments.FIRE_ASPECT) == 0
+        stack.getEnchantment(Enchantments.SWEEPING_EDGE) >= 3 && stack.getEnchantment(Enchantments.FIRE_ASPECT) == 0
 
     /** Worn in an armor slot, which elytras are too. */
     private val ItemStack.isArmor get() =

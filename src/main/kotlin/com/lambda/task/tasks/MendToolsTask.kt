@@ -66,7 +66,7 @@ interface MendConfig {
     fun isTool(stack: ItemStack): Boolean
     fun canMend(stack: ItemStack): Boolean
     fun isMended(stack: ItemStack): Boolean
-    /** Should have sweeping edge and no fire aspect. */
+    /** Should have Sweeping Edge III and no Fire Aspect. */
     fun isSword(stack: ItemStack): Boolean
 }
 
@@ -248,7 +248,7 @@ class MendToolsTask @Ta5kBuilder constructor(
 
         val sword = player.hotbarStacks.indexOfFirst(config::isSword)
         if (sword == -1) {
-            failure("No sweeping edge sword without fire aspect in the hotbar")
+            failure("No sword with Sweeping Edge III and no Fire Aspect in the hotbar")
             return false
         }
         val swordStack = player.hotbarStacks[sword]
