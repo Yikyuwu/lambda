@@ -24,20 +24,49 @@ import com.lambda.config.settings.complex.KeybindSetting.Companion.onPress
 import com.lambda.config.withEdits
 import com.lambda.context.SafeContext
 import com.lambda.event.events.TickEvent
+import com.lambda.event.events.MovementEvent
+import com.lambda.interaction.handlers.BaritoneHandler
+import com.lambda.task.tasks.EnderChestRestockTask
+import com.lambda.task.tasks.EnderChestRestockTask.Companion.MIN_ENDER_CHESTS
+import com.lambda.task.tasks.EnderChestRestockTask.Companion.isEnderChest
+import com.lambda.task.tasks.PlaceContainerTask.Companion.isSafeContainerSpot
+import com.lambda.util.BlockUtils.blockState
+import com.lambda.util.BlockUtils.hasFluid
+import com.lambda.util.BlockUtils.hasSolidGround
+import com.lambda.util.BlockUtils.isPassable
+import com.lambda.util.CommunicationUtils.info
+import net.minecraft.entity.mob.EndermanEntity
+import net.minecraft.entity.mob.MobEntity
+import net.minecraft.entity.mob.Monster
+import net.minecraft.entity.mob.ZombifiedPiglinEntity
+import net.minecraft.util.PlayerInput
+import net.minecraft.util.math.BlockPos
+import net.minecraft.util.math.Vec2f
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
 import com.lambda.module.Module
 import com.lambda.module.modules.world.HighwayTools
 import com.lambda.module.tag.ModuleTag
+import com.lambda.task.RootTask.run
+import com.lambda.task.Task
+import com.lambda.task.tasks.MendArmorTask
+import com.lambda.task.tasks.StationTask.Companion.waitsForPlayer
+import com.lambda.task.tasks.StationTask.Companion.stopSafely
+import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.EnchantmentUtils.getEnchantment
+import com.lambda.util.item.ItemStackUtils.durabilityFraction
+import com.lambda.util.item.ItemStackUtils.shulkerBoxContents
+import com.lambda.util.item.ItemUtils
 import com.lambda.util.item.ItemUtils.armorSlot
 import com.lambda.util.player.SlotUtils.armorSlots
 import com.lambda.util.player.SlotUtils.hotbarAndInventorySlots
 import net.minecraft.component.DataComponentTypes
 import net.minecraft.enchantment.Enchantment
 import net.minecraft.enchantment.Enchantments
+import net.minecraft.entity.EquipmentSlot
 import net.minecraft.entity.attribute.EntityAttribute
 import net.minecraft.entity.attribute.EntityAttributes
+import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.registry.RegistryKey
 import net.minecraft.registry.entry.RegistryEntry
@@ -47,7 +76,7 @@ import net.minecraft.screen.slot.Slot
 @Suppress("unused")
 object AutoArmor : Module(
 	name = "AutoArmor",
-	description = "Automatically equips armor",
+	description = "Automatically equips armor, and mends it with experience bottles",
 	tag = ModuleTag.COMBAT
 ) {
 	var elytraPriority by setting("Elytra Priority", false, "Prioritizes elytra's over other armor pieces in the chest slot")
@@ -59,8 +88,45 @@ object AutoArmor : Module(
 	private val legProtection by setting("Preferred Leg Protection", Protection.Protection)
 	private val feetProtection by setting("Preferred Feet Protection", Protection.Protection)
 	private val ignoreBinding by setting("Ignore Binding", true, "Ignores curse of binding armor pieces")
+	private val mendArmor by setting("Mend Armor", false, "Mends armor with Mending by throwing experience bottles at your feet. With Elytra Priority, for ElytraFly, elytras too and it lands away from players and mobs for it. Without, for HighwayTools, the build pauses meanwhile")
+	private val allowShulker by setting("Allow Shulker", true, "Use the experience bottles you carry, loose or in a shulker") { mendArmor }
+	private val allowEnderChest by setting("Allow Ender Chest", true, "With Elytra Priority, take a shulker of experience bottles from the ender chest when none are carried. HighwayTools restocks them itself") { mendArmor && allowShulker }
+	private val mendAt by setting("Mend At", 5, 1..99, 1, "Durability at which the last carried piece of a kind gets mended, e.g. the last pair of leggings", "%") { mendArmor }
+	private val mendTo by setting("Mend To", 100, 2..100, 1, "Durability to mend to", "%") { mendArmor }
+	private val mobRadius by setting("Mob Free Radius", 32, 8..64, 4, "With Elytra Priority, no hostile mob may be this close to land and mend", " blocks") { mendArmor && elytraPriority }
+	private val throwDelay by setting("Throw Delay", 4, 1..20, 1, "Ticks between experience bottles", " ticks") { mendArmor }
+	private val mendSwapDelay by setting("Mend Swap Delay", 5, 1..20, 1, "Ticks between inventory clicks while mending", " ticks") { mendArmor }
+	private val mendRetryDelay by setting("Mend Retry Delay", 30, 5..300, 5, "Wait after mending that left armor worn", " s") { mendArmor }
 
 	private var tickedThisTick = false
+
+	private var mendTask: Task<*>? = null
+	private var mendRetryTicks = 0
+	/** Mending failed, maybe leaving a shulker placed, so it's not tried again until AutoArmor or HighwayTools is started again. */
+	private var mendFailed = false
+	private var wasBuilding = false
+	/** Waiting to stand still to mend for ElytraFly, at a safe spot with nobody around. */
+	private var landing = false
+	private var announced = false
+
+	/** Whether experience bottles are being thrown, or a shulker or the ender chest is out for them. */
+	val isMending get() = mendTask?.isActive == true
+
+	/** Landing to mend or mending, so ElytraFly waits instead of flying. */
+	val pausesFlight get() = landing || isMending
+
+	/** Whether worn armor gets mended, which needs [hasBottles]. */
+	val mendsArmor get() = isEnabled && mendArmor
+
+	/** Whether [stack] is experience bottles, or a shulker with some. */
+	fun hasBottles(stack: ItemStack) = bottles(stack) > 0
+
+	/** How many experience bottles [stack] is, or a shulker holds. */
+	fun bottles(stack: ItemStack) = when {
+		stack.item == Items.EXPERIENCE_BOTTLE -> stack.count
+		stack.item in ItemUtils.shulkerBoxes -> stack.shulkerBoxContents.sumOf { if (it.item == Items.EXPERIENCE_BOTTLE) it.count else 0 }
+		else -> 0
+	}
 
 	var overriddenElytraPriority: Boolean? = null
 
@@ -100,11 +166,53 @@ object AutoArmor : Module(
 	init {
 		setDefaultAutomationConfig()
 			.withEdits {
-				hideAllExcept(::inventoryConfig)
+				hideAllExcept(::inventoryConfig, ::breakConfig, ::interactConfig, ::hotbarConfig, ::rotationConfig, ::buildConfig)
 			}
+
+		onEnable { mendFailed = false }
+
+		onDisable {
+			// Mending first picks its shulker back up, so stopping never leaves one behind.
+			mendTask.stopSafely()
+			if (!isMending) endMend()
+		}
 
 		listen<TickEvent.Pre> {
 			if (!tickedThisTick) tick()
+			if (mendRetryTicks > 0) mendRetryTicks--
+			// Starting the highway again is a fresh start for mending too.
+			if (HighwayTools.isBuilding && !wasBuilding) mendFailed = false
+			wasBuilding = HighwayTools.isBuilding
+			landing = false
+			mendTask?.let {
+				// Picks its shulker or the ender chest back up, so nobody can take it.
+				if (it.isActive && hasDanger()) it.stopSafely()
+				if (it.isActive) return@listen
+				// Ended without its callbacks, e.g. cancelled.
+				endMend()
+			}
+			val kinds = wornKinds()
+			val needed = kinds.isNotEmpty() && (carriesBottles() || canUseEnderChest())
+			if (needed && elytraPriority && !announced) info("Worn ${if (kinds.contains(ELYTRA)) "elytras" else "armor"}, looking for a safe spot to mend")
+			announced = needed
+			if (!needed || hasDanger()) return@listen
+			if (!elytraPriority) {
+				// Not while a restock has a container out or the aura fights.
+				if (!HighwayTools.isBusy) startMend(kinds)
+				return@listen
+			}
+			// Flies on until it's safe here, then stands still to place a shulker.
+			landing = hasSafeSpot()
+			if (!landing || player.isGliding || !player.isOnGround || player.velocity.horizontalLengthSquared() > STILL_SPEED_SQ) return@listen
+			landing = false
+			startMend(kinds)
+		}
+
+		// Stands still while landing or mending, unless Baritone walks to a drop.
+		listen<MovementEvent.InputUpdate> {
+			if (!pausesFlight || BaritoneHandler.isActive) return@listen
+			it.input.playerInput = PlayerInput(false, false, false, false, false, it.input.playerInput.sneak, false)
+			it.input.movementVector = Vec2f.ZERO
 		}
 
 		listen<TickEvent.Post>({ Int.MIN_VALUE }) {
@@ -146,6 +254,97 @@ object AutoArmor : Module(
 			}
 		}.submit()
 	}
+
+	/**
+	 * The kinds whose last carried piece is worn and can be mended, e.g. every carried pair of leggings.
+	 * With Elytra Priority elytras, helmets, leggings and boots, since the chest slot is for the elytra. Else all armor.
+	 */
+	private fun SafeContext.wornKinds(): List<(ItemStack) -> Boolean> {
+		if (!mendArmor || mendRetryTicks > 0 || mendFailed) return emptyList()
+		val kinds = if (elytraPriority) listOf(ELYTRA, HEAD, LEGS, FEET) else listOf(HEAD, CHEST, LEGS, FEET)
+		return kinds.filter { allWorn(it) }
+	}
+
+	private fun SafeContext.allWorn(kind: (ItemStack) -> Boolean): Boolean {
+		val items = (player.inventory.mainStacks + player.offHandStack + MEND_SLOTS.map { player.getEquippedStack(it) })
+			.filter { kind(it) && it.isDamageable }
+		return items.none { it.durabilityFraction >= mendAt / 100f } && items.any { it.getEnchantment(Enchantments.MENDING) > 0 && it.durabilityFraction < mendTo / 100f }
+	}
+
+	private fun SafeContext.carriesBottles() = allowShulker && player.inventory.mainStacks.any(::hasBottles)
+
+	private fun SafeContext.canUseEnderChest() = elytraPriority && allowShulker && allowEnderChest &&
+		player.inventory.mainStacks.sumOf { if (isEnderChest(it)) it.count else 0 } >= MIN_ENDER_CHESTS
+
+	/**
+	 * For ElytraFly another player in render distance, or a hostile mob in [mobRadius] since nothing fights it off.
+	 * For HighwayTools a player close enough to take a placed shulker, the aura deals with mobs.
+	 */
+	private fun SafeContext.hasDanger() =
+		if (!elytraPriority) waitsForPlayer()
+		else world.players.any { it !== player } ||
+			world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }.isNotEmpty()
+
+	/** Zombified piglins and endermen leave you alone until angered. */
+	private val MobEntity.isHostile get() = this is Monster && when (this) {
+		is ZombifiedPiglinEntity -> isAttacking
+		is EndermanEntity -> isAngry
+		else -> true
+	}
+
+	/** Ground below to land on and a spot next to it a shulker can go, without a hole, fire or lava, like a restock picks. */
+	private fun SafeContext.hasSafeSpot(): Boolean {
+		val feet = (0..MAX_LANDING_DROP).map { player.blockPos.down(it) }.firstOrNull { !isPassable(it.down()) } ?: return false
+		if (!hasSolidGround(feet) || blockState(feet).hasFluid) return false
+		return BlockPos.iterateOutwards(feet, SPOT_RANGE, 0, SPOT_RANGE).any { isPassable(it) && isSafeContainerSpot(it) }
+	}
+
+	private fun SafeContext.startMend(kinds: List<(ItemStack) -> Boolean>) {
+		// A build that can't be paused now is busy with something else.
+		if (HighwayTools.isBuilding && !HighwayTools.pauseFor(this@AutoArmor)) return
+
+		fun mend() = MendArmorTask(
+			mendTo = mendTo / 100f,
+			throwDelay = throwDelay,
+			swapDelay = mendSwapDelay,
+			automated = this@AutoArmor,
+			// The aura goes first, the mend carries on once the mob is dead.
+			holdWhile = { HighwayTools.isFighting },
+			items = { stack -> kinds.any { it(stack) } },
+		)
+		val bottles = EnderChestRestockTask.Want(
+			"experience bottles", 1, ::bottles,
+			isLow = { !carriesBottles() },
+			isMet = { carriesBottles() },
+		)
+		// Mended next to the ender chest before it's broken again.
+		val task = if (carriesBottles()) mend() else EnderChestRestockTask(listOf(bottles), mendSwapDelay, this@AutoArmor, beforeBreaking = { mend() })
+		mendTask = task.onCompletion {
+			endMend()
+			if (kinds.any { allWorn(it) }) mendRetryTicks = mendRetryDelay * 20
+		}.onFailure {
+			logError("Mending failed: ${it.message}. Not trying again until AutoArmor or HighwayTools is started again, HighwayTools is stopped")
+			mendFailed = true
+			HighwayTools.disable()
+		}.run()
+	}
+
+	private fun endMend() {
+		mendTask = null
+		HighwayTools.resume(this)
+	}
+
+	private val MEND_SLOTS = listOf(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET)
+	private val ELYTRA: (ItemStack) -> Boolean = { it.isOf(Items.ELYTRA) }
+	private val HEAD: (ItemStack) -> Boolean = { it.isIn(ItemTags.HEAD_ARMOR) }
+	private val CHEST: (ItemStack) -> Boolean = { it.isIn(ItemTags.CHEST_ARMOR) }
+	private val LEGS: (ItemStack) -> Boolean = { it.isIn(ItemTags.LEG_ARMOR) }
+	private val FEET: (ItemStack) -> Boolean = { it.isIn(ItemTags.FOOT_ARMOR) }
+	private const val STILL_SPEED_SQ = 1e-4
+	/** How far below the ground to land on may be, a bounce doesn't go higher. */
+	private const val MAX_LANDING_DROP = 4
+	/** How far from where you land a spot for the shulker is looked for, like placing it does. */
+	private const val SPOT_RANGE = 3
 
 	private enum class Protection(val enchant: RegistryKey<Enchantment>) {
 		Protection(Enchantments.PROTECTION),

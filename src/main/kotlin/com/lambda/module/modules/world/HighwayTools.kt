@@ -48,6 +48,7 @@ import com.lambda.interaction.managers.rotating.Rotation.Companion.dist
 import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.interaction.material.container.containers.EnderChestContainer
 import com.lambda.module.Module
+import com.lambda.module.modules.combat.AutoArmor
 import com.lambda.module.modules.player.AutoEat
 import com.lambda.module.tag.ModuleTag
 import com.lambda.task.RootTask.run
@@ -139,6 +140,7 @@ object HighwayTools : Module(
     private val provokeEndermen by setting("Provoke Endermen", false, "Anger endermen in the way, then back off so they teleport away. Off while Kill Mobs is on")
     private val backOffDistance by setting("Back Off Distance", 3, 1..6, 1, "How far to back off from a provoked enderman", " blocks") { provokeEndermen }
     @Group(ENDER_CHEST_GROUP) private val restockPickaxes by setting("Restock Pickaxe Shulkers", true, "Takes a shulker with fresh tools from the ender chest once no carried one has any. Needs Restock Tools") { inventoryConfig.accessEnderChest }
+    @Group(ENDER_CHEST_GROUP) private val restockBottles by setting("Restock XP Bottle Shulkers", true, "Takes a shulker with experience bottles for AutoArmor's mending from the ender chest once none are carried") { inventoryConfig.accessEnderChest }
     @Group(FOOD_GROUP) private val restockFood by setting("Restock Food", true, "Takes food out of a carried shulker once it runs low, or from the ender chest if no shulker has any")
     @Group(FOOD_GROUP) private val minFood by setting("Min Food", 16, 1..64, 1, "Food left at which more is taken, up to a stack") { restockFood }
     @Group(ENDER_CHEST_GROUP) private val restockBlocks by setting("Restock Building Blocks", true, "Takes the blocks the highway is built with from the ender chest once they run low") { inventoryConfig.accessEnderChest }
@@ -401,6 +403,7 @@ object HighwayTools : Module(
             isRestockingTools -> pauseFor(toolRestock)
             isRestockingFood -> pauseFor(FoodRestock)
             isRestockingFromEnderChest -> pauseFor(EnderChestTrip)
+            AutoArmor.isMending -> pauseFor(AutoArmor)
         }
     }
 
@@ -416,8 +419,8 @@ object HighwayTools : Module(
     /** Whether a shulker is out to take food from. */
     val isRestockingFood get() = foodTask?.isActive == true
 
-    /** Whether a shulker or the ender chest is out, or about to be, for a restock. */
-    val isUsingContainer get() = isRestockingTools || isRestockingFood || isRestockingFromEnderChest
+    /** Whether a shulker or the ender chest is out, or about to be, for a restock or mending. */
+    val isUsingContainer get() = isRestockingTools || isRestockingFood || isRestockingFromEnderChest || AutoArmor.isMending
 
     /** Whether a container is out or a mob is being fought, so nothing else starts meanwhile. */
     val isBusy get() = isUsingContainer || isFighting
@@ -537,6 +540,11 @@ object HighwayTools : Module(
             "a pickaxe shulker", 1, toolRestock::freshTools,
             isLow = { carriedCount(toolRestock::isToolShulker) == 0 },
             isMet = { carriedCount(toolRestock::isToolShulker) > 0 },
+        ))
+        if (restockBottles && AutoArmor.mendsArmor) add(Want(
+            "experience bottles", 1, AutoArmor::bottles,
+            isLow = { carriedCount(AutoArmor::hasBottles) == 0 },
+            isMet = { carriedCount(AutoArmor::hasBottles) > 0 },
         ))
         // Food in a carried shulker is taken from there first, so a shulker with food is enough.
         if (restockFood) add(Want(
