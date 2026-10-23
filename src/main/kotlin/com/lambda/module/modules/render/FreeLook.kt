@@ -19,6 +19,7 @@ package com.lambda.module.modules.render
 
 import com.lambda.Lambda.mc
 import com.lambda.event.events.PlayerEvent
+import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.interaction.managers.rotating.RotationManager
@@ -32,7 +33,6 @@ object FreeLook : Module(
     name = "FreeLook",
     description = "Allows you to look around freely while moving",
     tag = ModuleTag.PLAYER,
-    autoDisable = true
 ) {
     @JvmStatic val enableYaw by setting("Enable Yaw", false, "Don't effect pitch if enabled")
     @JvmStatic val enablePitch by setting("Enable Pitch", false, "Don't effect yaw if enabled")
@@ -40,6 +40,7 @@ object FreeLook : Module(
 
     var camera: Rotation = Rotation.ZERO
     var previousPerspective: Perspective = mc.options.perspective
+    private var awaitingSpawnRotation = false
 
     /**
      * @see net.minecraft.entity.Entity.changeLookDirection
@@ -63,6 +64,20 @@ object FreeLook : Module(
         onDisable {
             updateCam()
             mc.options.perspective = previousPerspective
+        }
+
+        // Stays on through a reconnect, so a camera from the last session doesn't carry over.
+        // The server sends where the player looks right after joining.
+        listen<WorldEvent.Join> {
+            camera = player.rotation
+            awaitingSpawnRotation = true
+            if (togglePerspective) mc.options.perspective = Perspective.THIRD_PERSON_BACK
+        }
+
+        listen<PlayerEvent.ServerForceRotate> {
+            if (!awaitingSpawnRotation) return@listen
+            awaitingSpawnRotation = false
+            camera = Rotation(it.yaw, it.pitch)
         }
 
         listen<PlayerEvent.ChangeLookDirection> {
