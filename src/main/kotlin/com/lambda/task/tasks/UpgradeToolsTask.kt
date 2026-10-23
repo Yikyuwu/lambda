@@ -223,7 +223,7 @@ class UpgradeToolsTask @Ta5kBuilder constructor(
             resultTakes < MAX_RESULT_TAKES -> takeResult()
             !resultResynced -> resultResynced = submit { resyncInventory() }
             // Maybe just a slow server, closing and coming back gives it time.
-            else -> stepFailed("no result for ${diamond.stack.name.string}")
+            else -> phaseFailed("no result for ${diamond.stack.name.string}")
         }
         return true
     }
