@@ -38,7 +38,7 @@ class FlightPacer {
         Throttled("Flying on, easing into the safe speed"),
         /** A bit below the safe speed, keeping its height so the bounces don't push it on. */
         Coasting("Coasting, near the safe speed"),
-        /** Faster than the safe speed, climbing to slow down. */
+        /** Faster than the safe speed, looking up to slow down. */
         Slowing("Slowing down"),
         /** Missing chunks within stopping distance, landed until enough more are loaded. */
         Waiting("Waiting for the chunks"),
