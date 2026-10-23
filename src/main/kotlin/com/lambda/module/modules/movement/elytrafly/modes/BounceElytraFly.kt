@@ -192,7 +192,7 @@ class BounceElytraFly(
 		listen<TickEvent.Pre> {
 			pauseTimer.tick()
 			wantJump = false
-			updateWaitingForChunks()
+			updateChunkSpeed()
 			// The floor you're bouncing on, it may be higher or lower than where you started.
 			if (player.isOnGround) groundY = player.y
 			val roof = player.isGliding && player.verticalCollision && !player.isOnGround
@@ -215,8 +215,8 @@ class BounceElytraFly(
 						slowingForChunks -> pitch(slowPitch())
 						// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
 						coasting || isDodging -> pitch(coastPitch())
-						!smartPitch -> pitch(throttled(pitch))
-						player.velocity.y > -0.2 -> pitch(throttled(90.0))
+						!smartPitch -> pitch(throttled(pitch, coastPitch()))
+						player.velocity.y > -0.2 -> pitch(throttled(90.0, coastPitch()))
 						else -> pitch(4.0)
 					}
 				}.submit()
@@ -398,10 +398,12 @@ class BounceElytraFly(
 	override fun SafeContext.bouncePitch(): (y: Double, climb: Double) -> Double {
 		val ceiling = ceilingY()
 		return { y, climb ->
+			val level = coastPitch(ceiling - y, climb)
 			when {
-				coasting || isDodging -> coastPitch(ceiling - y, climb)
-				!smartPitch -> pitch
-				climb > -0.2 -> 90.0
+				// Slowing down climbs at first, flying level is the lower one to plan with.
+				slowingForChunks || coasting || isDodging -> level
+				!smartPitch -> throttled(pitch, level)
+				climb > -0.2 -> throttled(90.0, level)
 				else -> 4.0
 			}
 		}
@@ -429,7 +431,7 @@ class BounceElytraFly(
 	 * come within stopping distance after all it lands and stands still. Not sprinting would slow it down too, but sprint
 	 * changes around a bounce get you set back.
 	 */
-	private fun SafeContext.updateWaitingForChunks() {
+	private fun SafeContext.updateChunkSpeed() {
 		val ahead = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
 		val missing = if (!waitForChunks) null else (CHUNK_CHECK_STEP..chunkLookAhead step CHUNK_CHECK_STEP).firstOrNull { distance ->
 			!player.pos.add(ahead.multiply(distance.toDouble())).isLoaded
@@ -454,10 +456,7 @@ class BounceElytraFly(
 				coast -> "Coasting, near the safe speed"
 				else -> "Flying on"
 			}
-			"$state: %s ahead at %.2f a tick, safe %s".format(
-				missing?.let { "%.0f".format(it) } ?: "all loaded", speed,
-				"%.2f".format(safeSpeed),
-			)
+			"$state: ${missing?.let { "%.0f".format(it) } ?: "all loaded"} ahead at %.2f a tick, safe %.2f".format(speed, safeSpeed)
 		}
 		waitingForChunks = waiting
 		slowingForChunks = slow
@@ -468,11 +467,10 @@ class BounceElytraFly(
 	}
 
 	/**
-	 * [bounce] flattened towards [coastPitch] by [chunkThrottle]. Looking down less you glide longer and bounce less often,
+	 * [bounce] flattened towards [level] by [chunkThrottle]. Looking down less you glide longer and bounce less often,
 	 * and each bounce, a sprint jump, pushes you on.
 	 */
-	private fun SafeContext.throttled(bounce: Double) =
-		chunkThrottle?.let { throttle -> coastPitch().let { level -> level + (bounce - level) * throttle } } ?: bounce
+	private fun throttled(bounce: Double, level: Double) = chunkThrottle?.let { level + (bounce - level) * it } ?: bounce
 
 	private fun SafeContext.flushPackets() {
 		while (sendPacketQueue.isNotEmpty()) {
