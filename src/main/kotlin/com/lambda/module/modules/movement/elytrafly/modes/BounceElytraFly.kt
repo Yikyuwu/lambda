@@ -96,8 +96,9 @@ class BounceElytraFly(
 		/** Coasting from this share of the safe speed, and flying on again below the other. */
 		private const val COAST_ABOVE = 0.8
 		private const val FLY_BELOW = 0.7
-		/** How much less than usually loaded ahead counts as the server lagging. */
+		/** How much less than usually loaded ahead counts as the server lagging, and how much less still does once it does. */
 		private const val CHUNK_LAG_MARGIN = 16.0
+		private const val CHUNK_LAG_END_MARGIN = 8.0
 		/** How fast the usual distance is forgotten, half a block a second, so a turn doesn't count as lag for long. */
 		private const val USUAL_LOADED_DECAY = 0.025
 		/** How much more has to be loaded to stop coasting or waiting again. */
@@ -172,6 +173,7 @@ class BounceElytraFly(
 	private var chunkThrottle: Double? = null
 	/** How far ahead the chunks are usually loaded, forgotten slowly. */
 	private var usualLoaded = 0.0
+	private var laggingChunks = false
 	private var landedTicks = 0
 	private var hitRoof = false
 
@@ -367,6 +369,7 @@ class BounceElytraFly(
 			waitingForChunks = false
 			slowingForChunks = false
 			usualLoaded = 0.0
+			laggingChunks = false
 			coasting = false
 			hitRoof = false
 			// The floor below when started in the air, else packets would be held back up there.
@@ -459,7 +462,9 @@ class BounceElytraFly(
 		// that the server lags and it slows down, else it flies like always.
 		val loaded = missing ?: (chunkLookAhead + CHUNK_CHECK_STEP).toDouble()
 		usualLoaded = max(loaded, usualLoaded - USUAL_LOADED_DECAY)
-		val lagging = waitForChunks && loaded < usualLoaded - CHUNK_LAG_MARGIN
+		// Lags until nearly as many are loaded again, else it flips between slowing down and flying on at the margin.
+		val lagging = waitForChunks && loaded < usualLoaded - if (laggingChunks) CHUNK_LAG_END_MARGIN else CHUNK_LAG_MARGIN
+		laggingChunks = lagging
 		val safeSpeed = if (!lagging) Double.MAX_VALUE else ((loaded - MIN_CHUNK_STOP_DISTANCE) / CHUNK_SAFE_TICKS).coerceAtLeast(0.0)
 		// Down from a wait, the server ends the glide a moment later. Taking off again before that gets you set back.
 		if (!waitingForChunks || !player.isOnGround) landedTicks = 0
