@@ -417,7 +417,7 @@ class BounceElytraFly(
 				coast -> "Coasting, few chunks loaded ahead"
 				else -> "Flying on, enough chunks loaded ahead"
 			}
-			"$state: %s ahead at %.2f a tick".format(missing?.let { "%.0f".format(it) } ?: "all loaded")
+			"$state: %s ahead at %.2f a tick".format(missing?.let { "%.0f".format(it) } ?: "all loaded", speed)
 		}
 		waitingForChunks = waiting
 		coasting = coast
