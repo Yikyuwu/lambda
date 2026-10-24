@@ -46,6 +46,7 @@ import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
 import net.minecraft.registry.Registries
 import net.minecraft.util.math.BlockPos
+import net.minecraft.util.math.Direction
 import net.minecraft.util.math.Box
 import net.minecraft.util.math.Vec3d
 import net.minecraft.world.RaycastContext
@@ -729,16 +730,16 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Over the magma cube [distance] ahead, glided over on the line at full speed like a block two high, see [cubeBoxes].
-	 * Never dodged, it jumps at you, nor walked around, it'd come at you over and over. Not getting over it, flown on
-	 * through it, bumping into it in the air hurts a little at worst.
+	 * Up on the railing over the way, glided under like a block hanging there, low over the floor. Never dodged, it
+	 * jumps at you, nor walked around, it'd come at you over and over. Not getting past it, flown on through it,
+	 * bumping into it in the air hurts a little at worst.
 	 */
 	private fun SafeContext.passCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
 		if (skipHopAt?.let { abs(it - at) < 1.5 } == true) return false
 		hopTooSlow = false
-		// Never under one, coming down onto the floor next to it.
-		planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH))?.takeUnless { it.under }?.let { over ->
-			ElytraFly.debug { "Mob %.1f ahead ($block), gliding over it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
-			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true)
+		planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH))?.let { over ->
+			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
+			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true)
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
@@ -746,10 +747,10 @@ abstract class ObstaclePassingMode(
 		if (distance > player.velocity.horizontalLength() * HOP_LEAD_TICKS)
 			return noLaneYet(at, "Mob %.1f ahead ($block), can't get over it yet (${if (hopTooSlow) hopMiss else hopRejection}), bouncing on to look again".format(distance))
 		skipHopAt = at
-		// Too slow only, it climbs as high as it gets anyway. Maybe just over it, else bumping into it higher up.
-		if (hopTooSlow) planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = true)?.takeUnless { it.under }?.let { over ->
-			ElytraFly.debug { "Mob %.1f ahead ($block), can't get over it in time ($hopRejection), climbing up at it anyway".format(distance) }
-			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true, anyway = true)
+		// Too slow only, it gets as close to the height as it can anyway. Maybe just past it, else bumping into it less.
+		if (hopTooSlow) planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = true)?.let { over ->
+			ElytraFly.debug { "Mob %.1f ahead ($block), can't get ${if (over.under) "under" else "over"} it in time ($hopRejection), going for it anyway".format(distance) }
+			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, anyway = true)
 			return true
 		}
 		ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
@@ -1515,16 +1516,28 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * The boxes of the magma cubes and hoglins up to [maxDistance] around [from], with room around them, glided over like a block two
-	 * high, the biggest is just as high. As long as they are thick along the way. One mid-jump is taken as down on the
-	 * floor again, it'll have landed by the time you're there, up there it'd look too high to get over.
+	 * high, the biggest is just as high. As long as they are thick along the way. One mid-jump is taken as down on what's
+	 * below it again, the floor or the railing, it'll have landed by the time you're there.
 	 */
 	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
 		world.getOtherEntities(player, Box(from, from).expand(maxDistance, CUBE_SEARCH_HEIGHT, maxDistance)) { it.glidedOver() }
 			.map { cube -> cube.boundingBox.let {
-				val minY = if (cube.isOnGround) it.minY else min(it.minY, startPos.y)
+				val minY = if (cube.isOnGround) it.minY else landingY(cube)
 				Box(it.minX, minY, it.minZ, it.maxX, minY + max(CUBE_HEIGHT, it.lengthY), it.maxZ)
 			}.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN) }
 
+
+	/** Where [entity] in the air comes down, on the top of the first block below it, else on the line's floor. */
+	private fun SafeContext.landingY(entity: Entity): Double {
+		var pos = entity.blockPos
+		repeat(CUBE_SEARCH_HEIGHT.toInt()) {
+			val below = pos.down()
+			val shape = world.getBlockState(below).getCollisionShape(world, below)
+			if (!shape.isEmpty) return min(entity.y, below.y + shape.getMax(Direction.Axis.Y))
+			pos = below
+		}
+		return min(entity.y, startPos.y)
+	}
 
 	/**
 	 * Whether to hold the height for [hop] at [progress] along the line, once it's close enough. Over carpets only
@@ -1539,14 +1552,15 @@ abstract class ObstaclePassingMode(
 		hop.held = when {
 			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
+			hop.anyway -> true
+			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther. Under one up on
+			// the railing too, gliding low loses speed fast.
+			hop.cube -> !canHopLater(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
-			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther.
-			hop.anyway -> true
-			hop.cube -> !canHopLater(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
-		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
+		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
 	}
 
