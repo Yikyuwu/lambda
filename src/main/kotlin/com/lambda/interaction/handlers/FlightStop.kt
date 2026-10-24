@@ -17,6 +17,7 @@
 
 package com.lambda.interaction.handlers
 
+import com.lambda.Lambda.LOG
 import com.lambda.context.SafeContext
 import com.lambda.core.Loadable
 import com.lambda.event.events.MovementEvent
@@ -50,6 +51,8 @@ object FlightStop : Loadable {
     private const val SPOT_RANGE = 3
 
     private var owner: Any? = null
+    /** Why it last couldn't land, written to the log once each time it changes. */
+    private var waitReason: String? = null
 
     /** Someone lands or uses what it placed, so flying waits. */
     val pausesFlight get() = owner != null
@@ -71,7 +74,12 @@ object FlightStop : Loadable {
      */
     fun SafeContext.land(by: Any, mobRadius: Int): Boolean {
         if (owner != null && owner !== by) return false
-        if (hasDanger(mobRadius) || !hasSafeSpot()) {
+        val reason = danger(mobRadius) ?: if (!hasSafeSpot()) "no safe spot below" else null
+        if (reason != waitReason) {
+            waitReason = reason
+            if (reason != null) LOG.info("[FlightStop] Not landing yet: $reason")
+        }
+        if (reason != null) {
             release(by)
             return false
         }
@@ -89,8 +97,15 @@ object FlightStop : Loadable {
     }
 
     /** Another player in render distance, or a hostile mob within [mobRadius] that would attack or take a drop. */
-    fun SafeContext.hasDanger(mobRadius: Int) = world.players.any { it !== player } ||
-        world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }.isNotEmpty()
+    fun SafeContext.hasDanger(mobRadius: Int) = danger(mobRadius) != null
+
+    /** What [hasDanger] found, null for nothing. */
+    private fun SafeContext.danger(mobRadius: Int): String? {
+        world.players.firstOrNull { it !== player }?.let { return "${it.name.string} in render distance" }
+        val mob = world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }
+            .minByOrNull { it.squaredDistanceTo(player) } ?: return null
+        return "${mob.name.string} within $mobRadius blocks"
+    }
 
     /** Zombified piglins and endermen leave you alone until angered. */
     private val MobEntity.isHostile get() = this is Monster && when (this) {
