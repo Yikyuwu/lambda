@@ -62,6 +62,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
@@ -98,6 +99,8 @@ class BounceElytraFly(
 		private const val MAX_NETHER_FLIGHT_Y = 121.5
 		/** Up on a layer, as high as the gliding box stays clear of that roof by a bit. */
 		private const val MAX_NETHER_LAYER_FLIGHT_Y = 122.2
+		/** How far above the flight line gliding over an obstacle may go. */
+		private const val MAX_HOP_RISE = 2.5
 		/** How far up a block roof over you is looked for. */
 		private const val ROOF_SCAN_HEIGHT = 4.0
 		private const val ROOF_SCAN_STEP = 0.25
@@ -417,6 +420,11 @@ class BounceElytraFly(
 			}
 		}
 	}
+
+	/** Over an obstacle in the nether up to [MAX_NETHER_LAYER_FLIGHT_Y], over two blocks too, the roof stays clear of the gliding box. */
+	override fun SafeContext.maxHopY() =
+		if (world.registryKey == World.NETHER) max(maxFlightY(), min(MAX_NETHER_LAYER_FLIGHT_Y, startPos.y + MAX_HOP_RISE))
+		else maxFlightY()
 
 	override fun SafeContext.maxFlightY() =
 		if (world.registryKey == World.NETHER) min(startPos.y + MAX_COAST_RISE, min(MAX_NETHER_LAYER_FLIGHT_Y, MAX_NETHER_FLIGHT_Y + layerHeight))
