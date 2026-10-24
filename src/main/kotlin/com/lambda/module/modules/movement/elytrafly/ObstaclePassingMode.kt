@@ -29,6 +29,7 @@ import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.module.hud.Speedometer
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.FlyMode
 import com.lambda.threading.runGameScheduled
+import com.lambda.threading.runSafe
 import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.CommunicationUtils.warn
@@ -256,6 +257,8 @@ abstract class ObstaclePassingMode(
 		val under: Boolean = false,
 		/** Over a hole, held high, with room to sink as it slows down so it gets farther. */
 		val hole: Boolean = false,
+		/** Over a hole with no floor in sight yet, held as far as it's seen and then looked at again. */
+		val open: Boolean = false,
 	) {
 		val targetY = when {
 			under -> (feetY + topY) / 2
@@ -263,7 +266,7 @@ abstract class ObstaclePassingMode(
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -563,7 +566,8 @@ abstract class ObstaclePassingMode(
 			val before = hop.obstacle - progress - halfWidth(snappedDir) - sweep(snappedDir) - HOP_SCAN_STEP
 			val inTheWay = if (before > 0) Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).obstacleHit(snappedDir, before) else null
 			// A simulation of the glide, once a tick is enough.
-			val makesIt by lazy { canGetOver(hop, progress) }
+			// No floor in sight, it glides on as far as it can anyway.
+			val makesIt by lazy { hop.open || canGetOver(hop, progress) }
 			when {
 				!player.isGliding -> this@ObstaclePassingMode.hop = null
 				inTheWay != null -> {
@@ -1118,7 +1122,9 @@ abstract class ObstaclePassingMode(
 		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
 		fun holeFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it < at + bounceRoom }
 			.firstOrNull { !from.add(dir.multiply(it)).boxHasFloor() }
-		var end = floorFrom(start) ?: return false
+		val floorEnd = floorFrom(start)
+		if (floorEnd == null) return glideOverOpenHole(from, dir, at, start)
+		var end: Double = floorEnd
 		while (true) end = holeFrom(end)?.let(::floorFrom) ?: break
 		// Something soon after it, once over the hole too close to steer past. Right after it both are glided over as one,
 		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
@@ -1141,6 +1147,21 @@ abstract class ObstaclePassingMode(
 		}
 		ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it".format(start, end - start) }
 		hop = hole
+		return true
+	}
+
+	/**
+	 * Glides on at the height over a hole [start] ahead of [from] with no floor in sight, there may be some farther on.
+	 * As far as [MAX_HOP_LENGTH] at a time, then it's looked at again, also for anything in the way.
+	 */
+	private fun SafeContext.glideOverOpenHole(from: Vec3d, dir: Vec3d, at: Double, start: Double): Boolean {
+		val end = generateSequence(start) { it + HOP_SCAN_STEP }
+			.takeWhile { it <= start + MAX_HOP_LENGTH && from.add(dir.multiply(it)).isLoaded }.last()
+		// Something in the way over it, dodged or glided over like anywhere else.
+		if (from.obstacleHit(dir, end) != null) return false
+		ElytraFly.debug { "Hole %.1f ahead, no floor in sight, gliding on over it at its height".format(start) }
+		hop = Hop(at + start - HOP_SCAN_STEP, at + end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE),
+			at + start, false, hole = true, open = true)
 		return true
 	}
 
@@ -1502,6 +1523,8 @@ abstract class ObstaclePassingMode(
 
 	/** Stops dodging and lands, to walk around the obstacle at [at] along the line, or past the [carpets]. Always false. */
 	private fun brake(at: Double, reason: String, carpets: Boolean = false): Boolean {
+		// Over a hole there's nothing to land on, it glides on and looks again, there may be floor farther on.
+		if (runSafe { overHole() } == true) return noLaneYet(at, "$reason, over a hole, gliding on")
 		ElytraFly.debug { "$reason, landing to walk around it" }
 		landedTicks = 0
 		stopDodge()
@@ -1510,6 +1533,9 @@ abstract class ObstaclePassingMode(
 		brakeCarpets = carpets
 		return false
 	}
+
+	private fun SafeContext.overHole() =
+		player.isGliding && !player.isOnGround && Vec3d(player.x, startPos.y, player.z).let { it.isLoaded && !it.boxHasFloor() }
 
 	private fun Vec3d.describe(dir: Vec3d): String {
 		val offset = dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize())
