@@ -51,11 +51,10 @@ object AutoMend : Module(
     description = "Mends tools, armor or elytras at an XP farm by sweeping its armor stand, worn and in the offhand",
     tag = ModuleTag.PLAYER,
 ), MendConfig {
-    private val setup by setting("Setup", { clickSetup.toggle() }, "Set the chests and where to stand by clicking them")
-    private val reset by setting("Reset", { clickSetup.reset() }, "Set all positions back to 0 0 0, so it mends what you carry where you stand")
+    private val setup by setting("Setup", { clickSetup.toggle() }, "Set the chests by clicking them")
+    private val reset by setting("Reset", { clickSetup.reset() }, "Set both chests back to 0 0 0, so it mends what you carry")
     private var damagedChest by setting("Damaged Chest", BlockPos.ORIGIN, "Chest to take damaged items from. Without both chests it mends what you carry and stops")
     private var repairedChest by setting("Repaired Chest", BlockPos.ORIGIN, "Chest to put mended and undamaged items into. Without both chests it mends what you carry and stops")
-    private var standPos by setting("Stand Pos", BlockPos.ORIGIN, "Where to stand while hitting. At 0 0 0 it uses where you are")
     private val group by setting("Group", MendGroup.None, "What to mend. Armor and elytras are worn while mending, so several mend at once. At None the Kind below is used")
     private val kind by setting("Kind", GearKindChoice.Pickaxe, "One kind of item to mend, of any material. At None the Item below is used") { group == MendGroup.None }
     private val item by setting("Item", MendItem.None, "One diamond or netherite item to mend") { group == MendGroup.None && kind == GearKindChoice.None }
@@ -126,7 +125,6 @@ object AutoMend : Module(
         listOf(
             ClickSetup.Step("Damaged Chest", "the chest with the damaged items", ::damagedChest, ClickSetup.container),
             ClickSetup.Step("Repaired Chest", "the chest for the mended items", ::repairedChest, ClickSetup.container),
-            ClickSetup.Step("Stand Pos", "the top of the floor you hit from, e.g. the pressure plate", ::standPos, ClickSetup.standing),
         ),
     )
 
@@ -160,10 +158,9 @@ object AutoMend : Module(
                 logError("Set both chests, or neither to mend what you carry. Press Setup or Reset")
                 return@onEnable disable()
             }
-            val stand = standPos.orUnset ?: player.blockPos
+            // Turned on standing on the farm's pressure plate, it comes back there after each trip to the chests.
+            val stand = player.blockPos
             if (damaged != null) {
-                // The farm's spot is kept for next time, mending what you carry happens wherever you are.
-                standPos = stand
                 info("Taking from ${damaged.toShortString()}, putting into ${repaired?.toShortString()}, standing at ${stand.toShortString()}")
             } else info("No chests set, mending what you carry, standing at ${stand.toShortString()}")
 
