@@ -31,6 +31,7 @@ import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.BlockUtils.hasFluid
 import com.lambda.util.BlockUtils.hasSolidGround
 import com.lambda.util.BlockUtils.isPassable
+import com.lambda.util.CommunicationUtils.warn
 import net.minecraft.entity.mob.EndermanEntity
 import net.minecraft.entity.mob.MobEntity
 import net.minecraft.entity.mob.PiglinEntity
@@ -54,6 +55,7 @@ object FlightStop : Loadable {
     /** How far from where you land a spot for the container is looked for, like placing it does. */
     private const val SPOT_RANGE = 3
     private const val WALK_AHEAD = 16
+    private const val MAX_STUCK_WALKS = 5
 
     private var owner: Any? = null
     /** Why it last couldn't land, written to the log once each time it changes. */
@@ -62,6 +64,9 @@ object FlightStop : Loadable {
     private var walkingFor: Any? = null
     /** Where it walks, the way it was flying when it started. */
     private var walkDirection = Vec3d.ZERO
+    /** Where the last walk started, and how many in a row got nowhere. */
+    private var walkStart: Vec3d? = null
+    private var stuckWalks = 0
 
     /** Someone lands or uses what it placed, so flying waits. */
     val pausesFlight get() = owner != null
@@ -116,9 +121,16 @@ object FlightStop : Loadable {
         if (walkingFor !== by) {
             walkingFor = by
             walkDirection = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
+            stuckWalks = 0
+            walkStart = null
             LOG.info("[FlightStop] No usable elytra, walking on to find a spot")
         }
-        if (BaritoneHandler.isActive) return
+        if (BaritoneHandler.isActive || stuckWalks >= MAX_STUCK_WALKS) return
+        // Baritone gives up at once when it finds no way, it isn't asked again and again.
+        if (walkStart?.let { it.squaredDistanceTo(player.pos) < 1.0 } == true) {
+            if (++stuckWalks >= MAX_STUCK_WALKS) return warn("Can't walk on to find a spot to land, waiting here")
+        } else stuckWalks = 0
+        walkStart = player.pos
         val goal = player.pos.add(walkDirection.multiply(WALK_AHEAD.toDouble()))
         BaritoneHandler.setGoalAndPath(GoalXZ(goal.x.toInt(), goal.z.toInt()))
     }
