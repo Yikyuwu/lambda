@@ -332,6 +332,9 @@ class BounceElytraFly(
 		}
 
 		listen<PacketEvent.Send.Pre>({ 1 }) { event ->
+			// Sent from the network thread, e.g. keep-alive replies, they go out as they are. Only the game thread holds
+			// packets back and sends them, else both take from the queue at once.
+			if (!mc.isOnThread) return@listen
 			// The server ignores your movement until you confirm its setback.
 			if (queuePackets && event.packet !is TeleportConfirmC2SPacket) {
 				sendPacketQueue.add(event.packet)
