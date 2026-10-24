@@ -95,6 +95,11 @@ abstract class ObstaclePassingMode(
 		private const val MAX_LANDING_TICKS = 40
 		/** Room kept around a magma cube on every side, it hops about meanwhile. */
 		private const val MAGMA_CUBE_MARGIN = 0.3
+		private const val PLAYER_HALF_WIDTH = 0.3
+		/** Room kept above a magma cube gliding over it, it jumps. */
+		private const val MAGMA_CUBE_JUMP = 0.5
+		/** How far around the way magma cubes are looked for, past the biggest one's middle. */
+		private const val MAX_DODGE_CUBE = 4.0
 		/** How far to the side a magma cube is dodged at least, a big one fills most of the way. */
 		private const val MOB_MAX_DODGE = 3
 		/** How far past a magma cube walking goes, the biggest is about two blocks. */
@@ -304,6 +309,8 @@ abstract class ObstaclePassingMode(
 	private var dodgeLean = 0
 	/** Dodging carpets, back onto the line only once it's free of them too. */
 	private var dodgeCarpets = false
+	/** Dodging a magma cube, the lanes are judged by where it reaches, see [cubeSpans]. */
+	private var dodgeMob = false
 	/** How far across the line the lane is that's dodged to, [dodge] short of it by the drift of the tilt. */
 	private var dodgeOffset = 0.0
 	/** Looking for the lane with the fewest carpets, at all lanes, now and then only for the same one. */
@@ -678,15 +685,16 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.startDodge(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, mob: Boolean = false): Boolean {
 		val at = progress(from) + distance
 		val block = from.obstacleBlock(dir, distance + 1)
-		hopRejection = if (mob) "a mob is dodged" else "it got too close to get over before"
+		if (mob) return passCube(from, linePoint, dir, distance, at, block)
+		hopRejection = "it got too close to get over before"
 		hopTooSlow = false
-		if (!mob && skipHopAt?.let { abs(it - at) < 1.5 } != true && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
+		if (skipHopAt?.let { abs(it - at) < 1.5 } != true && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
 			if (dodgePastNext(from, linePoint, dir, distance, block, it)) return true
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, gliding up onto it at y %.2f".format(distance, it.feetY) }
 			hop = it
 			return true
 		}
-		if (!mob && skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { over ->
+		if (skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { over ->
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = over
@@ -697,12 +705,39 @@ abstract class ObstaclePassingMode(
 		// left for close enough to still steer over to it.
 		if (hopTooSlow && distance > brakeDistance() + HOP_RETRY_MARGIN)
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
-		// Around a magma cube as far over as there's room, a big one fills most of the way.
-		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = if (mob) max(passerConfig.maxDodge, MOB_MAX_DODGE) else passerConfig.maxDodge)
+		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
 			?: return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
-			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)), mob = mob)
+			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)))
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 		return dodgeTo(lane, at)
+	}
+
+	/**
+	 * Past the magma cube [distance] ahead, as far from it as the way has room, it jumps at you: onto a lane clear of it,
+	 * else gliding over it on the lane farthest from it, else flying past it there at full speed. Walking, it'd come at you
+	 * over and over, bumping into it in the air hurts a little at worst. Lands only with no lane free of blocks.
+	 */
+	private fun SafeContext.passCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
+		val maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE)
+		freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true)?.let { lane ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
+			return dodgeTo(lane, at).also { dodgeMob = true }
+		}
+		val clearMiss = laneMiss
+		val far = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true, closeToCube = true)
+		val laneTarget = far?.target ?: Vec3d.ZERO
+		// Never under one, coming down onto the floor next to it.
+		planHop(linePoint.add(laneTarget), dir, distance, avoid = cubeBoxes(from, distance + MAX_HOP_LENGTH))?.takeUnless { it.under }?.let { over ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), no lane clear of it ($clearMiss), gliding over it at y %.2f on ${laneTarget.describe(dir)}".format(distance, over.targetY) }
+			hop = over.with(lane = laneTarget)
+			return true
+		}
+		far?.let { lane ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), no lane clear of it ($clearMiss), not gliding over it ($hopRejection), flying past it on ${lane.target.describe(dir)}".format(distance) }
+			return dodgeTo(lane, at).also { dodgeMob = true }
+		}
+		return if (distance > brakeDistance()) noLaneYet(at, "Magma cube %.1f ahead ($block), no lane free of blocks yet ($laneMiss)".format(distance))
+			else brake(at, "Magma cube %.1f ahead ($block), no lane free of blocks ($laneMiss)".format(distance), mob = true)
 	}
 
 	/**
@@ -784,7 +819,8 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.freeLane(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
-		lead: Double = 0.0, fewestCarpets: Boolean = false, maxDodge: Int = passerConfig.maxDodge,
+		lead: Double = 0.0, fewestCarpets: Boolean = false, maxDodge: Int = passerConfig.maxDodge, mob: Boolean = false,
+		closeToCube: Boolean = false,
 	): Lane? {
 		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
 		val step = laneStep(dir)
@@ -801,9 +837,14 @@ abstract class ObstaclePassingMode(
 		val laneSpeed = player.velocity.horizontalLength() + LANE_SPEED_MARGIN
 		val misses = mutableListOf<Pair<Double, String>>()
 		val taken = mutableListOf<Pair<Double, Int>>()
+		// A magma cube is judged by where it reaches rather than by rays swinging out, it only touches you where you are.
+		val cubes = if (mob) cubeSpans(from, linePoint, dir, distance + past + DODGE_MARGIN) else emptyList()
 		val lanes = (-maxOffset..maxOffset)
 			.filter { fewestCarpets || it != currentOffset }
 			.sortedWith(compareBy({ it != currentOffset }, { it != 0 }, { abs(it - currentOffset) }, { -it }))
+			// Past one as far from it as there's room, it jumps at you.
+			.let { sorted -> if (cubes.isEmpty()) sorted else sorted.sortedByDescending { offset ->
+				cubes.minOf { abs(offset * laneStep - (it.acrossMin + it.acrossMax) / 2) } } }
 		// Up on a layer, one staying on it first. Off it you drop down beside it, where the layer is in the way.
 		return (if (onLayer) listOf(true, false) else listOf(true)).firstNotNullOfOrNull { sameFloor -> misses.clear(); taken.clear(); lanes.asSequence().mapNotNull { offset ->
 				val laneOffset = offset * laneStep
@@ -826,8 +867,9 @@ abstract class ObstaclePassingMode(
 				val miss = when {
 					// Ahead, you're not there yet to glide over from.
 					lead == 0.0 && from.sidewaysObstructed(lane.subtract(from)) -> "in the way sideways"
-					else -> middle.obstacleHit(dir, distance + past, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets)
+					else -> middle.obstacleHit(dir, distance + past, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets, !mob)
 						?.let { "${it.what} ahead" }
+						?: if (!closeToCube && cubes.any { cube -> cube.touches(path) }) "a magma cube in the way" else null
 						?: lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
 							if (spot.boxHasFloor()) null
 							else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
@@ -1050,7 +1092,12 @@ abstract class ObstaclePassingMode(
 				val from = if (tilt != 0 && onDodgeLane(linePoint, dir)) here else onLane
 				val ahead = from.add(dir.multiply(skip))
 				// Dodging carpets, more of them on the lane too.
-				val (low, other) = ahead.obstacleHits(dir, passerConfig.dodgeLookAhead - skip, lean = tilt, carpets = dodgeCarpets)
+				val (nearest, other) = ahead.obstacleHits(dir, passerConfig.dodgeLookAhead - skip, lean = tilt, carpets = dodgeCarpets, mobs = !dodgeMob)
+				// Dodging a magma cube, one reaching onto the lane: it moved, or jumps at you.
+				val cube = if (!dodgeMob) null else cubeSpans(here, linePoint, dir, passerConfig.dodgeLookAhead.toDouble())
+					.filter { dodgeOffset in it.acrossMin..it.acrossMax }.minOfOrNull { it.alongMin }
+					?.let { Obstacle(it.coerceAtLeast(0.0) - skip, mob = true) { "magma_cube" } }
+				val low = listOfNotNull(nearest, cube).minByOrNull { it.distance }
 				low?.let { hit ->
 					val distance = hit.distance + skip
 					val block = hit.what
@@ -1070,7 +1117,11 @@ abstract class ObstaclePassingMode(
 						// Over to another only with fewer of them on it.
 						carpetsOnly && !onLine -> if (!fewestCarpetsLane.allows(block)) null
 							else freeLane(here, linePoint, dir, distance, lane, past = CARPET_CLEAR, fewestCarpets = true)?.takeUnless { it.stays }
-						else -> freeLane(here, linePoint, dir, distance, lane, dodgeCarpets, if (dodgeCarpets) CARPET_CLEAR else DODGE_MARGIN)
+						else -> freeLane(here, linePoint, dir, distance, lane, dodgeCarpets, if (dodgeCarpets) CARPET_CLEAR else DODGE_MARGIN,
+							maxDodge = if (dodgeMob) max(passerConfig.maxDodge, MOB_MAX_DODGE) else passerConfig.maxDodge, mob = dodgeMob)
+							// No lane clear of the magma cube, as far from it as there's room.
+							?: if (!hit.mob) null else freeLane(here, linePoint, dir, distance, lane, past = DODGE_MARGIN,
+								maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE), mob = true, closeToCube = true)?.takeUnless { it.stays }
 					}
 					val over = if (carpetsOnly && distance <= CARPET_HOP_AHEAD) planHop(from, dir, distance, carpets = true, lean = tilt)
 						?.with(lane = lane) else null
@@ -1098,7 +1149,9 @@ abstract class ObstaclePassingMode(
 							} == true -> {}
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
-						else -> return brake(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane ($laneMiss)".format(distance), dodgeCarpets)
+						// A magma cube with no lane farther from it, flown past on this one rather than landing next to it.
+						hit.mob -> return noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), no lane farther from it, flying past".format(distance)).let { true }
+						else -> return brake(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane ($laneMiss)".format(distance), dodgeCarpets, mob = hit.mob)
 					}
 				}
 			}
@@ -1297,7 +1350,10 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.planHop(
 		linePoint: Vec3d, dir: Vec3d, distance: Double, step: Boolean = false, length: Double = STEP_ON, carpets: Boolean = false, lean: Int = 0,
+		avoid: List<Box> = emptyList(),
 	): Hop? {
+		// Blocks, and the [avoid] boxes, e.g. magma cubes the world's collisions don't count.
+		fun free(box: Box) = world.isSpaceEmpty(player, box) && avoid.none { it.intersects(box) }
 		val lineY = linePoint.y
 		// As far out along each axis as the box swings across the way, it's in the way where the swing hits it. Tilted
 		// [lean], only to that side: half as far each way, moved over that way by as much. Diagonally the box reaches as far
@@ -1325,11 +1381,11 @@ abstract class ObstaclePassingMode(
 			along += HOP_SCAN_STEP
 			val maxLength = if (carpets) MAX_CARPET_HOP_LENGTH else MAX_HOP_LENGTH
 			if (along > distance + maxLength) return noHop("longer than ${maxLength.toInt()}")
-			if (world.isSpaceEmpty(player, box(along, floorY, bounceHeight).expand(swing, 0.0, swing))) gap += HOP_SCAN_STEP
+			if (free(box(along, floorY, bounceHeight).expand(swing, 0.0, swing))) gap += HOP_SCAN_STEP
 			else {
 				gap = 0.0
 				end = along
-				if (!world.isSpaceEmpty(player, box(along, floorY).expand(swing, 0.0, swing))) onFloor = true
+				if (!free(box(along, floorY).expand(swing, 0.0, swing))) onFloor = true
 			}
 		}
 		// Carpets the rays saw only at the edge of the swing, the box swinging out diagonally reaches as far only in its
@@ -1343,7 +1399,7 @@ abstract class ObstaclePassingMode(
 		val samples = generateSequence(distance - reach) { it + HOP_SCAN_STEP }.takeWhile { it <= end + reach }.toList()
 		val start = distance - reach
 		val stop = end + reach
-		fun fits(y: Double) = samples.all { world.isSpaceEmpty(player, box(it, y).expand(swing, 0.0, swing)) }
+		fun fits(y: Double) = samples.all { free(box(it, y).expand(swing, 0.0, swing)) }
 		// Over carpets a bit higher than just clearing them, onto a layer of them only that.
 		val maxHopY = maxHopY()
 		val heights = generateSequence(lineY + if (carpets && !step) CARPET_GLIDE_FEET else passerConfig.minObstacleHeight) { it + HOP_HEIGHT_STEP }
@@ -1441,6 +1497,38 @@ abstract class ObstaclePassingMode(
 
 	/** Where [steerPath] has you [along] the line ahead, [offset] across it, flying [heading] off it at [speed]. */
 	private class SteerState(val along: Double, val offset: Double, val heading: Double, val speed: Double)
+
+	/**
+	 * Where a magma cube reaches with room around it: along the way ahead of where it was looked from, and across the
+	 * line. Your box is in it right where its middle is.
+	 */
+	private class CubeSpan(val alongMin: Double, val alongMax: Double, val acrossMin: Double, val acrossMax: Double) {
+		fun reaches(along: Double, offset: Double) = along in alongMin..alongMax && offset in acrossMin..acrossMax
+		/** Whether [path] comes into it, or past its end, on its last lane. */
+		fun touches(path: List<SteerState>) = path.any { reaches(it.along, it.offset) } ||
+			path.last().let { last -> alongMax > last.along && last.offset in acrossMin..acrossMax }
+	}
+
+	/** The boxes of the magma cubes up to [maxDistance] around [from], with room around them and above for their jumps. */
+	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
+		world.getEntitiesByClass(MagmaCubeEntity::class.java, Box(from, from).expand(maxDistance, MAX_DODGE_CUBE, maxDistance)) { it.isAlive }
+			.map { it.boundingBox.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN).stretch(0.0, MAGMA_CUBE_JUMP, 0.0) }
+
+	/** The magma cubes up to [maxDistance] ahead of [from], how far they reach along the way and across the line from [linePoint]. */
+	private fun SafeContext.cubeSpans(from: Vec3d, linePoint: Vec3d, dir: Vec3d, maxDistance: Double): List<CubeSpan> {
+		val forward = dir.normalize()
+		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val area = Box(from, from).expand(maxDistance + MAX_DODGE_CUBE, MAX_DODGE_CUBE, maxDistance + MAX_DODGE_CUBE)
+		return world.getEntitiesByClass(MagmaCubeEntity::class.java, area) { it.isAlive }.map { cube ->
+			val box = cube.boundingBox
+			val room = MAGMA_CUBE_MARGIN + PLAYER_HALF_WIDTH
+			// Diagonally its corners reach out farther.
+			fun reach(axis: Vec3d) = box.lengthX / 2 * abs(axis.x) + box.lengthZ / 2 * abs(axis.z) + room
+			val along = box.center.subtract(from).dotProduct(forward)
+			val offset = box.center.subtract(linePoint).dotProduct(across)
+			CubeSpan(along - reach(forward), along + reach(forward), offset - reach(across), offset + reach(across))
+		}.filter { it.alongMax > 0 && it.alongMin < maxDistance }
+	}
 
 	/**
 	 * Whether to hold the height for [hop] at [progress] along the line, once it's close enough. Over carpets only
@@ -1572,15 +1660,15 @@ abstract class ObstaclePassingMode(
 	 * tilted [lean] across the way, the box only swings out that side. Swinging as far as at [speed], by default yours.
 	 */
 	context(safeContext: SafeContext)
-	private fun Vec3d.obstacleHit(direction: Vec3d, maxDistance: Double, extra: Double = 0.0, lean: Int = 0, speed: Double? = null, carpets: Boolean = false) =
-		obstacleHits(direction, maxDistance, extra, lean, speed, carpets).first
+	private fun Vec3d.obstacleHit(direction: Vec3d, maxDistance: Double, extra: Double = 0.0, lean: Int = 0, speed: Double? = null, carpets: Boolean = false, mobs: Boolean = true) =
+		obstacleHits(direction, maxDistance, extra, lean, speed, carpets, mobs).first
 
 	/**
 	 * Like [obstacleHit], the first in the way with [carpets] and, on its own, the first that's not one of them. Looked
 	 * for at once, each costs a few dozen rays as far ahead as it looks.
 	 */
 	context(safeContext: SafeContext)
-	private fun Vec3d.obstacleHits(direction: Vec3d, maxDistance: Double, extra: Double = 0.0, lean: Int = 0, speed: Double? = null, carpets: Boolean = false): Pair<Obstacle?, Obstacle?> {
+	private fun Vec3d.obstacleHits(direction: Vec3d, maxDistance: Double, extra: Double = 0.0, lean: Int = 0, speed: Double? = null, carpets: Boolean = false, mobs: Boolean = true): Pair<Obstacle?, Obstacle?> {
 		val across = Vec3d(-direction.z, 0.0, direction.x).normalize()
 		val halfWidth = halfWidth(direction) + extra
 		val sweep = with(safeContext) { speed?.let { sweep(direction, it) } ?: sweep(direction) }
@@ -1603,7 +1691,7 @@ abstract class ObstaclePassingMode(
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
 		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach)).expand(MAGMA_CUBE_MARGIN)) {
-			safeContext.player.collidesWith(it) || it is MagmaCubeEntity && it.isAlive
+			safeContext.player.collidesWith(it) || mobs && it is MagmaCubeEntity && it.isAlive
 		}
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
 		fun nearest(starts: List<Vec3d>, within: Double): Obstacle? {
@@ -1692,6 +1780,7 @@ abstract class ObstaclePassingMode(
 		dodgeLean = 0
 		dodgeOffset = 0.0
 		dodgeCarpets = false
+		dodgeMob = false
 		dodgeYaw = null
 		return false
 	}
