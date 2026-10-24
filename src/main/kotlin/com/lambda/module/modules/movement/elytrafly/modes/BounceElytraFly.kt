@@ -164,8 +164,9 @@ class BounceElytraFly(
 		get() = fakeLag && player.isGliding && (!yMotionSetting || !onYMotionAngle) &&
 				queuedTicks < MAX_FAKE_LAG_TICKS &&
 				// Only bouncing. Held back after a setback or while landing, the server sees you stand still, sets you back
-				// again and again. Nor falling off a block you bounced on.
-				!flightPaused && player.y >= bounceFloor && player.y - bounceFloor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163
+				// again and again. Nor falling off a block you bounced on. Also the tick before touching down, the server
+				// often ended the glide when the landing came on its own.
+				!flightPaused && player.y >= bounceFloor && player.y + min(player.velocity.y, 0.0) - bounceFloor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163
 
 	/**
 	 * The floor you bounce on. The flight line moves up onto a layer before you first touch it, the floor you last
