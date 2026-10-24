@@ -93,6 +93,10 @@ abstract class ObstaclePassingMode(
 		private const val BRAKE_MARGIN = 3.0
 		/** How long to wait on the ground for the server to end the glide, about a ping and a half on a bad day. */
 		private const val MAX_LANDING_TICKS = 40
+		/** How long it waits for a magma cube in the way to move on before walking around it. */
+		private const val MOB_WAIT_TICKS = 600
+		/** Room kept around a magma cube on every side, it hops about meanwhile. */
+		private const val MAGMA_CUBE_MARGIN = 0.75
 		/** How far ahead the line has to be free to swing back onto it, the swing takes about [DODGE_STEER_AHEAD]. */
 		private const val RETURN_CLEAR = DODGE_STEER_AHEAD + DODGE_MARGIN
 		/** Less than the player's width taken for its rays, so a block only grazed isn't counted. */
@@ -328,6 +332,11 @@ abstract class ObstaclePassingMode(
 	private var brakeAt: Double? = null
 	/** Landing for carpets, walking on to where there are none ahead, to take off clear of them. */
 	private var brakeCarpets = false
+	/** Landing for a magma cube in the way of every lane, it waits for it to move on rather than walking up to it. */
+	private var brakeMob = false
+	/** How much longer it waits for the magma cube, and where along the line it was. */
+	private var mobWaitTicks = 0
+	private var mobWaitAt = 0.0
 
 	private var hop: Hop? = null
 	/** Down from a brake, the glide over, walking may start. */
@@ -425,6 +434,8 @@ abstract class ObstaclePassingMode(
 			if (passerConfig.passObstacles) BaritoneHandler.cancel()
 			stopDodge()
 			brakeAt = null
+			brakeMob = false
+			mobWaitTicks = 0
 			hop = null
 		}
 		listen<TickEvent.Pre>({ DODGE_PRIORITY }) {
@@ -543,6 +554,20 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 
+		if (mobWaitTicks > 0) {
+			val stillThere = Vec3d(playerPos.x, closestLinePoint.y, playerPos.z)
+				.obstacleHits(snappedDir, passerConfig.dodgeLookAhead.toDouble()).second?.mob == true
+			if (!stillThere) {
+				ElytraFly.debug { "The magma cube moved on, flying on" }
+				mobWaitTicks = 0
+			} else if (--mobWaitTicks > 0) return true
+			else {
+				ElytraFly.debug { "The magma cube didn't move on, walking around it" }
+				val beforeIt = closestLinePoint.add(snappedDir.multiply(mobWaitAt - progress(closestLinePoint) - 1))
+				return pathToValidPoint(beforeIt, snappedDir)
+			}
+		}
+
 		brakeAt?.let { at ->
 			if (!player.isOnGround) return false
 			// The client keeps gliding until the server ends it on seeing you down. Walking before that, you slide on
@@ -551,6 +576,12 @@ abstract class ObstaclePassingMode(
 			if (landedTicks >= MAX_LANDING_TICKS) ElytraFly.debug { "Still gliding after landing, walking anyway" }
 			landedTicks = 0
 			brakeAt = null
+			if (brakeMob) {
+				ElytraFly.debug { "Landed, waiting for the magma cube to move on" }
+				mobWaitTicks = MOB_WAIT_TICKS
+				mobWaitAt = at
+				return true
+			}
 			// From right before the obstacle, as that may still be a way ahead.
 			val beforeIt = closestLinePoint.add(snappedDir.multiply(at - progress(closestLinePoint) - 1))
 			landed = true
@@ -689,7 +720,7 @@ abstract class ObstaclePassingMode(
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
 		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
 			?: return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
-			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)))
+			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)), mob = mob)
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 		return dodgeTo(lane, at)
 	}
@@ -1524,7 +1555,7 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** Stops dodging and lands, to walk around the obstacle at [at] along the line, or past the [carpets]. Always false. */
-	private fun brake(at: Double, reason: String, carpets: Boolean = false): Boolean {
+	private fun brake(at: Double, reason: String, carpets: Boolean = false, mob: Boolean = false): Boolean {
 		// Over a hole there's nothing to land on, it glides on and looks again, there may be floor farther on.
 		if (runSafe { overHole() } == true) return noLaneYet(at, "$reason, over a hole, gliding on")
 		ElytraFly.debug { "$reason, landing to walk around it" }
@@ -1533,6 +1564,7 @@ abstract class ObstaclePassingMode(
 		hop = null
 		brakeAt = at
 		brakeCarpets = carpets
+		brakeMob = mob
 		return false
 	}
 
@@ -1590,7 +1622,7 @@ abstract class ObstaclePassingMode(
 		// smallest.
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
-		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach))) {
+		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach)).expand(MAGMA_CUBE_MARGIN)) {
 			safeContext.player.collidesWith(it) || it is MagmaCubeEntity && it.isAlive
 		}
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
@@ -1606,7 +1638,9 @@ abstract class ObstaclePassingMode(
 							nearest = Obstacle(distance) { "${Registries.BLOCK.getId(safeContext.blockState(hit.blockPos).block).path} ${hit.blockPos.toShortString()}" }
 					}
 				solid.forEach { entity ->
-					entity.boundingBox.raycast(start, start.add(reach)).orElse(null)?.let {
+					// A magma cube hops about, it's given room.
+					val box = if (entity is MagmaCubeEntity) entity.boundingBox.expand(MAGMA_CUBE_MARGIN) else entity.boundingBox
+					box.raycast(start, start.add(reach)).orElse(null)?.let {
 						val distance = it.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
 							nearest = Obstacle(distance, entity is MagmaCubeEntity) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
