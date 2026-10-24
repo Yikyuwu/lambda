@@ -35,6 +35,7 @@ import net.minecraft.inventory.Inventory
 import net.minecraft.util.Hand
 import net.minecraft.util.hit.HitResult
 import net.minecraft.util.math.BlockPos
+import net.minecraft.util.math.Direction
 import kotlin.reflect.KMutableProperty0
 
 /**
@@ -106,6 +107,16 @@ class ClickSetup(
     companion object {
         val container: SafeContext.(HitResult) -> BlockPos? = { hit ->
             hit.blockResult?.blockPos?.takeIf { blockEntity(it) is Inventory }
+        }
+
+        /**
+         * Where you stand on the floor whose top is clicked: the block itself when you stand in it, e.g. a pressure plate,
+         * slab or carpet, else the one above.
+         */
+        val standing: SafeContext.(HitResult) -> BlockPos? = { hit ->
+            hit.blockResult?.takeIf { it.side == Direction.UP }?.blockPos?.let { pos ->
+                if (blockState(pos).getCollisionShape(world, pos).getMax(Direction.Axis.Y) < 1.0) pos else pos.up()
+            }
         }
 
         inline fun <reified T : Block> block(): SafeContext.(HitResult) -> BlockPos? = { hit ->
