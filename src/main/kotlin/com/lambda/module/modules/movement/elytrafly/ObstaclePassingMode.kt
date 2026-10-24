@@ -746,9 +746,9 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
-		// all. There's nothing to brake for, it's looked at again until it's close.
-		if (hopTooSlow && distance > player.velocity.horizontalLength() * HOP_LEAD_TICKS)
-			return noLaneYet(at, "Magma cube %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
+		// all. Or it's moved, it hops around. There's nothing to brake for, it's looked at again until it's close.
+		if (distance > player.velocity.horizontalLength() * HOP_LEAD_TICKS)
+			return noLaneYet(at, "Magma cube %.1f ahead ($block), can't get over it yet (${if (hopTooSlow) hopMiss else hopRejection}), bouncing on to look again".format(distance))
 		skipHopAt = at
 		// Too slow only, it climbs as high as it gets anyway. Maybe just over it, else bumping into it higher up.
 		if (hopTooSlow) planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = true)?.takeUnless { it.under }?.let { over ->
@@ -1513,12 +1513,15 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * The boxes of the magma cubes up to [maxDistance] around [from], with room around them, glided over like a block two
-	 * high, the biggest is just as high. As long as they are thick along the way.
+	 * high, the biggest is just as high. As long as they are thick along the way. One mid-jump is taken as down on the
+	 * floor again, it'll have landed by the time you're there, up there it'd look too high to get over.
 	 */
 	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
 		world.getEntitiesByClass(MagmaCubeEntity::class.java, Box(from, from).expand(maxDistance, CUBE_SEARCH_HEIGHT, maxDistance)) { it.isAlive }
-			.map { cube -> cube.boundingBox.let { Box(it.minX, it.minY, it.minZ, it.maxX, max(it.minY + CUBE_HEIGHT, it.maxY), it.maxZ) }
-				.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN) }
+			.map { cube -> cube.boundingBox.let {
+				val minY = if (cube.isOnGround) it.minY else min(it.minY, startPos.y)
+				Box(it.minX, minY, it.minZ, it.maxX, minY + max(CUBE_HEIGHT, it.lengthY), it.maxZ)
+			}.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN) }
 
 
 	/**
