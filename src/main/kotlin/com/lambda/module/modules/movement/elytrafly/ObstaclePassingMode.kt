@@ -44,7 +44,6 @@ import com.lambda.util.world.raycast.RayCastUtils.rayCast
 import net.minecraft.entity.Entity
 import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
-import net.minecraft.entity.mob.ZoglinEntity
 import net.minecraft.registry.Registries
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
@@ -1509,10 +1508,10 @@ abstract class ObstaclePassingMode(
 	private class SteerState(val along: Double, val offset: Double, val heading: Double, val speed: Double)
 
 	/**
-	 * Magma cubes and hoglins (zoglins too) are glided over like a block two high, never dodged or walked around: a cube
+	 * Magma cubes and hoglins are glided over like a block two high, never dodged or walked around: a cube
 	 * jumps at you, a hoglin charges, flown past fast and high they don't get to.
 	 */
-	private fun Entity.glidedOver() = isAlive && (this is MagmaCubeEntity || this is HoglinEntity || this is ZoglinEntity)
+	private fun Entity.glidedOver() = isAlive && (this is MagmaCubeEntity || this is HoglinEntity)
 
 	/**
 	 * The boxes of the magma cubes and hoglins up to [maxDistance] around [from], with room around them, glided over like a block two
