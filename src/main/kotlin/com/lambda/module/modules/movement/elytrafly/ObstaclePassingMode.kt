@@ -93,10 +93,12 @@ abstract class ObstaclePassingMode(
 		private const val BRAKE_MARGIN = 3.0
 		/** How long to wait on the ground for the server to end the glide, about a ping and a half on a bad day. */
 		private const val MAX_LANDING_TICKS = 40
-		/** How long it waits for a magma cube in the way to move on before walking around it. */
-		private const val MOB_WAIT_TICKS = 600
 		/** Room kept around a magma cube on every side, it hops about meanwhile. */
-		private const val MAGMA_CUBE_MARGIN = 0.75
+		private const val MAGMA_CUBE_MARGIN = 0.3
+		/** How far to the side a magma cube is dodged at least, a big one fills most of the way. */
+		private const val MOB_MAX_DODGE = 3
+		/** How far past a magma cube walking goes, the biggest is about two blocks. */
+		private const val MOB_WALK_PAST = 4.0
 		/** How far ahead the line has to be free to swing back onto it, the swing takes about [DODGE_STEER_AHEAD]. */
 		private const val RETURN_CLEAR = DODGE_STEER_AHEAD + DODGE_MARGIN
 		/** Less than the player's width taken for its rays, so a block only grazed isn't counted. */
@@ -332,11 +334,8 @@ abstract class ObstaclePassingMode(
 	private var brakeAt: Double? = null
 	/** Landing for carpets, walking on to where there are none ahead, to take off clear of them. */
 	private var brakeCarpets = false
-	/** Landing for a magma cube in the way of every lane, it waits for it to move on rather than walking up to it. */
+	/** Landing for a magma cube in the way of every lane, walked past rather than up to. */
 	private var brakeMob = false
-	/** How much longer it waits for the magma cube, and where along the line it was. */
-	private var mobWaitTicks = 0
-	private var mobWaitAt = 0.0
 
 	private var hop: Hop? = null
 	/** Down from a brake, the glide over, walking may start. */
@@ -435,7 +434,6 @@ abstract class ObstaclePassingMode(
 			stopDodge()
 			brakeAt = null
 			brakeMob = false
-			mobWaitTicks = 0
 			hop = null
 		}
 		listen<TickEvent.Pre>({ DODGE_PRIORITY }) {
@@ -554,20 +552,6 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 
-		if (mobWaitTicks > 0) {
-			val stillThere = Vec3d(playerPos.x, closestLinePoint.y, playerPos.z)
-				.obstacleHits(snappedDir, passerConfig.dodgeLookAhead.toDouble()).second?.mob == true
-			if (!stillThere) {
-				ElytraFly.debug { "The magma cube moved on, flying on" }
-				mobWaitTicks = 0
-			} else if (--mobWaitTicks > 0) return true
-			else {
-				ElytraFly.debug { "The magma cube didn't move on, walking around it" }
-				val beforeIt = closestLinePoint.add(snappedDir.multiply(mobWaitAt - progress(closestLinePoint) - 1))
-				return pathToValidPoint(beforeIt, snappedDir)
-			}
-		}
-
 		brakeAt?.let { at ->
 			if (!player.isOnGround) return false
 			// The client keeps gliding until the server ends it on seeing you down. Walking before that, you slide on
@@ -576,14 +560,9 @@ abstract class ObstaclePassingMode(
 			if (landedTicks >= MAX_LANDING_TICKS) ElytraFly.debug { "Still gliding after landing, walking anyway" }
 			landedTicks = 0
 			brakeAt = null
-			if (brakeMob) {
-				ElytraFly.debug { "Landed, waiting for the magma cube to move on" }
-				mobWaitTicks = MOB_WAIT_TICKS
-				mobWaitAt = at
-				return true
-			}
-			// From right before the obstacle, as that may still be a way ahead.
-			val beforeIt = closestLinePoint.add(snappedDir.multiply(at - progress(closestLinePoint) - 1))
+			// From right before the obstacle, as that may still be a way ahead. Past a magma cube: right before it is free of
+			// blocks, the walk would end in front of it.
+			val beforeIt = closestLinePoint.add(snappedDir.multiply(at - progress(closestLinePoint) + if (brakeMob) MOB_WALK_PAST else -1.0))
 			landed = true
 			return pathToValidPoint(beforeIt, snappedDir, carpets = brakeCarpets).also { landed = false }
 		}
@@ -718,7 +697,8 @@ abstract class ObstaclePassingMode(
 		// left for close enough to still steer over to it.
 		if (hopTooSlow && distance > brakeDistance() + HOP_RETRY_MARGIN)
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
-		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
+		// Around a magma cube as far over as there's room, a big one fills most of the way.
+		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = if (mob) max(passerConfig.maxDodge, MOB_MAX_DODGE) else passerConfig.maxDodge)
 			?: return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
 			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)), mob = mob)
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
@@ -804,7 +784,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.freeLane(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
-		lead: Double = 0.0, fewestCarpets: Boolean = false,
+		lead: Double = 0.0, fewestCarpets: Boolean = false, maxDodge: Int = passerConfig.maxDodge,
 	): Lane? {
 		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
 		val step = laneStep(dir)
@@ -815,7 +795,7 @@ abstract class ObstaclePassingMode(
 		val laneStep = step / 4
 		// The lane dodged to, not its target, that's short of it by the tilt and would round to the one next to it.
 		val currentOffset = ((if (dodge != null && current == dodge) dodgeOffset else current.dotProduct(across)) / laneStep).roundToInt()
-		val maxOffset = (passerConfig.maxDodge / laneStep + 1e-6).toInt()
+		val maxOffset = (maxDodge / laneStep + 1e-6).toInt()
 		val leanDistance = player.velocity.horizontalLength() * LEAN_TICKS
 		// The path slows down a little each tick, bouncing speeds you up meanwhile. The box swings out that much farther.
 		val laneSpeed = player.velocity.horizontalLength() + LANE_SPEED_MARGIN
