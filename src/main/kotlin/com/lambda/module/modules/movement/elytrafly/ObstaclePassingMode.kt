@@ -243,10 +243,12 @@ abstract class ObstaclePassingMode(
 	private class Hop(
 		val start: Double, val end: Double, val feetY: Double, val topY: Double, val obstacle: Double, val step: Boolean,
 		val down: Boolean = false, val lane: Vec3d = Vec3d.ZERO, val stepHeight: Double = STEP_HEIGHT, val low: Boolean = false,
+		/** Under something hanging over the way, held in the middle of the room below it, off the floor so it doesn't bounce. */
+		val under: Boolean = false,
 	) {
-		val targetY = feetY + min(HOP_MARGIN, (topY - feetY) / 2)
+		val targetY = if (under) (feetY + topY) / 2 else feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -354,6 +356,9 @@ abstract class ObstaclePassingMode(
 
 	/** The highest your feet may go gliding, a roof above the obstacle aside. */
 	protected open fun SafeContext.maxFlightY() = Double.POSITIVE_INFINITY
+
+	/** The highest your feet may go gliding over an obstacle, a short while only. */
+	protected open fun SafeContext.maxHopY() = maxFlightY()
 
 	/** The pitch bouncing on is flown at, not holding the height, from a y climbing that much. Like smart pitch by default. */
 	protected open fun SafeContext.bouncePitch(): (y: Double, climb: Double) -> Double = { _, climb -> if (climb > -0.2) 90.0 else 4.0 }
@@ -652,7 +657,7 @@ abstract class ObstaclePassingMode(
 		}
 		if (skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { over ->
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
-			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding over it at y %.2f, %.1f long".format(distance, over.feetY, over.end - over.start) }
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = over
 			return true
 		}
@@ -1268,8 +1273,8 @@ abstract class ObstaclePassingMode(
 			onFloor = true
 			end = max(end, distance + 1 / max(abs(dir.x), abs(dir.z)))
 		}
-		// Only overhead. Under it there's no bouncing, and touching the floor bounces you up into it.
-		if (!onFloor) return noHop("it's overhead")
+		// Only overhead, glided under without touching the floor, a bounce would throw you up into it.
+		val under = !onFloor
 		// From where the box first touches it until it's past it, on the same spots as above.
 		val reach = ceil(GLIDE_SIZE / HOP_SCAN_STEP) * HOP_SCAN_STEP
 		val samples = generateSequence(distance - reach) { it + HOP_SCAN_STEP }.takeWhile { it <= end + reach }.toList()
@@ -1277,14 +1282,15 @@ abstract class ObstaclePassingMode(
 		val stop = end + reach
 		fun fits(y: Double) = samples.all { world.isSpaceEmpty(player, box(it, y).expand(swing, 0.0, swing)) }
 		// Over carpets a bit higher than just clearing them, onto a layer of them only that.
+		val maxHopY = maxHopY()
 		val heights = generateSequence(lineY + if (carpets && !step) CARPET_GLIDE_FEET else passerConfig.minObstacleHeight) { it + HOP_HEIGHT_STEP }
-			.takeWhile { it <= maxY }
-		val feetY = heights.firstOrNull { fits(it) } ?: return noHop("too high to get over under y %.2f".format(maxY))
+			.takeWhile { it <= maxHopY }
+		val feetY = heights.firstOrNull { fits(it) } ?: return noHop("too high to get over under y %.2f".format(maxHopY))
 		// As high as there's room over it all, a roof or a block hanging above.
 		val topY = heights.dropWhile { it < feetY }.takeWhile { fits(it) }.last()
 		if (topY - feetY < HOP_MARGIN) return noHop("only %.2f room between y %.2f and %.2f".format(topY - feetY, feetY, topY))
 		val at = progress(linePoint)
-		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets).takeIf { canGetOver(it, at) }
+		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets, under = under).takeIf { canGetOver(it, at) }
 			?: noHop("can't get up there in time, $hopMiss").also { hopTooSlow = true }
 	}
 
