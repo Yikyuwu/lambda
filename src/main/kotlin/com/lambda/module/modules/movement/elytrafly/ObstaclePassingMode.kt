@@ -804,9 +804,11 @@ abstract class ObstaclePassingMode(
 							if (spot.boxHasFloor()) null
 							else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
 						}
-						// Down on the floor, a hole on the way there it'd fall into.
+						// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
 						?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
 							.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
+							?.takeUnless { hole -> generateSequence(hole) { it + HOP_SCAN_STEP }.takeWhile { it <= hole + MAX_HOP_LENGTH }
+								.any { lane.add(dir.multiply(it)).boxHasFloor() } }
 							?.let { "a hole %.1f ahead".format(it) }
 						// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
 						?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
@@ -988,6 +990,11 @@ abstract class ObstaclePassingMode(
 			ElytraFly.debug { "Dodging for $MAX_DODGE_TICKS ticks, back to the line" }
 			swingBack()
 			dodgeTicks = 0
+		}
+		// A short hole on the lane, glided over like on the line, staying on the lane.
+		if (!onLine && !onLayer && glideOverHole(here, linePoint, dir, null)) {
+			hop = hop?.with(lane = lane)
+			return true
 		}
 		// Up on a layer of carpets the ones down on the floor after it aren't seen, nor the layer itself from down there.
 		// Back onto the line only once down off it.
