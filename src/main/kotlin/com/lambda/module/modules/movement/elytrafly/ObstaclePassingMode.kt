@@ -93,6 +93,8 @@ abstract class ObstaclePassingMode(
 		private const val BRAKE_MARGIN = 3.0
 		/** How long to wait on the ground for the server to end the glide, about a ping and a half on a bad day. */
 		private const val MAX_LANDING_TICKS = 40
+		/** How far below the floor's height you count as having fallen into a hole. */
+		private const val FELL_IN = 0.1
 		/** Room kept around a magma cube on every side, it hops about meanwhile. */
 		private const val MAGMA_CUBE_MARGIN = 0.3
 		/** A magma cube is glided over like a block this high at least. */
@@ -1038,7 +1040,7 @@ abstract class ObstaclePassingMode(
 			dodgeTicks = 0
 		}
 		// A short hole on the lane, glided over like on the line, staying on the lane.
-		if (!onLine && !onLayer && glideOverHole(here, linePoint, dir, null)) {
+		if (!onLine && !onLayer && glideOverHole(here, linePoint, dir, null, dodging = true)) {
 			hop = hop?.with(lane = lane)
 			return true
 		}
@@ -1137,7 +1139,7 @@ abstract class ObstaclePassingMode(
 	 * in the way, like over a block: bouncing on unless you'd come down in it. Lands before it to walk when it can't get
 	 * over in time. Whether it's past it in the air.
 	 */
-	private fun SafeContext.glideOverHole(from: Vec3d, linePoint: Vec3d, dir: Vec3d, before: Double?): Boolean {
+	private fun SafeContext.glideOverHole(from: Vec3d, linePoint: Vec3d, dir: Vec3d, before: Double?, dodging: Boolean = false): Boolean {
 		val along = generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }
 			.takeWhile { it <= (before ?: passerConfig.dodgeLookAhead.toDouble()) }
 			.map { it to from.add(dir.multiply(it)) }
@@ -1160,7 +1162,8 @@ abstract class ObstaclePassingMode(
 		while (true) end = holeFrom(end)?.let(::floorFrom) ?: break
 		// Something soon after it, once over the hole too close to steer past. Right after it both are glided over as one,
 		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
-		from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
+		// Dodging, what's dodged is right beside the lane: the hole's glided over, the dodge goes on past the rest.
+		if (!dodging) from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
 			if (next.distance > HOP_GAP) return false
 			// Under it would mean coming down low over the hole, it's dodged instead.
 			val over = planHop(linePoint, dir, end + next.distance)?.takeUnless { it.under }
@@ -1579,8 +1582,10 @@ abstract class ObstaclePassingMode(
 		return false
 	}
 
+	/** Gliding above the floor's height over a hole. Fallen into it, it walks out. */
 	private fun SafeContext.overHole() =
-		player.isGliding && !player.isOnGround && Vec3d(player.x, startPos.y, player.z).let { it.isLoaded && !it.boxHasFloor() }
+		player.isGliding && !player.isOnGround && player.y >= startPos.y - FELL_IN &&
+			Vec3d(player.x, startPos.y, player.z).let { it.isLoaded && !it.boxHasFloor() }
 
 	private fun Vec3d.describe(dir: Vec3d): String {
 		val offset = dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize())
