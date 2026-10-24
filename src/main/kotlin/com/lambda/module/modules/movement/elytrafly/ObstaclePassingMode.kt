@@ -254,10 +254,16 @@ abstract class ObstaclePassingMode(
 		val down: Boolean = false, val lane: Vec3d = Vec3d.ZERO, val stepHeight: Double = STEP_HEIGHT, val low: Boolean = false,
 		/** Under something hanging over the way, held in the middle of the room below it, off the floor so it doesn't bounce. */
 		val under: Boolean = false,
+		/** Over a hole, held high, with room to sink as it slows down so it gets farther. */
+		val hole: Boolean = false,
 	) {
-		val targetY = if (under) (feetY + topY) / 2 else feetY + min(HOP_MARGIN, (topY - feetY) / 2)
+		val targetY = when {
+			under -> (feetY + topY) / 2
+			hole -> topY - min(HOP_MARGIN, (topY - feetY) / 2)
+			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
+		}
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -1127,7 +1133,7 @@ abstract class ObstaclePassingMode(
 		}
 		// Partly over its edge the box stands, the rays found where it doesn't.
 		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE),
-			at + start, false, low = true)
+			at + start, false, low = true, hole = true)
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
