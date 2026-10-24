@@ -31,6 +31,7 @@ import com.lambda.util.BlockUtils.hasSolidGround
 import com.lambda.util.BlockUtils.isPassable
 import net.minecraft.entity.mob.EndermanEntity
 import net.minecraft.entity.mob.MobEntity
+import net.minecraft.entity.mob.PiglinEntity
 import net.minecraft.entity.mob.Monster
 import net.minecraft.entity.mob.ZombifiedPiglinEntity
 import net.minecraft.util.PlayerInput
@@ -107,9 +108,12 @@ object FlightStop : Loadable {
         return "${mob.name.string} within $mobRadius blocks"
     }
 
-    /** Zombified piglins and endermen leave you alone until angered. */
+    /**
+     * Zombified piglins and endermen leave you alone until angered. Piglins only go for you once they notice you, idling
+     * around the highway they'd keep it from landing for good.
+     */
     private val MobEntity.isHostile get() = this is Monster && when (this) {
-        is ZombifiedPiglinEntity -> isAttacking
+        is ZombifiedPiglinEntity, is PiglinEntity -> isAttacking
         is EndermanEntity -> isAngry
         else -> true
     }
