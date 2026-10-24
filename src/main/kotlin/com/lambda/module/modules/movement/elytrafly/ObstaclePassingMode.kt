@@ -1124,7 +1124,8 @@ abstract class ObstaclePassingMode(
 		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
 		from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
 			if (next.distance > HOP_GAP) return false
-			val over = planHop(linePoint, dir, end + next.distance)
+			// Under it would mean coming down low over the hole, it's dodged instead.
+			val over = planHop(linePoint, dir, end + next.distance)?.takeUnless { it.under }
 				?.let { Hop(min(it.start, at + start - HOP_SCAN_STEP), it.end, it.feetY, it.topY, at + start, false) }
 				?.takeIf { canGetOver(it, at) } ?: return false
 			ElytraFly.debug { "Hole %.1f ahead, %.1f long, ${next.what} right after it, gliding over both at y %.2f".format(start, end - start, over.feetY) }
@@ -1320,6 +1321,8 @@ abstract class ObstaclePassingMode(
 		// As high as there's room over it all, a roof or a block hanging above.
 		val topY = heights.dropWhile { it < feetY }.takeWhile { fits(it) }.last()
 		if (topY - feetY < HOP_MARGIN) return noHop("only %.2f room between y %.2f and %.2f".format(topY - feetY, feetY, topY))
+		// Under it only with floor right after to come down on, else it's dodged and the height kept.
+		if (under && !linePoint.add(dir.multiply(stop + HOP_SCAN_STEP)).boxHasFloor()) return noHop("no floor right after it to come down on")
 		val at = progress(linePoint)
 		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets, under = under).takeIf { canGetOver(it, at) }
 			?: noHop("can't get up there in time, $hopMiss").also { hopTooSlow = true }
