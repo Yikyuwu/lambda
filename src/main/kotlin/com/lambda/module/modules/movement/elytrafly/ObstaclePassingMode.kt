@@ -726,8 +726,9 @@ abstract class ObstaclePassingMode(
 			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true)
 			return true
 		}
-		// Slow still, e.g. right after taking off. Faster a few bounces on it may get over after all.
-		if (hopTooSlow && distance > brakeDistance() + HOP_RETRY_MARGIN)
+		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
+		// all. There's nothing to brake for, it's looked at again until it's close.
+		if (hopTooSlow && distance > player.velocity.horizontalLength() * HOP_LEAD_TICKS)
 			return noLaneYet(at, "Magma cube %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
 		ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
 		skipHopAt = at
@@ -1402,11 +1403,15 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Whether you get over [hop] from [progress] on. Over carpets bouncing on may well, else holding the height from now
-	 * on, at the last moment later. Else holding it once [holdingFor] does.
+	 * on, at the last moment later. Over a magma cube slow, holding it from now on may make it where held from close by
+	 * wouldn't, [holdingFor] holds it once any later wouldn't. Else holding it once [holdingFor] does.
 	 */
-	private fun SafeContext.canGetOver(hop: Hop, progress: Double) =
-		if (!hop.low || hop.held) canHop(hop, progress)
-		else canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
+	private fun SafeContext.canGetOver(hop: Hop, progress: Double) = when {
+		hop.held -> canHop(hop, progress)
+		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
+		hop.cube -> canHop(hop, progress) || canHop(hop, progress, 0)
+		else -> canHop(hop, progress)
+	}
 
 	/**
 	 * Whether holding the height with [holdPitch] gets you over [hop] from [progress] on, bouncing off the floor
@@ -1505,7 +1510,8 @@ abstract class ObstaclePassingMode(
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
-			hop.cube -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, CUBE_HOLD_DELAY)
+			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther.
+			hop.cube -> !canHop(hop, progress, CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the magma cube %.1f ahead at %.2f".format(hop.start - progress, speed) }
