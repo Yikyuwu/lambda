@@ -141,10 +141,7 @@ object FlightStop : Loadable {
         BaritoneHandler.cancel()
     }
 
-    /** Another player in render distance, or a hostile mob within [mobRadius] that would attack or take a drop. */
-    fun SafeContext.hasDanger(mobRadius: Int) = danger(mobRadius) != null
-
-    /** What [hasDanger] found, null for nothing. */
+    /** Another player in render distance, or a hostile mob within [mobRadius] that would attack or take a drop. Null for none. */
     fun SafeContext.danger(mobRadius: Int): String? {
         world.players.firstOrNull { it !== player }?.let { return "${it.name.string} in render distance" }
         val mob = world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }
