@@ -184,8 +184,8 @@ object AutoArmor : Module(
 				if (!HighwayTools.isBusy && !waitsForPlayer()) startMend(kinds)
 				return@listen
 			}
-			// Flies on until it's safe here, then stands still to place a shulker.
-			if (with(FlightStop) { land(this@AutoArmor, mobRadius) }) startMend(kinds)
+			// Flies on until it's safe here, then stands still to place a shulker. With the elytras broken it walks on.
+			if (with(FlightStop) { land(this@AutoArmor, mobRadius, walkOn = true) }) startMend(kinds)
 		}
 
 		listen<TickEvent.Post>({ Int.MIN_VALUE }) {
