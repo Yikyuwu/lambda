@@ -117,8 +117,11 @@ object RotationManager : Manager<RotationRequest>(
 		if (acceptAndSetRequests(request)) {
 			updateActiveRotation()
 			changedThisTick = true
-		}
+		} else lastRejected = request
 	}
+
+	/** The last request that wasn't taken because another one held the rotation, for debugging. */
+	@JvmStatic var lastRejected: RotationRequest? = null
 
 	private fun acceptAndSetRequests(request: RotationRequest) =
 		when (request) {
