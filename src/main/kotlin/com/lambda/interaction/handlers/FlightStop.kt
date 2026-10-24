@@ -32,10 +32,12 @@ import com.lambda.util.BlockUtils.hasFluid
 import com.lambda.util.BlockUtils.hasSolidGround
 import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.CommunicationUtils.warn
+import net.minecraft.entity.boss.WitherEntity
 import net.minecraft.entity.mob.EndermanEntity
 import net.minecraft.entity.mob.MobEntity
 import net.minecraft.entity.mob.PiglinEntity
 import net.minecraft.entity.mob.Monster
+import net.minecraft.entity.mob.WardenEntity
 import net.minecraft.entity.mob.ZombifiedPiglinEntity
 import net.minecraft.util.PlayerInput
 import net.minecraft.util.math.BlockPos
@@ -141,9 +143,13 @@ object FlightStop : Loadable {
         BaritoneHandler.cancel()
     }
 
-    /** Another player in render distance, or a hostile mob within [mobRadius] that would attack or take a drop. Null for none. */
+    /**
+     * Another player, a warden or a wither in render distance, or a hostile mob within [mobRadius] that would attack or
+     * take a drop. Null for none.
+     */
     fun SafeContext.danger(mobRadius: Int): String? {
         world.players.firstOrNull { it !== player }?.let { return "${it.name.string} in render distance" }
+        world.entities.firstOrNull { (it is WardenEntity || it is WitherEntity) && it.isAlive }?.let { return "${it.name.string} in render distance" }
         val mob = world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }
             .minByOrNull { it.squaredDistanceTo(player) } ?: return null
         return "${mob.name.string} within $mobRadius blocks"
