@@ -133,7 +133,7 @@ object FlightStop : Loadable {
     fun SafeContext.hasDanger(mobRadius: Int) = danger(mobRadius) != null
 
     /** What [hasDanger] found, null for nothing. */
-    private fun SafeContext.danger(mobRadius: Int): String? {
+    fun SafeContext.danger(mobRadius: Int): String? {
         world.players.firstOrNull { it !== player }?.let { return "${it.name.string} in render distance" }
         val mob = world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }
             .minByOrNull { it.squaredDistanceTo(player) } ?: return null
