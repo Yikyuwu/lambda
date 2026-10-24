@@ -114,6 +114,8 @@ abstract class ObstaclePassingMode(
 		private const val HOP_GAP = 4.0
 		/** Longer obstacles are dodged, holding the height costs speed. */
 		private const val MAX_HOP_LENGTH = 16.0
+		/** Longest hole, or holes too close to bounce between, glided over in one. */
+		private const val MAX_HOLE_LENGTH = 48.0
 		/** A layer of blocks this high on the floor is bounced on like the floor, anything higher is in the way. */
 		private const val STEP_HEIGHT = 1.0
 		/** How far onto a layer to bounce on the glide up onto it goes, and how far on it must be free up there. */
@@ -146,8 +148,9 @@ abstract class ObstaclePassingMode(
 		private const val UNDER_LEAD_TICKS = 30
 		/** Gliding in low under something only once starting this many ticks later wouldn't make it anymore. */
 		private const val UNDER_HOLD_DELAY = 3
-		/** Floor between two holes shorter than this, they're glided over as one. */
-		private const val HOLE_MERGE_GAP = 4.0
+		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
+		private const val HOLE_TOUCHDOWN_TICKS = 3
+		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
 		/** How far before braking would be needed to stop waiting to get fast enough to glide over, and dodge instead. */
 		private const val HOP_RETRY_MARGIN = 24.0
 		/** The fastest [holdPitch] climbs to the height held. Slower, a block up takes longer than it's held ahead. */
@@ -809,7 +812,7 @@ abstract class ObstaclePassingMode(
 						// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
 						?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
 							.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
-							?.takeUnless { hole -> generateSequence(hole) { it + HOP_SCAN_STEP }.takeWhile { it <= hole + MAX_HOP_LENGTH }
+							?.takeUnless { hole -> generateSequence(hole) { it + HOP_SCAN_STEP }.takeWhile { it <= hole + MAX_HOLE_LENGTH }
 								.any { lane.add(dir.multiply(it)).boxHasFloor() } }
 							?.let { "a hole %.1f ahead".format(it) }
 						// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
@@ -1088,7 +1091,7 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Glides over a hole in the floor ahead of [from], up to [MAX_HOP_LENGTH] long and before [before] where something's
+	 * Glides over a hole in the floor ahead of [from], up to [MAX_HOLE_LENGTH] long and before [before] where something's
 	 * in the way, like over a block: bouncing on unless you'd come down in it. Lands before it to walk when it can't get
 	 * over in time. Whether it's past it in the air.
 	 */
@@ -1100,13 +1103,16 @@ abstract class ObstaclePassingMode(
 		val start = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
 		val at = progress(from)
 		if (skipHopAt?.let { abs(it - (at + start)) < 1.5 } == true) return false
-		// Longer, e.g. a step down to a lower floor, it's left as before.
-		fun floorFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it <= start + MAX_HOP_LENGTH }
+		// Long ones too, holding the height as long as it gets over them. Longer, e.g. a step down to a lower floor, it's
+		// left as before.
+		fun floorFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it <= start + MAX_HOLE_LENGTH }
 			.firstOrNull { from.add(dir.multiply(it)).boxHasFloor() }
-		fun holeFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it <= at + HOLE_MERGE_GAP }
+		// Enough floor between two holes to come down on and bounce, which gets back speed and height. Less, the bounce
+		// would come down in the next one: glided over as one.
+		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
+		fun holeFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it < at + bounceRoom }
 			.firstOrNull { !from.add(dir.multiply(it)).boxHasFloor() }
 		var end = floorFrom(start) ?: return false
-		// Another hole right after it, a bounce in between would come down in it: glided over as one.
 		while (true) end = holeFrom(end)?.let(::floorFrom) ?: break
 		// Something soon after it, once over the hole too close to steer past. Right after it both are glided over as one,
 		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
