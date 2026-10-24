@@ -42,7 +42,9 @@ import com.lambda.util.world.raycast.InteractionMask
 import com.lambda.util.world.raycast.RayCastUtils.blockResult
 import com.lambda.util.world.raycast.RayCastUtils.rayCast
 import net.minecraft.entity.Entity
+import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
+import net.minecraft.entity.mob.ZoglinEntity
 import net.minecraft.registry.Registries
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
@@ -624,7 +626,7 @@ abstract class ObstaclePassingMode(
 				}
 				// A magma cube isn't dodged, it's looked at again from the next bounce on until it's close.
 				!makesIt && hop.cube && hop.start - progress > player.velocity.horizontalLength() * HOP_LEAD_TICKS -> {
-					noLaneYet(hop.obstacle, "Can't get over the magma cube at %.1f from here ($hopMiss), bouncing on to look again".format(hop.start - progress))
+					noLaneYet(hop.obstacle, "Can't get over the mob at %.1f from here ($hopMiss), bouncing on to look again".format(hop.start - progress))
 					this@ObstaclePassingMode.hop = null
 				}
 				!makesIt -> {
@@ -736,22 +738,22 @@ abstract class ObstaclePassingMode(
 		hopTooSlow = false
 		// Never under one, coming down onto the floor next to it.
 		planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH))?.takeUnless { it.under }?.let { over ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), gliding over it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
+			ElytraFly.debug { "Mob %.1f ahead ($block), gliding over it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true)
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
 		// all. Or it's moved, it hops around. There's nothing to brake for, it's looked at again until it's close.
 		if (distance > player.velocity.horizontalLength() * HOP_LEAD_TICKS)
-			return noLaneYet(at, "Magma cube %.1f ahead ($block), can't get over it yet (${if (hopTooSlow) hopMiss else hopRejection}), bouncing on to look again".format(distance))
+			return noLaneYet(at, "Mob %.1f ahead ($block), can't get over it yet (${if (hopTooSlow) hopMiss else hopRejection}), bouncing on to look again".format(distance))
 		skipHopAt = at
 		// Too slow only, it climbs as high as it gets anyway. Maybe just over it, else bumping into it higher up.
 		if (hopTooSlow) planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = true)?.takeUnless { it.under }?.let { over ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), can't get over it in time ($hopRejection), climbing up at it anyway".format(distance) }
+			ElytraFly.debug { "Mob %.1f ahead ($block), can't get over it in time ($hopRejection), climbing up at it anyway".format(distance) }
 			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true, anyway = true)
 			return true
 		}
-		ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
+		ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
 		return false
 	}
 
@@ -1507,12 +1509,18 @@ abstract class ObstaclePassingMode(
 	private class SteerState(val along: Double, val offset: Double, val heading: Double, val speed: Double)
 
 	/**
-	 * The boxes of the magma cubes up to [maxDistance] around [from], with room around them, glided over like a block two
+	 * Magma cubes and hoglins (zoglins too) are glided over like a block two high, never dodged or walked around: a cube
+	 * jumps at you, a hoglin charges, flown past fast and high they don't get to.
+	 */
+	private fun Entity.glidedOver() = isAlive && (this is MagmaCubeEntity || this is HoglinEntity || this is ZoglinEntity)
+
+	/**
+	 * The boxes of the magma cubes and hoglins up to [maxDistance] around [from], with room around them, glided over like a block two
 	 * high, the biggest is just as high. As long as they are thick along the way. One mid-jump is taken as down on the
 	 * floor again, it'll have landed by the time you're there, up there it'd look too high to get over.
 	 */
 	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
-		world.getEntitiesByClass(MagmaCubeEntity::class.java, Box(from, from).expand(maxDistance, CUBE_SEARCH_HEIGHT, maxDistance)) { it.isAlive }
+		world.getOtherEntities(player, Box(from, from).expand(maxDistance, CUBE_SEARCH_HEIGHT, maxDistance)) { it.glidedOver() }
 			.map { cube -> cube.boundingBox.let {
 				val minY = if (cube.isOnGround) it.minY else min(it.minY, startPos.y)
 				Box(it.minX, minY, it.minZ, it.maxX, minY + max(CUBE_HEIGHT, it.lengthY), it.maxZ)
@@ -1539,7 +1547,7 @@ abstract class ObstaclePassingMode(
 			hop.cube -> !canHopLater(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
-		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the magma cube %.1f ahead at %.2f".format(hop.start - progress, speed) }
+		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
 	}
 
@@ -1695,7 +1703,7 @@ abstract class ObstaclePassingMode(
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
 		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach)).expand(MAGMA_CUBE_MARGIN)) {
-			safeContext.player.collidesWith(it) || mobs && it is MagmaCubeEntity && it.isAlive
+			safeContext.player.collidesWith(it) || mobs && it.glidedOver()
 		}
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
 		fun nearest(starts: List<Vec3d>, within: Double): Obstacle? {
@@ -1710,12 +1718,13 @@ abstract class ObstaclePassingMode(
 							nearest = Obstacle(distance) { "${Registries.BLOCK.getId(safeContext.blockState(hit.blockPos).block).path} ${hit.blockPos.toShortString()}" }
 					}
 				solid.forEach { entity ->
-					// A magma cube hops about, it's given room.
-					val box = if (entity is MagmaCubeEntity) entity.boundingBox.expand(MAGMA_CUBE_MARGIN) else entity.boundingBox
+					// A magma cube hops about, a hoglin walks, they're given room.
+					val glidedOver = entity.glidedOver()
+					val box = if (glidedOver) entity.boundingBox.expand(MAGMA_CUBE_MARGIN) else entity.boundingBox
 					box.raycast(start, start.add(reach)).orElse(null)?.let {
 						val distance = it.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
-							nearest = Obstacle(distance, entity is MagmaCubeEntity) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
+							nearest = Obstacle(distance, glidedOver) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
 					}
 				}
 			}
