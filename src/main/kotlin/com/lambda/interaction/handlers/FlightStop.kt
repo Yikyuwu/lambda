@@ -17,6 +17,7 @@
 
 package com.lambda.interaction.handlers
 
+import baritone.api.pathing.goals.GoalXZ
 import com.lambda.Lambda.LOG
 import com.lambda.context.SafeContext
 import com.lambda.core.Loadable
@@ -24,6 +25,7 @@ import com.lambda.event.events.MovementEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
+import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.task.tasks.PlaceContainerTask.Companion.isSafeContainerSpot
 import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.BlockUtils.hasFluid
@@ -37,6 +39,7 @@ import net.minecraft.entity.mob.ZombifiedPiglinEntity
 import net.minecraft.util.PlayerInput
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Vec2f
+import net.minecraft.util.math.Vec3d
 
 /**
  * Lands while flying to place a shulker or the ender chest, e.g. to mend or restock, for one owner at a time.
@@ -50,10 +53,15 @@ object FlightStop : Loadable {
     private const val MAX_LANDING_DROP = 4
     /** How far from where you land a spot for the container is looked for, like placing it does. */
     private const val SPOT_RANGE = 3
+    private const val WALK_AHEAD = 16
 
     private var owner: Any? = null
     /** Why it last couldn't land, written to the log once each time it changes. */
     private var waitReason: String? = null
+    /** Who it walks on for without a usable elytra, looking for a spot, see [land]. */
+    private var walkingFor: Any? = null
+    /** Where it walks, the way it was flying when it started. */
+    private var walkDirection = Vec3d.ZERO
 
     /** Someone lands or uses what it placed, so flying waits. */
     val pausesFlight get() = owner != null
@@ -65,15 +73,18 @@ object FlightStop : Loadable {
             it.input.playerInput = PlayerInput(false, false, false, false, false, it.input.playerInput.sneak, false)
             it.input.movementVector = Vec2f.ZERO
         }
-        listenUnsafe<WorldEvent.Leave> { owner = null }
+        listenUnsafe<WorldEvent.Leave> {
+            owner = null
+            walkingFor = null
+        }
         return "Loaded Flight Stop"
     }
 
     /**
      * For [by], lands once it's safe here and nobody else does. True once it stands still and can start.
-     * Until then it flies on, looking for a spot.
+     * Until then it flies on, looking for a spot, or with [walkOn] and no usable elytra walks on the way it flew.
      */
-    fun SafeContext.land(by: Any, mobRadius: Int): Boolean {
+    fun SafeContext.land(by: Any, mobRadius: Int, walkOn: Boolean = false): Boolean {
         if (owner != null && owner !== by) return false
         val reason = danger(mobRadius) ?: if (!hasSafeSpot()) "no safe spot below" else null
         if (reason != waitReason) {
@@ -81,9 +92,11 @@ object FlightStop : Loadable {
             if (reason != null) LOG.info("[FlightStop] Not landing yet: $reason")
         }
         if (reason != null) {
-            release(by)
+            if (owner === by) owner = null
+            if (walkOn && !GlideHandler.canGlide() && player.isOnGround) walkOn(by)
             return false
         }
+        stopWalking(by)
         owner = by
         return !player.isGliding && player.isOnGround && player.velocity.horizontalLengthSquared() <= STILL_SPEED_SQ
     }
@@ -95,6 +108,25 @@ object FlightStop : Loadable {
 
     fun release(by: Any) {
         if (owner === by) owner = null
+        stopWalking(by)
+    }
+
+    /** Walks [WALK_AHEAD] blocks at a time the way it was flying, a spot further on may be safe. */
+    private fun SafeContext.walkOn(by: Any) {
+        if (walkingFor !== by) {
+            walkingFor = by
+            walkDirection = Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw)
+            LOG.info("[FlightStop] No usable elytra, walking on to find a spot")
+        }
+        if (BaritoneHandler.isActive) return
+        val goal = player.pos.add(walkDirection.multiply(WALK_AHEAD.toDouble()))
+        BaritoneHandler.setGoalAndPath(GoalXZ(goal.x.toInt(), goal.z.toInt()))
+    }
+
+    private fun stopWalking(by: Any) {
+        if (walkingFor !== by) return
+        walkingFor = null
+        BaritoneHandler.cancel()
     }
 
     /** Another player in render distance, or a hostile mob within [mobRadius] that would attack or take a drop. */
