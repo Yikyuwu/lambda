@@ -20,11 +20,12 @@ package com.lambda.util
 import com.lambda.util.DynamicReflectionSerializer.simpleRemappedName
 
 /**
- * Remaps the stacktrace in production to have readable, class, method and field names
+ * Remaps the stacktrace in production to have readable, class, method and field names.
+ * Keeps what was thrown, its message and its causes, else a crash report doesn't say what went wrong.
  */
-fun dynamicException(original: Throwable) = Throwable(original.localizedMessage)
+fun dynamicException(original: Throwable): Throwable = Throwable(original.toString(), original.cause?.let(::dynamicException))
     .apply {
-        stackTrace = stackTrace.map { element ->
+        stackTrace = original.stackTrace.map { element ->
             StackTraceElement(
                 element.className.simpleRemappedName,
                 element.methodName.simpleRemappedName,
