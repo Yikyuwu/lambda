@@ -26,6 +26,8 @@ import com.lambda.config.entries.Setting.Companion.onValueChange
 import com.lambda.config.forEachSetting
 import com.lambda.config.hideAllExcept
 import com.lambda.config.withEdits
+import com.lambda.context.Automated
+import com.lambda.context.AutomatedSafeContext
 import com.lambda.context.SafeContext
 import com.lambda.event.events.ClientEvent
 import com.lambda.event.events.MovementEvent
@@ -380,12 +382,14 @@ object ElytraFly : Module(
 
     /** Who holds the yaw and the pitch, and who was turned down since the last trace line. */
     private fun requesters(): String {
-        fun name(request: Any?) = when (val by = (request as? RotationRequest)?.requester) {
+        fun who(by: Automated?): String = when (by) {
             null -> "nobody"
             is Module -> by.name
             is Task<*> -> by.name
+            is AutomatedSafeContext -> who(by.automated)
             else -> by::class.simpleName ?: by.javaClass.name
         }
+        fun name(request: Any?) = who((request as? RotationRequest)?.requester)
         val rejected = RotationManager.lastRejected?.let { ", turned down ${name(it)}" } ?: ""
         RotationManager.lastRejected = null
         return "yaw ${name(RotationManager.yawRequest)}, pitch ${name(RotationManager.pitchRequest)}$rejected"
