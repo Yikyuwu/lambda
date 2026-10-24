@@ -214,8 +214,7 @@ object AutoMend : Module(
                 forward = -dx * sin(yaw) + dz * cos(yaw),
                 strafe = dx * cos(yaw) + dz * sin(yaw),
                 jump = target.y > player.blockPos.y && player.isOnGround,
-                // Doesn't walk off an edge past the target.
-                sneak = true,
+                sneak = false,
                 sprint = false,
             )
         }
