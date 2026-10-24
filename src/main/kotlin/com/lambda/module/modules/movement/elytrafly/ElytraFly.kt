@@ -34,11 +34,13 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.managers.rotating.RotationManager
+import com.lambda.interaction.managers.rotating.RotationRequest
 import com.lambda.module.Module
 import com.lambda.module.modules.movement.elytrafly.modes.BounceElytraFly
 import com.lambda.module.modules.movement.elytrafly.modes.GeneralElytraFly
 import com.lambda.module.modules.movement.elytrafly.modes.GrimControlElytraFly
 import com.lambda.module.tag.ModuleTag
+import com.lambda.task.Task
 import com.lambda.threading.runGameScheduled
 import com.lambda.util.CommunicationUtils.warn
 import com.lambda.threading.runSafe
@@ -298,7 +300,7 @@ object ElytraFly : Module(
             if (!debugLog) return@listen
             val v = player.velocity
             traceLine(
-                "  tick: vel %.3f %.3f %.3f, pose ${player.pose}, gliding flag ${player.getFlag(Entity.GLIDING_FLAG_INDEX)}, on ground ${player.isOnGround}, sprinting ${player.isSprinting}, yaw %.1f pitch %.1f, sent rot ${RotationManager.activeRotation}, input ${player.input.playerInput}, baritone ${BaritoneHandler.isActive}"
+                "  tick: vel %.3f %.3f %.3f, pose ${player.pose}, gliding flag ${player.getFlag(Entity.GLIDING_FLAG_INDEX)}, on ground ${player.isOnGround}, sprinting ${player.isSprinting}, yaw %.1f pitch %.1f, sent rot ${RotationManager.activeRotation} for ${requesters()}, input ${player.input.playerInput}, baritone ${BaritoneHandler.isActive}"
                     .format(v.x, v.y, v.z, player.yaw, player.pitch)
             )
             if (traceTicks > 0) traceTicks--
@@ -374,6 +376,19 @@ object ElytraFly : Module(
     /** Logs the packets sent and the player's state for the next [ticks] ticks with [debugLog], to see what the server set back. */
     fun trace(ticks: Int) {
         if (debugLog) traceTicks = max(traceTicks, ticks)
+    }
+
+    /** Who holds the yaw and the pitch, and who was turned down since the last trace line. */
+    private fun requesters(): String {
+        fun name(request: Any?) = when (val by = (request as? RotationRequest)?.requester) {
+            null -> "nobody"
+            is Module -> by.name
+            is Task<*> -> by.name
+            else -> by::class.simpleName ?: by.javaClass.name
+        }
+        val rejected = RotationManager.lastRejected?.let { ", turned down ${name(it)}" } ?: ""
+        RotationManager.lastRejected = null
+        return "yaw ${name(RotationManager.yawRequest)}, pitch ${name(RotationManager.pitchRequest)}$rejected"
     }
 
     fun describe(packet: Packet<*>) = when (packet) {
