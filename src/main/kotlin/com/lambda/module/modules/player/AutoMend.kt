@@ -17,10 +17,13 @@
 
 package com.lambda.module.modules.player
 
+import baritone.api.pathing.goals.GoalBlock
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.hideAllExcept
 import com.lambda.config.settings.complex.orUnset
 import com.lambda.config.withEdits
+import com.lambda.context.SafeContext
+import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.module.Module
 import com.lambda.module.modules.combat.AutoArmor
 import com.lambda.module.modules.combat.AutoTotem
@@ -29,6 +32,10 @@ import com.lambda.task.RootTask.run
 import com.lambda.task.Task
 import com.lambda.task.tasks.MendConfig
 import com.lambda.task.tasks.MendToolsTask
+import com.lambda.util.BlockUtils.blockState
+import com.lambda.util.BlockUtils.fluidState
+import com.lambda.util.BlockUtils.hasSolidGround
+import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.ClickSetup
 import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.CommunicationUtils.logError
@@ -40,10 +47,12 @@ import com.lambda.util.item.GearKindChoice
 import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.item.ItemUtils
 import com.lambda.util.player.SlotUtils.hotbarStacks
+import net.minecraft.block.AbstractPressurePlateBlock
 import net.minecraft.enchantment.Enchantments
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
+import net.minecraft.util.math.Direction
 
 @Suppress("unused")
 object AutoMend : Module(
@@ -177,6 +186,7 @@ object AutoMend : Module(
                 logError("AutoMend stopped: ${it.message}")
             }.onCompletion {
                 mendTask = null
+                if (damaged != null) stepOff(stand)
                 disable()
             }.run()
         }
@@ -197,6 +207,16 @@ object AutoMend : Module(
 
     override fun isSword(stack: ItemStack) = stack.item in ItemUtils.swords &&
         stack.getEnchantment(Enchantments.SWEEPING_EDGE) >= 3 && stack.getEnchantment(Enchantments.FIRE_ASPECT) == 0
+
+    /** Steps off [stand] to a free block beside it when done, so it doesn't keep the farm running while it stands there. */
+    private fun SafeContext.stepOff(stand: BlockPos) {
+        if (player.blockPos != stand) return
+        val beside = Direction.Type.HORIZONTAL.map { stand.offset(it) }.firstOrNull { pos ->
+            isPassable(pos) && isPassable(pos.up()) && fluidState(pos).isEmpty && hasSolidGround(pos) &&
+                blockState(pos).block !is AbstractPressurePlateBlock
+        } ?: return info("No free block beside ${stand.toShortString()} to step off to")
+        BaritoneHandler.setGoalAndPath(GoalBlock(beside))
+    }
 
     private fun ItemStack.isGear(category: GearKind.Category) = GearKind.entries.any { it.category == category && it.matches(this) }
 }
