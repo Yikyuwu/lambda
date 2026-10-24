@@ -42,6 +42,7 @@ import com.lambda.util.world.raycast.InteractionMask
 import com.lambda.util.world.raycast.RayCastUtils.blockResult
 import com.lambda.util.world.raycast.RayCastUtils.rayCast
 import net.minecraft.entity.Entity
+import net.minecraft.entity.mob.Monster
 import net.minecraft.registry.Registries
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
@@ -239,7 +240,8 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** What's in the way [distance] ahead, [what] it is for the debug log. */
-	private class Obstacle(val distance: Double, describe: () -> String) {
+	/** In the way [distance] ahead. A [mob] is dodged, gliding over or under it the glide only sees blocks. */
+	private class Obstacle(val distance: Double, val mob: Boolean = false, describe: () -> String) {
 		/** Only put together for the debug log, there's a hit for each ray. */
 		val what by lazy(describe)
 	}
@@ -623,7 +625,7 @@ abstract class ObstaclePassingMode(
 			// A hole before anything in the way, carpets too. Up on a layer its end is looked for instead.
 			if (!onLayer && glideOverHole(here, closestLinePoint, snappedDir, low?.distance)) return false
 			ahead?.let { distance ->
-				if (startDodge(here, closestLinePoint, snappedDir, distance)) return false
+				if (startDodge(here, closestLinePoint, snappedDir, distance, block?.mob == true)) return false
 			}
 			if (ahead == null && low != null && dodgeCarpets(here, closestLinePoint, snappedDir, low)) return false
 			// Holding the yaw alone drifts off the line, half a block over a couple hundred, into blocks beside it.
@@ -663,18 +665,18 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** Glides over to a free lane past the obstacle [distance] ahead, or lands to walk around it when there's none. */
-	private fun SafeContext.startDodge(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double): Boolean {
+	private fun SafeContext.startDodge(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, mob: Boolean = false): Boolean {
 		val at = progress(from) + distance
 		val block = from.obstacleBlock(dir, distance + 1)
-		hopRejection = "it got too close to get over before"
+		hopRejection = if (mob) "a mob is dodged" else "it got too close to get over before"
 		hopTooSlow = false
-		if (skipHopAt?.let { abs(it - at) < 1.5 } != true && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
+		if (!mob && skipHopAt?.let { abs(it - at) < 1.5 } != true && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
 			if (dodgePastNext(from, linePoint, dir, distance, block, it)) return true
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, gliding up onto it at y %.2f".format(distance, it.feetY) }
 			hop = it
 			return true
 		}
-		if (skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { over ->
+		if (!mob && skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { over ->
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = over
@@ -1583,11 +1585,12 @@ abstract class ObstaclePassingMode(
 		val carpetStarts = if (!carpets) emptyList() else offsets.map { add(it).add(0.0, CARPET_RAY, 0.0) }
 		val blockStarts = heights.flatMap { height -> offsets.map { add(it).add(0.0, height, 0.0) } }
 		val starts = carpetStarts + blockStarts
-		// Boats, minecarts and shulkers are as solid as blocks to you, the rays only see blocks.
+		// Boats, minecarts and shulkers are as solid as blocks to you, the rays only see blocks. Hostile mobs too, e.g. a
+		// magma cube on the way hurts and throws you off, gliding into it.
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
 		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach))) {
-			safeContext.player.collidesWith(it)
+			safeContext.player.collidesWith(it) || it is Monster && it.isAlive
 		}
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
 		fun nearest(starts: List<Vec3d>, within: Double): Obstacle? {
@@ -1605,7 +1608,7 @@ abstract class ObstaclePassingMode(
 					entity.boundingBox.raycast(start, start.add(reach)).orElse(null)?.let {
 						val distance = it.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
-							nearest = Obstacle(distance) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
+							nearest = Obstacle(distance, entity is Monster) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
 					}
 				}
 			}
