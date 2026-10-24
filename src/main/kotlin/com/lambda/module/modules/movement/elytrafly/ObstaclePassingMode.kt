@@ -160,6 +160,11 @@ abstract class ObstaclePassingMode(
 		private const val UNDER_LEAD_TICKS = 30
 		/** Gliding in low under something only once starting this many ticks later wouldn't make it anymore. */
 		private const val UNDER_HOLD_DELAY = 3
+		/**
+		 * Over a magma cube the height is held only once starting this many ticks later wouldn't make it anymore. Gliding
+		 * over it late and short keeps the speed, and it has less time to notice you and jump.
+		 */
+		private const val CUBE_HOLD_DELAY = 3
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
@@ -271,6 +276,8 @@ abstract class ObstaclePassingMode(
 		val hole: Boolean = false,
 		/** Over a hole with no floor in sight yet, held as far as it's seen and then looked at again. */
 		val open: Boolean = false,
+		/** Over a magma cube, held at the last moment. */
+		val cube: Boolean = false,
 	) {
 		val targetY = when {
 			under -> (feetY + topY) / 2
@@ -278,7 +285,7 @@ abstract class ObstaclePassingMode(
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -716,7 +723,7 @@ abstract class ObstaclePassingMode(
 		// Never under one, coming down onto the floor next to it.
 		planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH))?.takeUnless { it.under }?.let { over ->
 			ElytraFly.debug { "Magma cube %.1f ahead ($block), gliding over it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
-			hop = over
+			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true)
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on it may get over after all.
@@ -1486,7 +1493,8 @@ abstract class ObstaclePassingMode(
 	/**
 	 * Whether to hold the height for [hop] at [progress] along the line, once it's close enough. Over carpets only
 	 * once bouncing on would come down on them and holding any later wouldn't make it, so the bounces before go on as
-	 * they would, and within [MAX_CARPET_HOLD_TICKS]. Once held it stays held.
+	 * they would, and within [MAX_CARPET_HOLD_TICKS]. Over a magma cube once holding any later wouldn't make it. Once
+	 * held it stays held.
 	 */
 	private fun SafeContext.holdingFor(hop: Hop, progress: Double): Boolean {
 		if (hop.held || hop.heldCheckedAt == player.age) return hop.held
@@ -1497,8 +1505,10 @@ abstract class ObstaclePassingMode(
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
+			hop.cube -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
+		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the magma cube %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
 	}
 
