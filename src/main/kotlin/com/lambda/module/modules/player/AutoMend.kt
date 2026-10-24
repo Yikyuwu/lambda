@@ -126,7 +126,7 @@ object AutoMend : Module(
         listOf(
             ClickSetup.Step("Damaged Chest", "the chest with the damaged items", ::damagedChest, ClickSetup.container),
             ClickSetup.Step("Repaired Chest", "the chest for the mended items", ::repairedChest, ClickSetup.container),
-            ClickSetup.Step("Stand Pos", "any block while standing where you hit from", ::standPos, ClickSetup.standing),
+            ClickSetup.Step("Stand Pos", "the top of the floor you hit from, e.g. the pressure plate", ::standPos, ClickSetup.standing),
         ),
     )
 
