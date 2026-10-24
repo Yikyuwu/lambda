@@ -1284,8 +1284,6 @@ abstract class ObstaclePassingMode(
 			onFloor = true
 			end = max(end, distance + 1 / max(abs(dir.x), abs(dir.z)))
 		}
-		// Only overhead, glided under without touching the floor, a bounce would throw you up into it.
-		val under = !onFloor
 		// From where the box first touches it until it's past it, on the same spots as above.
 		val reach = ceil(GLIDE_SIZE / HOP_SCAN_STEP) * HOP_SCAN_STEP
 		val samples = generateSequence(distance - reach) { it + HOP_SCAN_STEP }.takeWhile { it <= end + reach }.toList()
@@ -1296,6 +1294,9 @@ abstract class ObstaclePassingMode(
 		val maxHopY = maxHopY()
 		val heights = generateSequence(lineY + if (carpets && !step) CARPET_GLIDE_FEET else passerConfig.minObstacleHeight) { it + HOP_HEIGHT_STEP }
 			.takeWhile { it <= maxHopY }
+		// Only overhead, glided under without touching the floor, a bounce would throw you up into it. Only if the box fits
+		// right above the floor all the way, else something's in the way down there too that the rays above missed.
+		val under = !onFloor && fits(heights.first())
 		val feetY = heights.firstOrNull { fits(it) } ?: return noHop("too high to get over under y %.2f".format(maxHopY))
 		// As high as there's room over it all, a roof or a block hanging above.
 		val topY = heights.dropWhile { it < feetY }.takeWhile { fits(it) }.last()
