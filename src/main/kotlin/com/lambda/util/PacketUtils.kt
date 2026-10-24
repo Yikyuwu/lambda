@@ -33,11 +33,12 @@ object PacketUtils {
      * Sends a packet to the server without notifying the client.
      * It bypasses the mixins that would normally intercept the packet
      * and send it through the client's event bus.
+     * Without [flush] it goes out with the next packet that's flushed.
      */
-    fun ClientPlayNetworkHandler.sendPacketSilently(packet: Packet<*>) {
+    fun ClientPlayNetworkHandler.sendPacketSilently(packet: Packet<*>, flush: Boolean = true) {
         if (!connection.isOpen) return
 
-        connection.send(packet, null, true)
+        connection.send(packet, null, flush)
         connection.packetsSentCounter++
     }
 

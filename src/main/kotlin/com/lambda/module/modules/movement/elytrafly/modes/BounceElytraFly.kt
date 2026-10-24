@@ -50,6 +50,7 @@ import com.lambda.util.player.PlayerUtils.canTakeoff
 import net.minecraft.client.input.KeyboardInput.getMovementMultiplier
 import net.minecraft.entity.Entity
 import net.minecraft.network.packet.Packet
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket
 import net.minecraft.util.PlayerInput
@@ -191,7 +192,8 @@ class BounceElytraFly(
 			hitRoof = roof
 			// Held too long, the server would set you back for the burst.
 			if (sendPacketQueue.isEmpty()) queuedTicks = 0
-			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS) flushPackets()
+			// Also a tick without the movement they wait for, see below.
+			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS || !queuePackets) flushPackets()
 
 			if (autoPitch) {
 				val hold = hopPitch()
@@ -332,8 +334,12 @@ class BounceElytraFly(
 				event.cancel()
 				return@listen
 			}
-
-			flushPackets()
+			if (sendPacketQueue.isEmpty() || event.packet is TeleportConfirmC2SPacket) return@listen flushPackets()
+			// The held back ones wait for the next movement and go out with it at once, so the server gets the landing
+			// and the jump together. Handling the landing on its own, it ends the glide.
+			sendPacketQueue.add(event.packet)
+			event.cancel()
+			if (event.packet is PlayerMoveC2SPacket) flushPackets()
 		}
 		listen<PacketEvent.Receive.Pre>({ 1 }) { event ->
 			if (event.packet is CommonPingS2CPacket && queuePackets) {
@@ -434,7 +440,8 @@ class BounceElytraFly(
 		while (sendPacketQueue.isNotEmpty()) {
 			val packet = sendPacketQueue.poll()
 			ElytraFly.traceLine { "  sent held back ${ElytraFly.describe(packet)}" }
-			connection.sendPacketSilently(packet)
+			// All in one write, flushed with the last.
+			connection.sendPacketSilently(packet, flush = sendPacketQueue.isEmpty())
 		}
 		while (pingPackets.isNotEmpty()) {
 			val packet = pingPackets.poll()
