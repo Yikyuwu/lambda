@@ -146,6 +146,8 @@ abstract class ObstaclePassingMode(
 		private const val UNDER_LEAD_TICKS = 30
 		/** Gliding in low under something only once starting this many ticks later wouldn't make it anymore. */
 		private const val UNDER_HOLD_DELAY = 3
+		/** Floor between two holes shorter than this, they're glided over as one. */
+		private const val HOLE_MERGE_GAP = 4.0
 		/** How far before braking would be needed to stop waiting to get fast enough to glide over, and dodge instead. */
 		private const val HOP_RETRY_MARGIN = 24.0
 		/** The fastest [holdPitch] climbs to the height held. Slower, a block up takes longer than it's held ahead. */
@@ -1099,8 +1101,13 @@ abstract class ObstaclePassingMode(
 		val at = progress(from)
 		if (skipHopAt?.let { abs(it - (at + start)) < 1.5 } == true) return false
 		// Longer, e.g. a step down to a lower floor, it's left as before.
-		val end = generateSequence(start) { it + HOP_SCAN_STEP }.takeWhile { it <= start + MAX_HOP_LENGTH }
-			.firstOrNull { from.add(dir.multiply(it)).boxHasFloor() } ?: return false
+		fun floorFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it <= start + MAX_HOP_LENGTH }
+			.firstOrNull { from.add(dir.multiply(it)).boxHasFloor() }
+		fun holeFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it <= at + HOLE_MERGE_GAP }
+			.firstOrNull { !from.add(dir.multiply(it)).boxHasFloor() }
+		var end = floorFrom(start) ?: return false
+		// Another hole right after it, a bounce in between would come down in it: glided over as one.
+		while (true) end = holeFrom(end)?.let(::floorFrom) ?: break
 		// Something soon after it, once over the hole too close to steer past. Right after it both are glided over as one,
 		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
 		from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
