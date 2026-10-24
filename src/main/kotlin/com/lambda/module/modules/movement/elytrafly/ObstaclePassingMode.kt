@@ -93,6 +93,8 @@ abstract class ObstaclePassingMode(
 		private const val BRAKE_MARGIN = 3.0
 		/** How long to wait on the ground for the server to end the glide, about a ping and a half on a bad day. */
 		private const val MAX_LANDING_TICKS = 40
+		/** How close to a lane the swing over to it counts as on it. */
+		private const val LANE_REACHED = 0.3
 		/** How far below the floor's height you count as having fallen into a hole. */
 		private const val FELL_IN = 0.1
 		/** Room kept around a magma cube on every side, it hops about meanwhile. */
@@ -842,21 +844,25 @@ abstract class ObstaclePassingMode(
 				// Only when it's tilted the whole way past it, the box doesn't swing in.
 				val tilted = lean != 0 && passing.all { Math.toDegrees(it.heading) * lean >= MIN_LEAN_DEGREES }
 				val middle = linePoint.add(across.multiply((low + high) / 2))
+				// How far along the swing gets onto the lane, at most up to the obstacle.
+				val reached = (path.firstOrNull { abs(it.offset - target) < LANE_REACHED }?.along ?: distance)
+					.coerceIn(0.0, max(0.0, distance - 1))
 				val lane = linePoint.add(across.multiply(laneOffset))
 				val miss = when {
 					// Ahead, you're not there yet to glide over from.
 					lead == 0.0 && from.sidewaysObstructed(lane.subtract(from)) -> "in the way sideways"
-					else -> middle.obstacleHit(dir, distance + past, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets)
+					// From where the swing gets onto it, before that you're between the lanes, see the lanes crossed below.
+					else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets)
 						?.let { "${it.what} ahead" }
 						?: lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
-							if (spot.boxHasFloor()) null
+							// A hole there with floor again within reach is glided over on the lane.
+							if (spot.boxHasFloor() || !onLayer && spot.floorWithin(dir, MAX_HOLE_LENGTH)) null
 							else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
 						}
 						// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
 						?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
 							.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
-							?.takeUnless { hole -> generateSequence(hole) { it + HOP_SCAN_STEP }.takeWhile { it <= hole + MAX_HOLE_LENGTH }
-								.any { lane.add(dir.multiply(it)).boxHasFloor() } }
+							?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
 							?.let { "a hole %.1f ahead".format(it) }
 						// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
 						?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
@@ -1677,6 +1683,11 @@ abstract class ObstaclePassingMode(
 
 	context(safeContext: SafeContext)
 	private fun Vec3d.hasFloor() = flooredBlockPos.down().let { safeContext.blockState(it).isSolidBlock(safeContext.world, it) }
+
+	/** Whether there's floor again within [length] ahead of this along [dir]. */
+	context(safeContext: SafeContext)
+	private fun Vec3d.floorWithin(dir: Vec3d, length: Double) =
+		generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it <= length }.any { add(dir.multiply(it)).boxHasFloor() }
 
 	/** Whether anything under your box here holds you up. A block's corner does, as where a layer's edge runs askew. */
 	context(safeContext: SafeContext)
