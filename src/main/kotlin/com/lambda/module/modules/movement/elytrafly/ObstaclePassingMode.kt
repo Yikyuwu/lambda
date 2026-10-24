@@ -142,8 +142,10 @@ abstract class ObstaclePassingMode(
 		 * climb up there. Holding it all the way loses speed.
 		 */
 		private const val HOP_LEAD_TICKS = 10
-		/** How many ticks more it glides in low before gliding under something, off the bounces. */
+		/** How many ticks more it may glide in low before gliding under something, off the bounces. */
 		private const val UNDER_LEAD_TICKS = 30
+		/** Gliding in low under something only once starting this many ticks later wouldn't make it anymore. */
+		private const val UNDER_HOLD_DELAY = 3
 		/** How far before braking would be needed to stop waiting to get fast enough to glide over, and dodge instead. */
 		private const val HOP_RETRY_MARGIN = 24.0
 		/** The fastest [holdPitch] climbs to the height held. Slower, a block up takes longer than it's held ahead. */
@@ -1385,9 +1387,13 @@ abstract class ObstaclePassingMode(
 		if (hop.held || hop.heldCheckedAt == player.age) return hop.held
 		hop.heldCheckedAt = player.age
 		val speed = player.velocity.horizontalLength()
-		hop.held = if (!hop.low) hop.start - progress <= speed * leadTicks(hop)
-			else hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
+		hop.held = when {
+			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
+			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
+			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
+			else -> hop.start - progress <= speed * leadTicks(hop)
+		}
 		return hop.held
 	}
 
