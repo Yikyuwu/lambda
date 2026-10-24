@@ -93,6 +93,8 @@ object AutoArmor : Module(
 	private var mendFailed = false
 	private var wasBuilding = false
 	private var announced = false
+	/** The mend was stopped for danger and picks up what it placed meanwhile. */
+	private var stoppingMend = false
 
 	/** Whether experience bottles are being thrown, or a shulker or the ender chest is out for them. */
 	val isMending get() = mendTask?.isActive == true
@@ -169,7 +171,11 @@ object AutoArmor : Module(
 			wasBuilding = HighwayTools.isBuilding
 			mendTask?.let {
 				// Picks its shulker or the ender chest back up, so nobody can take it.
-				if (it.isActive && hasDanger()) it.stopSafely()
+				if (it.isActive && !stoppingMend) danger()?.let { reason ->
+					info("Stopped mending, $reason. Picking the shulker back up")
+					stoppingMend = true
+					it.stopSafely()
+				}
 				if (it.isActive) return@listen FlightStop.hold(this@AutoArmor)
 				// Ended without its callbacks, e.g. cancelled.
 				endMend()
@@ -249,9 +255,12 @@ object AutoArmor : Module(
 	private fun SafeContext.canUseEnderChest() = elytraPriority && allowShulker && allowEnderChest &&
 		player.inventory.mainStacks.sumOf { if (isEnderChest(it)) it.count else 0 } >= MIN_ENDER_CHESTS
 
-	/** For ElytraFly another player in render distance or a hostile mob close, for HighwayTools a player close enough to take a placed shulker. */
-	private fun SafeContext.hasDanger() =
-		if (elytraPriority) with(FlightStop) { hasDanger(mobRadius) } else waitsForPlayer()
+	/**
+	 * For ElytraFly another player in render distance or a hostile mob close, for HighwayTools a player close enough to
+	 * take a placed shulker. What it is, null for nothing.
+	 */
+	private fun SafeContext.danger() =
+		if (elytraPriority) with(FlightStop) { danger(mobRadius) } else if (waitsForPlayer()) "a player is close" else null
 
 	private fun SafeContext.startMend(kinds: List<(ItemStack) -> Boolean>) {
 		// A build that can't be paused now is busy with something else.
@@ -285,6 +294,7 @@ object AutoArmor : Module(
 
 	private fun endMend() {
 		mendTask = null
+		stoppingMend = false
 		FlightStop.release(this)
 		HighwayTools.resume(this)
 	}
