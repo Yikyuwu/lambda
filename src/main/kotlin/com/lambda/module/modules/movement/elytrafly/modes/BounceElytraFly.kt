@@ -50,6 +50,7 @@ import com.lambda.util.player.PlayerUtils.canTakeoff
 import net.minecraft.client.input.KeyboardInput.getMovementMultiplier
 import net.minecraft.entity.Entity
 import net.minecraft.network.packet.Packet
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket
@@ -75,6 +76,8 @@ class BounceElytraFly(
 		private const val BOUNCE_OBSTACLE_PASSER_GROUP = "Bounce Obstacle Passer"
 
 		private const val MAX_FAKE_LAG_TICKS = 10
+		/** How long after starting the glide Fake Lag waits, about as long as the server takes to confirm it. */
+		private const val GLIDE_START_TICKS = 10
 		private const val MAX_TAKEOFF_WAIT_TICKS = 10
 		/** The server ignored starts up to 0.67 above the ground and took them from 0.83. */
 		private const val MIN_TAKEOFF_HEIGHT = 0.75
@@ -153,6 +156,8 @@ class BounceElytraFly(
 	private var interrupting = false
 	private var groundY = 0.0
 	private var queuedTicks = 0
+	/** Ticks since the glide was started, packets aren't held back until the server took it. */
+	private var sinceGlideStart = 0
 	private var takeoffWait = 0
 	private val pacer = FlightPacer()
 	private val waitingForChunks get() = pacer.pace == FlightPacer.Pace.Waiting
@@ -167,7 +172,7 @@ class BounceElytraFly(
 
 	private val SafeContext.queuePackets
 		get() = fakeLag && player.isGliding && (!yMotionSetting || !onYMotionAngle) &&
-				queuedTicks < MAX_FAKE_LAG_TICKS &&
+				queuedTicks < MAX_FAKE_LAG_TICKS && sinceGlideStart >= GLIDE_START_TICKS &&
 				// Only bouncing. Held back after a setback or while landing, the server sees you stand still, sets you back
 				// again and again. Nor falling off a block you bounced on. Also the tick before touching down, the server
 				// often ended the glide when the landing came on its own.
@@ -196,6 +201,7 @@ class BounceElytraFly(
 			if (roof && !hitRoof) ElytraFly.debug { "Bumped the roof, %.2f above the floor, pitch %.1f".format(player.y - groundY, RotationManager.activeRotation.pitch) }
 			hitRoof = roof
 			// Held too long, the server would set you back for the burst.
+			if (sinceGlideStart < GLIDE_START_TICKS) sinceGlideStart++
 			if (sendPacketQueue.isEmpty()) queuedTicks = 0
 			// Also a tick without the movement they wait for, see below.
 			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS || !queuePackets) flushPackets()
@@ -335,6 +341,12 @@ class BounceElytraFly(
 			// Sent from the network thread, e.g. keep-alive replies, they go out as they are. Only the game thread holds
 			// packets back and sends them, else both take from the queue at once.
 			if (!mc.isOnThread) return@listen
+			// Starting the glide, e.g. taking off after walking. Held back with the landing, the server sees you on the
+			// ground after it and ends it again.
+			if (event.packet.let { it is ClientCommandC2SPacket && it.mode == ClientCommandC2SPacket.Mode.START_FALL_FLYING }) {
+				sinceGlideStart = 0
+				return@listen flushPackets()
+			}
 			// The server ignores your movement until you confirm its setback.
 			if (queuePackets && event.packet !is TeleportConfirmC2SPacket) {
 				sendPacketQueue.add(event.packet)
