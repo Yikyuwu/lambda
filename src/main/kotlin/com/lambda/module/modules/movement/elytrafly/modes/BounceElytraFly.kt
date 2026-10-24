@@ -57,7 +57,6 @@ import net.minecraft.util.PlayerInput
 import net.minecraft.util.math.Vec2f
 import net.minecraft.util.math.Vec3d
 import net.minecraft.world.World
-import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
 import kotlin.math.acos
@@ -147,7 +146,8 @@ class BounceElytraFly(
 	private var prevGliding: Boolean? = null
 	private val pauseTimer = TickTimer()
 	private val pingPackets = ConcurrentLinkedQueue<CommonPingS2CPacket>()
-	private val sendPacketQueue = LinkedList<Packet<*>>()
+	/** Packets are sent from the network thread too, e.g. replies to the server. */
+	private val sendPacketQueue = ConcurrentLinkedQueue<Packet<*>>()
 	private var sneakLeft = false
 	private var sneakRight = false
 	private var interrupting = false
@@ -447,16 +447,14 @@ class BounceElytraFly(
 	private fun eased(target: Double) = lastPitch + (target - lastPitch).coerceIn(-MAX_PITCH_STEP, MAX_PITCH_STEP)
 
 	private fun SafeContext.flushPackets() {
-		while (sendPacketQueue.isNotEmpty()) {
-			val packet = sendPacketQueue.poll()
+		// Another thread may take the last one meanwhile.
+		while (true) {
+			val packet = sendPacketQueue.poll() ?: break
 			ElytraFly.traceLine { "  sent held back ${ElytraFly.describe(packet)}" }
 			// All in one write, flushed with the last.
 			connection.sendPacketSilently(packet, flush = sendPacketQueue.isEmpty())
 		}
-		while (pingPackets.isNotEmpty()) {
-			val packet = pingPackets.poll()
-			connection.handlePacketSilently(packet)
-		}
+		while (true) connection.handlePacketSilently(pingPackets.poll() ?: break)
 	}
 
 	fun getModifiedVelocity(original: Vec3d) =
