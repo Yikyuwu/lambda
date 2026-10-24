@@ -171,6 +171,11 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val SLOW_CUBE_SPEED = 1.0
 		private const val SLOW_CUBE_HOLD_DELAY = 1
+		/**
+		 * How many ticks later at most holding the height over a magma cube is looked at, a bounce or so. Rising off the
+		 * floor holding from the next tick may miss where holding from the next bounce on still makes it, faster.
+		 */
+		private const val CUBE_LATER_TICKS = 16
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
@@ -1430,7 +1435,7 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.canGetOver(hop: Hop, progress: Double) = when {
 		hop.held -> canHop(hop, progress)
 		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
-		hop.cube -> canHop(hop, progress) || canHop(hop, progress, 1)
+		hop.cube -> canHop(hop, progress) || canHopLater(hop, progress, 1)
 		else -> canHop(hop, progress)
 	}
 
@@ -1533,12 +1538,16 @@ abstract class ObstaclePassingMode(
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
 			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther.
 			hop.anyway -> true
-			hop.cube -> !canHop(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
+			hop.cube -> !canHopLater(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the magma cube %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
 	}
+
+	/** Whether holding the height for [hop] from [from] ticks on or any later up to [CUBE_LATER_TICKS] gets you over it. */
+	private fun SafeContext.canHopLater(hop: Hop, progress: Double, from: Int) =
+		(from..CUBE_LATER_TICKS).any { canHop(hop, progress, it) }
 
 	/**
 	 * How many ticks before [hop] to start holding the height, more the higher it is above the floor. From down on the
