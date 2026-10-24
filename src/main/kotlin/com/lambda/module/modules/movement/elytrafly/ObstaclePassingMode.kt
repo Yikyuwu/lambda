@@ -171,11 +171,6 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val SLOW_CUBE_SPEED = 1.0
 		private const val SLOW_CUBE_HOLD_DELAY = 1
-		/**
-		 * How many ticks later at most holding the height over a magma cube is looked at, a bounce or so. Rising off the
-		 * floor holding from the next tick may miss where holding from the next bounce on still makes it, faster.
-		 */
-		private const val CUBE_LATER_TICKS = 16
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
@@ -1548,9 +1543,14 @@ abstract class ObstaclePassingMode(
 		return hop.held
 	}
 
-	/** Whether holding the height for [hop] from [from] ticks on or any later up to [CUBE_LATER_TICKS] gets you over it. */
-	private fun SafeContext.canHopLater(hop: Hop, progress: Double, from: Int) =
-		(from..CUBE_LATER_TICKS).any { canHop(hop, progress, it) }
+	/**
+	 * Whether holding the height for [hop] from [from] ticks on or any later, until you'd be there at this speed, gets
+	 * you over it. Rising off the floor holding from the next tick may miss where from the next bounce on it makes it.
+	 */
+	private fun SafeContext.canHopLater(hop: Hop, progress: Double, from: Int): Boolean {
+		val ticks = ((hop.start - progress) / player.velocity.horizontalLength().coerceAtLeast(0.1)).toInt().coerceAtMost(CAN_HOP_SIM_TICKS)
+		return (from..max(from, ticks)).any { canHop(hop, progress, it) }
+	}
 
 	/**
 	 * How many ticks before [hop] to start holding the height, more the higher it is above the floor. From down on the
