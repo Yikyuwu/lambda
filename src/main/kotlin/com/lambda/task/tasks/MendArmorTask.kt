@@ -155,7 +155,8 @@ class MendArmorTask @Ta5kBuilder constructor(
             return true
         }
         val offhand = player.offHandStack
-        if (needsMend(offhand) || isBottle(offhand)) return false
+        // Nor a totem, AutoTotem would put it back at once and mending would never get to throwing.
+        if (needsMend(offhand) || isBottle(offhand) || offhand.isOf(Items.TOTEM_OF_UNDYING)) return false
         if (originalOffhand == null && !offhand.isEmpty && items?.invoke(offhand) != true) originalOffhand = offhand.item
         submit { swap(next.id, OFFHAND_BUTTON) }
         return true
