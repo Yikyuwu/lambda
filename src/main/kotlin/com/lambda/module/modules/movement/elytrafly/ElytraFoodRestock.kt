@@ -65,6 +65,8 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
     /** Ticks since it last ate, see [EAT_WAIT_TICKS]. */
     private var eatWait = 0
     private var announced = false
+    /** The restock was stopped for danger and picks up what it placed meanwhile. */
+    private var stopping = false
     /** A restock failed, so it's not tried again until ElytraFly is turned on again. */
     private var failed = false
 
@@ -74,7 +76,11 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
         else if (eatWait > 0) eatWait--
         task?.let {
             // Picks its shulker or the ender chest back up, so nobody can take it.
-            if (it.isActive && with(FlightStop) { hasDanger(mobRadius) }) it.stopSafely()
+            if (it.isActive && !stopping) with(FlightStop) { danger(mobRadius) }?.let { reason ->
+                info("Stopped restocking food, $reason. Picking the shulker back up")
+                stopping = true
+                it.stopSafely()
+            }
             if (it.isActive) return FlightStop.hold(this@ElytraFoodRestock)
             // Ended without its callbacks, e.g. cancelled.
             end()
@@ -141,6 +147,7 @@ class ElytraFoodRestock(override val c: Config, automated: Automated) : ConfigBl
 
     private fun end() {
         task = null
+        stopping = false
         FlightStop.release(this)
     }
 
