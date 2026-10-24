@@ -713,31 +713,32 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Past the magma cube [distance] ahead, as far from it as the way has room, it jumps at you: onto a lane clear of it,
-	 * else gliding over it on the lane farthest from it, else flying past it there at full speed. Walking, it'd come at you
-	 * over and over, bumping into it in the air hurts a little at worst. Lands only with no lane free of blocks.
+	 * Past the magma cube [distance] ahead, as far from it as the way has room, it jumps at you: gliding over it on the lane
+	 * farthest from it, else onto a lane clear of it, else flying past it at full speed on the farthest. Walking, it'd come
+	 * at you over and over, bumping into it in the air hurts a little at worst. Lands only with no lane free of blocks.
 	 */
 	private fun SafeContext.passCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
 		val maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE)
-		freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true)?.let { lane ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
-			return dodgeTo(lane, at).also { dodgeMob = true }
-		}
-		val clearMiss = laneMiss
+		// The lanes free of blocks, the one farthest from it first.
 		val far = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true, closeToCube = true)
 		val laneTarget = far?.target ?: Vec3d.ZERO
 		// Never under one, coming down onto the floor next to it.
 		planHop(linePoint.add(laneTarget), dir, distance, avoid = cubeBoxes(from, distance + MAX_HOP_LENGTH))?.takeUnless { it.under }?.let { over ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), no lane clear of it ($clearMiss), gliding over it at y %.2f on ${laneTarget.describe(dir)}".format(distance, over.targetY) }
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), gliding over it at y %.2f on ${laneTarget.describe(dir)}".format(distance, over.targetY) }
 			hop = over.with(lane = laneTarget)
 			return true
 		}
-		far?.let { lane ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), no lane clear of it ($clearMiss), not gliding over it ($hopRejection), flying past it on ${lane.target.describe(dir)}".format(distance) }
+		val overMiss = hopRejection
+		freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true)?.let { lane ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 			return dodgeTo(lane, at).also { dodgeMob = true }
 		}
-		return if (distance > brakeDistance()) noLaneYet(at, "Magma cube %.1f ahead ($block), no lane free of blocks yet ($laneMiss)".format(distance))
-			else brake(at, "Magma cube %.1f ahead ($block), no lane free of blocks ($laneMiss)".format(distance), mob = true)
+		far?.let { lane ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), no lane clear of it ($laneMiss), flying past it on ${lane.target.describe(dir)}".format(distance) }
+			return dodgeTo(lane, at).also { dodgeMob = true }
+		}
+		return if (distance > brakeDistance()) noLaneYet(at, "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), no lane free of blocks yet ($laneMiss)".format(distance))
+			else brake(at, "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), no lane free of blocks ($laneMiss)".format(distance), mob = true)
 	}
 
 	/**
@@ -1119,8 +1120,8 @@ abstract class ObstaclePassingMode(
 							else freeLane(here, linePoint, dir, distance, lane, past = CARPET_CLEAR, fewestCarpets = true)?.takeUnless { it.stays }
 						else -> freeLane(here, linePoint, dir, distance, lane, dodgeCarpets, if (dodgeCarpets) CARPET_CLEAR else DODGE_MARGIN,
 							maxDodge = if (dodgeMob) max(passerConfig.maxDodge, MOB_MAX_DODGE) else passerConfig.maxDodge, mob = dodgeMob)
-							// No lane clear of the magma cube, as far from it as there's room.
-							?: if (!hit.mob) null else freeLane(here, linePoint, dir, distance, lane, past = DODGE_MARGIN,
+							// Dodging a magma cube, no lane clear of it: as far from it as there's room, a block on the lane too.
+							?: if (!dodgeMob) null else freeLane(here, linePoint, dir, distance, lane, past = DODGE_MARGIN,
 								maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE), mob = true, closeToCube = true)?.takeUnless { it.stays }
 					}
 					val over = if (carpetsOnly && distance <= CARPET_HOP_AHEAD) planHop(from, dir, distance, carpets = true, lean = tilt)
