@@ -98,6 +98,8 @@ abstract class ObstaclePassingMode(
 		private const val PLAYER_HALF_WIDTH = 0.3
 		/** Room kept above a magma cube gliding over it, it jumps. */
 		private const val MAGMA_CUBE_JUMP = 0.5
+		/** A magma cube is glided over like a block this high at least. */
+		private const val CUBE_HEIGHT = 2.0
 		/** How far around the way magma cubes are looked for, past the biggest one's middle. */
 		private const val MAX_DODGE_CUBE = 4.0
 		/** How far to the side a magma cube is dodged at least, a big one fills most of the way. */
@@ -713,40 +715,24 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Past the magma cube [distance] ahead, as far from it as the way has room, it jumps at you: gliding over it on the lane
-	 * farthest from it, else onto a lane clear of it, else flying past it at full speed on the farthest. Walking, it'd come
-	 * at you over and over, bumping into it in the air hurts a little at worst. Lands only with no lane free of blocks.
+	 * Past the magma cube [distance] ahead: glided over on the line at full speed like a block two high, see [cubeBoxes].
+	 * Else flown past on the lane farthest from it, it jumps at you. Walking, it'd come at you over and over, bumping into
+	 * it in the air hurts a little at worst. Lands only with no lane free of blocks.
 	 */
 	private fun SafeContext.passCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
-		val maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE)
-		// The lanes free of blocks, the one farthest from it first.
-		val far = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true, closeToCube = true)
-		// Never under one, coming down onto the floor next to it. Right along a wall the glide box touches it the whole way,
-		// so over to the farthest lane as far as that works, else less far, else on the line.
-		val avoid = cubeBoxes(from, distance + MAX_HOP_LENGTH)
-		val farOffset = far?.offset ?: 0.0
-		// A lane at a time, each try plans a whole glide.
-		val step = laneStep(dir)
-		val tries = generateSequence(farOffset) { it - sign(farOffset) * step }.takeWhile { abs(it) > step / 2 && it * farOffset > 0 } + 0.0
-		var overMiss = ""
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
-		for (offset in tries) {
-			val laneTarget = across.multiply(offset)
-			val over = planHop(linePoint.add(laneTarget), dir, distance, avoid = avoid)?.takeUnless { it.under }
-			if (over == null) {
-				if (overMiss.isEmpty()) overMiss = hopRejection
-				continue
-			}
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), gliding over it at y %.2f on ${laneTarget.describe(dir)}".format(distance, over.targetY) }
-			hop = over.with(lane = laneTarget)
+		hopTooSlow = false
+		// Never under one, coming down onto the floor next to it.
+		planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOP_LENGTH))?.takeUnless { it.under }?.let { over ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), gliding over it at y %.2f".format(distance, over.targetY) }
+			hop = over
 			return true
 		}
-		freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true)?.let { lane ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
-			return dodgeTo(lane, at).also { dodgeMob = true }
-		}
-		far?.let { lane ->
-			ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), no lane clear of it ($laneMiss), flying past it on ${lane.target.describe(dir)}".format(distance) }
+		val overMiss = hopRejection
+		// Slow still, e.g. right after taking off. Faster a few bounces on it may get over after all.
+		if (hopTooSlow && distance > brakeDistance() + HOP_RETRY_MARGIN)
+			return noLaneYet(at, "Magma cube %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
+		freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE), mob = true, closeToCube = true)?.let { lane ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), flying past it on ${lane.target.describe(dir)}".format(distance) }
 			return dodgeTo(lane, at).also { dodgeMob = true }
 		}
 		return if (distance > brakeDistance()) noLaneYet(at, "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), no lane free of blocks yet ($laneMiss)".format(distance))
@@ -1105,12 +1091,8 @@ abstract class ObstaclePassingMode(
 				val from = if (tilt != 0 && onDodgeLane(linePoint, dir)) here else onLane
 				val ahead = from.add(dir.multiply(skip))
 				// Dodging carpets, more of them on the lane too.
-				val (nearest, other) = ahead.obstacleHits(dir, passerConfig.dodgeLookAhead - skip, lean = tilt, carpets = dodgeCarpets, mobs = !dodgeMob)
-				// Dodging a magma cube, one reaching onto the lane: it moved, or jumps at you.
-				val cube = if (!dodgeMob) null else cubeSpans(here, linePoint, dir, passerConfig.dodgeLookAhead.toDouble())
-					.filter { dodgeOffset in it.acrossMin..it.acrossMax }.minOfOrNull { it.alongMin }
-					?.let { Obstacle(it.coerceAtLeast(0.0) - skip, mob = true) { "magma_cube" } }
-				val low = listOfNotNull(nearest, cube).minByOrNull { it.distance }
+				// Flying past a magma cube on the lane farthest from it, it's not looked at again: on to the end of it.
+				val (low, other) = ahead.obstacleHits(dir, passerConfig.dodgeLookAhead - skip, lean = tilt, carpets = dodgeCarpets, mobs = !dodgeMob)
 				low?.let { hit ->
 					val distance = hit.distance + skip
 					val block = hit.what
@@ -1522,10 +1504,14 @@ abstract class ObstaclePassingMode(
 			path.last().let { last -> alongMax > last.along && last.offset in acrossMin..acrossMax }
 	}
 
-	/** The boxes of the magma cubes up to [maxDistance] around [from], with room around them and above for their jumps. */
+	/**
+	 * The boxes of the magma cubes up to [maxDistance] around [from], with room around them, glided over like a block two
+	 * high or above their top for their jumps.
+	 */
 	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
 		world.getEntitiesByClass(MagmaCubeEntity::class.java, Box(from, from).expand(maxDistance, MAX_DODGE_CUBE, maxDistance)) { it.isAlive }
-			.map { it.boundingBox.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN).stretch(0.0, MAGMA_CUBE_JUMP, 0.0) }
+			.map { cube -> cube.boundingBox.let { Box(it.minX, it.minY, it.minZ, it.maxX, max(it.minY + CUBE_HEIGHT, it.maxY + MAGMA_CUBE_JUMP), it.maxZ) }
+				.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN) }
 
 	/** The magma cubes up to [maxDistance] ahead of [from], how far they reach along the way and across the line from [linePoint]. */
 	private fun SafeContext.cubeSpans(from: Vec3d, linePoint: Vec3d, dir: Vec3d, maxDistance: Double): List<CubeSpan> {
