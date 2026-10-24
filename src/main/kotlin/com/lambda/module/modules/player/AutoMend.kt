@@ -17,13 +17,13 @@
 
 package com.lambda.module.modules.player
 
-import baritone.api.pathing.goals.GoalBlock
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.hideAllExcept
 import com.lambda.config.settings.complex.orUnset
 import com.lambda.config.withEdits
 import com.lambda.context.SafeContext
-import com.lambda.interaction.handlers.BaritoneHandler
+import com.lambda.event.events.MovementEvent
+import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.module.Module
 import com.lambda.module.modules.combat.AutoArmor
 import com.lambda.module.modules.combat.AutoTotem
@@ -46,6 +46,7 @@ import com.lambda.util.item.GearKind
 import com.lambda.util.item.GearKindChoice
 import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.item.ItemUtils
+import com.lambda.util.player.MovementUtils.update
 import com.lambda.util.player.SlotUtils.hotbarStacks
 import net.minecraft.block.AbstractPressurePlateBlock
 import net.minecraft.enchantment.Enchantments
@@ -53,6 +54,8 @@ import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Suppress("unused")
 object AutoMend : Module(
@@ -129,6 +132,9 @@ object AutoMend : Module(
         if (group != MendGroup.None) group.wearable else (kind.kind ?: item.kind)?.category == GearKind.Category.Armor
 
     private var mendTask: Task<*>? = null
+    /** The block beside the stand position it steps off to when done, see [stepOff]. */
+    private var stepOffTarget: BlockPos? = null
+    private var stepOffTicks = 0
 
     private val clickSetup = ClickSetup(
         this,
@@ -186,12 +192,36 @@ object AutoMend : Module(
                 logError("AutoMend stopped: ${it.message}")
             }.onCompletion {
                 mendTask = null
-                if (damaged != null) stepOff(stand)
-                disable()
+                if (damaged == null || !stepOff(stand)) disable()
             }.run()
         }
 
+        // Only the movement keys, no pathfinding that could break or place blocks to get there.
+        listen<MovementEvent.InputUpdate> {
+            val target = stepOffTarget ?: return@listen
+            val center = target.toBottomCenterPos()
+            val dx = center.x - player.x
+            val dz = center.z - player.z
+            if (dx * dx + dz * dz < STEP_OFF_REACHED * STEP_OFF_REACHED && player.blockPos == target || ++stepOffTicks > STEP_OFF_TICKS) {
+                if (player.blockPos != target) info("Couldn't step off to ${target.toShortString()}")
+                it.input.update(forward = 0.0, strafe = 0.0, jump = false, sneak = false, sprint = false)
+                stepOffTarget = null
+                return@listen disable()
+            }
+            // From the target direction to the keys, relative to where the player looks.
+            val yaw = Math.toRadians(player.yaw.toDouble())
+            it.input.update(
+                forward = -dx * sin(yaw) + dz * cos(yaw),
+                strafe = dx * cos(yaw) + dz * sin(yaw),
+                jump = target.y > player.blockPos.y && player.isOnGround,
+                // Doesn't walk off an edge past the target.
+                sneak = true,
+                sprint = false,
+            )
+        }
+
         onDisable {
+            stepOffTarget = null
             mendTask?.cancel()
             mendTask = null
         }
@@ -208,15 +238,29 @@ object AutoMend : Module(
     override fun isSword(stack: ItemStack) = stack.item in ItemUtils.swords &&
         stack.getEnchantment(Enchantments.SWEEPING_EDGE) >= 3 && stack.getEnchantment(Enchantments.FIRE_ASPECT) == 0
 
-    /** Steps off [stand] to a free block beside it when done, so it doesn't keep the farm running while it stands there. */
-    private fun SafeContext.stepOff(stand: BlockPos) {
-        if (player.blockPos != stand) return
-        val beside = Direction.Type.HORIZONTAL.map { stand.offset(it) }.firstOrNull { pos ->
-            isPassable(pos) && isPassable(pos.up()) && fluidState(pos).isEmpty && hasSolidGround(pos) &&
-                blockState(pos).block !is AbstractPressurePlateBlock
-        } ?: return info("No free block beside ${stand.toShortString()} to step off to")
-        BaritoneHandler.setGoalAndPath(GoalBlock(beside))
+    /**
+     * Starts stepping off [stand] when done, so it doesn't keep the farm running while it stands there: to a free block
+     * beside or diagonal to it, on the same level or one up. Whether it found one.
+     */
+    private fun SafeContext.stepOff(stand: BlockPos): Boolean {
+        if (player.blockPos != stand) return false
+        fun free(pos: BlockPos) = isPassable(pos) && isPassable(pos.up()) && fluidState(pos).isEmpty && fluidState(pos.up()).isEmpty
+        fun canStand(pos: BlockPos) = free(pos) && hasSolidGround(pos) && blockState(pos).block !is AbstractPressurePlateBlock
+        val sides = Direction.Type.HORIZONTAL.toList()
+        val beside = sides.map { stand.offset(it) }
+        // Diagonal only past a free side, else it gets stuck on the corners.
+        val diagonal = sides.map { stand.offset(it).offset(it.rotateYClockwise()) }
+            .filter { pos -> beside.any { free(it) && it.getManhattanDistance(pos) == 1 } }
+        // One up only with room to jump.
+        val up = if (isPassable(stand.up(2))) (beside + diagonal).map { it.up() } else emptyList()
+        stepOffTarget = (beside + diagonal + up).firstOrNull(::canStand)
+            ?: return false.also { info("No free block beside ${stand.toShortString()} to step off to") }
+        stepOffTicks = 0
+        return true
     }
+
+    private const val STEP_OFF_TICKS = 60
+    private const val STEP_OFF_REACHED = 0.3
 
     private fun ItemStack.isGear(category: GearKind.Category) = GearKind.entries.any { it.category == category && it.matches(this) }
 }
