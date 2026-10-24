@@ -35,6 +35,8 @@ import kotlin.math.hypot
 annotation class RotationRequestDsl
 
 abstract class RotationRequest(automated: Automated) : Request(), Automated by automated {
+	/** Who asked, e.g. a module or a task, for debugging. */
+	val requester: Automated = automated
 	override val requestId = requestCount++
 	override val tickStageMask = automated.rotationConfig.tickStageMask
 	override val nowOrNothing = true
