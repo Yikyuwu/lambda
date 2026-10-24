@@ -93,6 +93,8 @@ class MendToolsTask @Ta5kBuilder constructor(
     }
 
     private var leftInChest = 0
+    /** The repaired chest had no room left, so it stops like when the damaged chest is empty. */
+    private var repairedFull = false
     private var walkTicks = 0
     private var missingTicks = 0
     @Volatile private var lastPacket = System.currentTimeMillis()
@@ -141,6 +143,10 @@ class MendToolsTask @Ta5kBuilder constructor(
         when {
             damagedCount() > 0 -> startMending()
             damagedChest == null || repairedChest == null -> finish()
+            repairedFull -> {
+                info("The repaired chest is full")
+                finish()
+            }
             carried(::isMendedTool) > 0 -> open(repairedChest, Phase.Dumping, extraTicks)
             else -> open(damagedChest, Phase.Taking, extraTicks)
         }
@@ -152,7 +158,10 @@ class MendToolsTask @Ta5kBuilder constructor(
         val free = handler.containerSlots.firstOrNull { it.stack.isEmpty }
         when {
             !isMendedTool(player.offHandStack) && tool == null -> return false
-            free == null -> return failAction("The repaired chest is full")
+            free == null -> {
+                repairedFull = true
+                return false
+            }
             isMendedTool(player.offHandStack) -> submit { swap(free.id, OFFHAND_BUTTON) }
             tool != null -> submit { quickMove(tool.id) }
         }
