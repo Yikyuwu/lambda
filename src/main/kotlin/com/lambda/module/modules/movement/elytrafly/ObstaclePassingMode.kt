@@ -278,6 +278,8 @@ abstract class ObstaclePassingMode(
 		val open: Boolean = false,
 		/** Over a magma cube, held at the last moment. */
 		val cube: Boolean = false,
+		/** Not making it, climbing as high as it gets anyway, bumping into it lower is no worse. Held right away. */
+		val anyway: Boolean = false,
 	) {
 		val targetY = when {
 			under -> (feetY + topY) / 2
@@ -285,7 +287,7 @@ abstract class ObstaclePassingMode(
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -586,7 +588,7 @@ abstract class ObstaclePassingMode(
 			val inTheWay = if (before > 0) Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).obstacleHit(snappedDir, before) else null
 			// A simulation of the glide, once a tick is enough.
 			// No floor in sight, it glides on as far as it can anyway.
-			val makesIt by lazy { hop.open || canGetOver(hop, progress) }
+			val makesIt by lazy { hop.open || hop.anyway || canGetOver(hop, progress) }
 			when {
 				!player.isGliding -> this@ObstaclePassingMode.hop = null
 				inTheWay != null -> {
@@ -612,6 +614,11 @@ abstract class ObstaclePassingMode(
 					hop.waiting = true
 					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
 					return false
+				}
+				// A magma cube isn't dodged, it's looked at again from the next bounce on until it's close.
+				!makesIt && hop.cube && hop.start - progress > player.velocity.horizontalLength() * HOP_LEAD_TICKS -> {
+					noLaneYet(hop.obstacle, "Can't get over the magma cube at %.1f from here ($hopMiss), bouncing on to look again".format(hop.start - progress))
+					this@ObstaclePassingMode.hop = null
 				}
 				!makesIt -> {
 					ElytraFly.debug { "Can't get over the obstacle at %.1f in time ($hopMiss), dodging instead".format(hop.start - progress) }
@@ -730,8 +737,14 @@ abstract class ObstaclePassingMode(
 		// all. There's nothing to brake for, it's looked at again until it's close.
 		if (hopTooSlow && distance > player.velocity.horizontalLength() * HOP_LEAD_TICKS)
 			return noLaneYet(at, "Magma cube %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
-		ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
 		skipHopAt = at
+		// Too slow only, it climbs as high as it gets anyway. Maybe just over it, else bumping into it higher up.
+		if (hopTooSlow) planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = true)?.takeUnless { it.under }?.let { over ->
+			ElytraFly.debug { "Magma cube %.1f ahead ($block), can't get over it in time ($hopRejection), climbing up at it anyway".format(distance) }
+			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true, anyway = true)
+			return true
+		}
+		ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
 		return false
 	}
 
@@ -1333,7 +1346,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.planHop(
 		linePoint: Vec3d, dir: Vec3d, distance: Double, step: Boolean = false, length: Double = STEP_ON, carpets: Boolean = false, lean: Int = 0,
-		avoid: List<Box> = emptyList(),
+		avoid: List<Box> = emptyList(), anyway: Boolean = false,
 	): Hop? {
 		// Blocks, and the [avoid] boxes, e.g. magma cubes the world's collisions don't count.
 		fun free(box: Box) = world.isSpaceEmpty(player, box) && avoid.none { it.intersects(box) }
@@ -1397,19 +1410,20 @@ abstract class ObstaclePassingMode(
 		// Under it only with floor right after to come down on, else it's dodged and the height kept.
 		if (under && !linePoint.add(dir.multiply(stop + HOP_SCAN_STEP)).boxHasFloor()) return noHop("no floor right after it to come down on")
 		val at = progress(linePoint)
-		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets, under = under).takeIf { canGetOver(it, at) }
+		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets, under = under).takeIf { anyway || canGetOver(it, at) }
 			?: noHop("can't get up there in time, $hopMiss").also { hopTooSlow = true }
 	}
 
 	/**
 	 * Whether you get over [hop] from [progress] on. Over carpets bouncing on may well, else holding the height from now
-	 * on, at the last moment later. Over a magma cube slow, holding it from now on may make it where held from close by
-	 * wouldn't, [holdingFor] holds it once any later wouldn't. Else holding it once [holdingFor] does.
+	 * on, at the last moment later. Over a magma cube slow, holding it from the next tick on may make it where held from
+	 * close by wouldn't, [holdingFor] holds it once any later wouldn't. This tick still bounces, it's held from the next
+	 * one. Else holding it once [holdingFor] does.
 	 */
 	private fun SafeContext.canGetOver(hop: Hop, progress: Double) = when {
 		hop.held -> canHop(hop, progress)
 		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
-		hop.cube -> canHop(hop, progress) || canHop(hop, progress, 0)
+		hop.cube -> canHop(hop, progress) || canHop(hop, progress, 1)
 		else -> canHop(hop, progress)
 	}
 
@@ -1511,6 +1525,7 @@ abstract class ObstaclePassingMode(
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
 			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther.
+			hop.anyway -> true
 			hop.cube -> !canHop(hop, progress, CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
