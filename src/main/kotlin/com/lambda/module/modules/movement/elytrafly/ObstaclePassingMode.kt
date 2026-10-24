@@ -165,6 +165,12 @@ abstract class ObstaclePassingMode(
 		 * over it late and short keeps the speed, and it has less time to notice you and jump.
 		 */
 		private const val CUBE_HOLD_DELAY = 3
+		/**
+		 * Slower than this a tick, every bounce more speeds you up a lot, so over a magma cube the height is held at the very
+		 * last tick, [SLOW_CUBE_HOLD_DELAY] later still wouldn't make it.
+		 */
+		private const val SLOW_CUBE_SPEED = 1.0
+		private const val SLOW_CUBE_HOLD_DELAY = 1
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
@@ -588,7 +594,8 @@ abstract class ObstaclePassingMode(
 			val inTheWay = if (before > 0) Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).obstacleHit(snappedDir, before) else null
 			// A simulation of the glide, once a tick is enough.
 			// No floor in sight, it glides on as far as it can anyway.
-			val makesIt by lazy { hop.open || hop.anyway || canGetOver(hop, progress) }
+			// Over a magma cube once held it climbs on anyway, missing it by a bit it bumps into it higher up at worst.
+			val makesIt by lazy { hop.open || hop.anyway || hop.cube && hop.held || canGetOver(hop, progress) }
 			when {
 				!player.isGliding -> this@ObstaclePassingMode.hop = null
 				inTheWay != null -> {
@@ -1526,7 +1533,7 @@ abstract class ObstaclePassingMode(
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
 			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther.
 			hop.anyway -> true
-			hop.cube -> !canHop(hop, progress, CUBE_HOLD_DELAY)
+			hop.cube -> !canHop(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding up over the magma cube %.1f ahead at %.2f".format(hop.start - progress, speed) }
