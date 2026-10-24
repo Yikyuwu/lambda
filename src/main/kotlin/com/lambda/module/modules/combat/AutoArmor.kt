@@ -112,7 +112,7 @@ object AutoArmor : Module(
 
 	var overriddenElytraPriority: Boolean? = null
 
-	/** The better piece first: one that's not about to break, then elytra priority, armor, toughness, enchantments, the hotbar. */
+	/** The better piece first: one that's not about to break, then elytra priority, armor, toughness, enchantments, worn or in the hotbar. */
 	val SORTER = Comparator<Slot> { a, b -> compareScores(score(b), score(a)) }
 
 	/** What [SORTER] compares, best first, one after the other. */
@@ -136,7 +136,8 @@ object AutoArmor : Module(
 			}.toDouble(),
 			Protection.entries.sumOf { stack.getEnchantment(it.enchant) }.toDouble(),
 			(stack.getEnchantment(Enchantments.UNBREAKING) + stack.getEnchantment(Enchantments.MENDING)).toDouble(),
-			if (slot.index in 0..8) 1.0 else 0.0,
+			// Worn too, else an equal piece in the hotbar is put on and the worn one, now in the hotbar, back again and again.
+			if (slot.index !in 9..35) 1.0 else 0.0,
 		)
 	}
 
