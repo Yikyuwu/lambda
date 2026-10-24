@@ -42,7 +42,7 @@ import com.lambda.util.world.raycast.InteractionMask
 import com.lambda.util.world.raycast.RayCastUtils.blockResult
 import com.lambda.util.world.raycast.RayCastUtils.rayCast
 import net.minecraft.entity.Entity
-import net.minecraft.entity.mob.Monster
+import net.minecraft.entity.mob.MagmaCubeEntity
 import net.minecraft.registry.Registries
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
@@ -1585,12 +1585,13 @@ abstract class ObstaclePassingMode(
 		val carpetStarts = if (!carpets) emptyList() else offsets.map { add(it).add(0.0, CARPET_RAY, 0.0) }
 		val blockStarts = heights.flatMap { height -> offsets.map { add(it).add(0.0, height, 0.0) } }
 		val starts = carpetStarts + blockStarts
-		// Boats, minecarts and shulkers are as solid as blocks to you, the rays only see blocks. Hostile mobs too, e.g. a
-		// magma cube on the way hurts and throws you off, gliding into it.
+		// Boats, minecarts and shulkers are as solid as blocks to you, the rays only see blocks. Magma cubes too, of any
+		// size, their box grows with it: gliding into one hurts and throws you off. The rays are close enough for the
+		// smallest.
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
 		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach))) {
-			safeContext.player.collidesWith(it) || it is Monster && it.isAlive
+			safeContext.player.collidesWith(it) || it is MagmaCubeEntity && it.isAlive
 		}
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
 		fun nearest(starts: List<Vec3d>, within: Double): Obstacle? {
@@ -1608,7 +1609,7 @@ abstract class ObstaclePassingMode(
 					entity.boundingBox.raycast(start, start.add(reach)).orElse(null)?.let {
 						val distance = it.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
-							nearest = Obstacle(distance, entity is Monster) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
+							nearest = Obstacle(distance, entity is MagmaCubeEntity) { "${Registries.ENTITY_TYPE.getId(entity.type).path} ${entity.blockPos.toShortString()}" }
 					}
 				}
 			}
