@@ -142,6 +142,8 @@ abstract class ObstaclePassingMode(
 		 * climb up there. Holding it all the way loses speed.
 		 */
 		private const val HOP_LEAD_TICKS = 10
+		/** How many ticks more it glides in low before gliding under something, off the bounces. */
+		private const val UNDER_LEAD_TICKS = 30
 		/** How far before braking would be needed to stop waiting to get fast enough to glide over, and dodge instead. */
 		private const val HOP_RETRY_MARGIN = 24.0
 		/** The fastest [holdPitch] climbs to the height held. Slower, a block up takes longer than it's held ahead. */
@@ -1391,10 +1393,11 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * How many ticks before [hop] to start holding the height, more the higher it is above the floor. From down on the
-	 * floor, not bouncing up yet, a block up doesn't make it in [HOP_LEAD_TICKS] alone.
+	 * floor, not bouncing up yet, a block up doesn't make it in [HOP_LEAD_TICKS] alone. Under something it comes down
+	 * from the bounces long before, the room below is narrow.
 	 */
 	private fun SafeContext.leadTicks(hop: Hop) =
-		HOP_LEAD_TICKS + (hop.targetY - startPos.y).coerceAtLeast(0.0) / MAX_HOLD_CLIMB
+		HOP_LEAD_TICKS + (hop.targetY - startPos.y).coerceAtLeast(0.0) / MAX_HOLD_CLIMB + if (hop.under) UNDER_LEAD_TICKS else 0
 
 	/** The pitch that gets [climb] closest to closing in on [target] smoothly, from [y] at [speed]. */
 	private fun holdPitch(y: Double, climb: Double, speed: Double, target: Double, gravity: Double): Double {

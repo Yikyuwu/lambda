@@ -101,6 +101,8 @@ class BounceElytraFly(
 		private const val MAX_NETHER_LAYER_FLIGHT_Y = 122.2
 		/** How far above the flight line gliding over an obstacle may go. */
 		private const val MAX_HOP_RISE = 2.5
+		/** Gliding over an obstacle, as high as the gliding box just stays under that roof. */
+		private const val MAX_NETHER_HOP_Y = 122.35
 		/** How far up a block roof over you is looked for. */
 		private const val ROOF_SCAN_HEIGHT = 4.0
 		private const val ROOF_SCAN_STEP = 0.25
@@ -421,9 +423,9 @@ class BounceElytraFly(
 		}
 	}
 
-	/** Over an obstacle in the nether up to [MAX_NETHER_LAYER_FLIGHT_Y], over two blocks too, the roof stays clear of the gliding box. */
+	/** Over an obstacle in the nether up to [MAX_NETHER_HOP_Y], over two blocks too. */
 	override fun SafeContext.maxHopY() =
-		if (world.registryKey == World.NETHER) max(maxFlightY(), min(MAX_NETHER_LAYER_FLIGHT_Y, startPos.y + MAX_HOP_RISE))
+		if (world.registryKey == World.NETHER) max(maxFlightY(), min(MAX_NETHER_HOP_Y, startPos.y + MAX_HOP_RISE))
 		else maxFlightY()
 
 	override fun SafeContext.maxFlightY() =
