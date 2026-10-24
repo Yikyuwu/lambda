@@ -721,14 +721,26 @@ abstract class ObstaclePassingMode(
 		val maxDodge = max(passerConfig.maxDodge, MOB_MAX_DODGE)
 		// The lanes free of blocks, the one farthest from it first.
 		val far = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true, closeToCube = true)
-		val laneTarget = far?.target ?: Vec3d.ZERO
-		// Never under one, coming down onto the floor next to it.
-		planHop(linePoint.add(laneTarget), dir, distance, avoid = cubeBoxes(from, distance + MAX_HOP_LENGTH))?.takeUnless { it.under }?.let { over ->
+		// Never under one, coming down onto the floor next to it. Right along a wall the glide box touches it the whole way,
+		// so over to the farthest lane as far as that works, else less far, else on the line.
+		val avoid = cubeBoxes(from, distance + MAX_HOP_LENGTH)
+		val farOffset = far?.offset ?: 0.0
+		// A lane at a time, each try plans a whole glide.
+		val step = laneStep(dir)
+		val tries = generateSequence(farOffset) { it - sign(farOffset) * step }.takeWhile { abs(it) > step / 2 && it * farOffset > 0 } + 0.0
+		var overMiss = ""
+		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		for (offset in tries) {
+			val laneTarget = across.multiply(offset)
+			val over = planHop(linePoint.add(laneTarget), dir, distance, avoid = avoid)?.takeUnless { it.under }
+			if (over == null) {
+				if (overMiss.isEmpty()) overMiss = hopRejection
+				continue
+			}
 			ElytraFly.debug { "Magma cube %.1f ahead ($block), gliding over it at y %.2f on ${laneTarget.describe(dir)}".format(distance, over.targetY) }
 			hop = over.with(lane = laneTarget)
 			return true
 		}
-		val overMiss = hopRejection
 		freeLane(from, linePoint, dir, distance, Vec3d.ZERO, maxDodge = maxDodge, mob = true)?.let { lane ->
 			ElytraFly.debug { "Magma cube %.1f ahead ($block), not gliding over it ($overMiss), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 			return dodgeTo(lane, at).also { dodgeMob = true }
