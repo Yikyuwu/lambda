@@ -220,6 +220,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_APPROACH = 8.0
 		/** How far past a hole's end the lane to touch down on in it has to be free, e.g. past a pillar there. */
 		private const val TOUCH_PAST = 3.0
+		/** How much more room than the box a lane to touch down on in a hole needs on the way, see [touchLane]. */
+		private const val LANE_CLEAR_MARGIN = 0.05
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
 		private const val TOUCH_GRACE_TICKS = 5
 		/** How far ahead, in ticks at the speed you have, floor beside a hole is looked for to land on, see [landBeside]. */
@@ -1864,20 +1866,22 @@ abstract class ObstaclePassingMode(
 		val step = laneStep(dir) / 4
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val progress = progress(player.pos)
-		val swing = sweep(dir)
 		val floor = line.y
+		// The box itself and a bit, staying on the lane it doesn't swing out across like steering over to one does.
 		fun clear(lane: Double, from: Double, to: Double, bottom: Double, top: Double) =
 			generateSequence(max(from, progress)) { it + HOP_SCAN_STEP }.takeWhile { it <= to }.all { along ->
 				val point = startPos.add(forward.multiply(along)).add(across.multiply(lane))
-				spaceEmpty(Box(point.x - GLIDE_SIZE / 2, bottom, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, top, point.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
+				spaceEmpty(Box(point.x - GLIDE_SIZE / 2, bottom, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, top, point.z + GLIDE_SIZE / 2)
+					.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
 			}
 		var miss: String? = null
 		for (lane in (-sides..sides).map { it * step }.sortedBy { abs(it - here) }) {
 			val laneLine = startPos.add(across.multiply(lane)).add(0.0, floor - startPos.y, 0.0)
 			val touch = touchSpot(laneLine, dir, hop.start, hop.end) ?: continue
-			// Through its middle, coming down on an edge it'd slide off or miss it.
+			// The middle part of the box over it halfway along it, like diving onto it needs, see [topUnderSoon]: on a corner
+			// sliver it'd miss it. Not its very middle, a lane past a pillar beside it may cover it well enough.
 			val middle = laneLine.add(forward.multiply(touch.middle))
-			if (!topAt(middle.x, middle.z, touch.y)) continue
+			if (listOf(-1, 1).none { dx -> listOf(-1, 1).any { dz -> topAt(middle.x + dx * GLIDE_SIZE / 4, middle.z + dz * GLIDE_SIZE / 4, touch.y) } }) continue
 			val held = touch.y + TOUCH_ABOVE
 			if (!clear(lane, progress + DODGE_STEER_AHEAD, hop.obstacle, floor + passerConfig.minObstacleHeight, floor + MAX_BOUNCE_RISE) ||
 				!clear(lane, hop.obstacle, touch.range.start, held, held + GLIDE_SIZE) ||
@@ -1892,7 +1896,7 @@ abstract class ObstaclePassingMode(
 			}
 			if (miss == null) miss = "touching down on the top at y %.2f %.1f ahead on the lane %+.2f across misses too, $hopMiss".format(touch.y, touch.range.start - progress, lane)
 		}
-		touchMiss = miss ?: "no lane crossing a top through its middle free past the hole"
+		touchMiss = miss ?: "no lane over a top free past the hole"
 		return hop
 	}
 
