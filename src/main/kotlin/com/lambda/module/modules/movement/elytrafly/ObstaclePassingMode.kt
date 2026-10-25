@@ -162,6 +162,8 @@ abstract class ObstaclePassingMode(
 		private const val HOP_SIM_TICKS = 80
 		/** Long enough to bounce up to speed from a take-off and over a hop as far as it's looked for. */
 		private const val CAN_HOP_SIM_TICKS = 200
+		/** How many ticks after the next bounce starts holding from it is looked at, see [holdingFor]. */
+		private const val NEXT_BOUNCE_MARGIN = 2
 		/** Steeper up the wings brake hard. Down to 90, like without wings, to top out a bounce in time. */
 		private const val MAX_HOP_PITCH_UP = 30
 		/** How many degrees apart [holdPitch] looks first. */
@@ -2076,10 +2078,12 @@ abstract class ObstaclePassingMode(
 		val speed = player.velocity.horizontalLength()
 		hop.held = when {
 			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later. With blocks
-			// in it to get up over, from the first bounce that gets over them: waiting for the last one that still does,
-			// a near miss lets it slip by. At its edge there's no bouncing on, held anyway.
-			hop.hole -> progress >= hop.start - speed || (lastBounceBefore(hop, progress) ||
-				hop.raised.isNotEmpty() && player.velocity.y > 0 && !player.isOnGround) && canHop(hop, progress, 0)
+			// in it to get up over, from an earlier one when held from the next one it'd no longer get over them. Looked
+			// at a bit later than that one, a near miss in the simulation doesn't let both slip by. Held from much
+			// earlier it glides long and slows down a lot. At its edge there's no bouncing on, held anyway.
+			hop.hole -> progress >= hop.start - speed || (lastBounceBefore(hop, progress) || hop.raised.isNotEmpty() &&
+				player.velocity.y > 0 && !player.isOnGround && nextRise()?.let { !canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) } != false) &&
+				canHop(hop, progress, 0)
 			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			hop.anyway -> true
@@ -2092,6 +2096,25 @@ abstract class ObstaclePassingMode(
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
+	}
+
+	/** In how many ticks the next bounce off the floor rises, bouncing on from here. Null when not within the simulation. */
+	private fun SafeContext.nextRise(): Int? {
+		val floor = startPos.y
+		val gravity = player.finalGravity
+		val bounce = bouncePitch()
+		var y = player.y
+		var climb = player.velocity.y
+		var speed = player.velocity.horizontalLength()
+		repeat(CAN_HOP_SIM_TICKS) { tick ->
+			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
+				climb = c
+				speed = s
+			}
+			y += climb
+			if (y <= floor) return tick + 1
+		}
+		return null
 	}
 
 	/**
