@@ -218,7 +218,7 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val TOUCH_HELD_AROUND = 2.0
 		/** How far before a top to touch down on beside you it's steered over to it, see [touchTops]. */
-		private const val TOUCH_APPROACH = 8.0
+		private const val TOUCH_APPROACH = 5.0
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
 		private const val TOUCH_GRACE_TICKS = 5
 		/** How far ahead, in ticks at the speed you have, floor beside a hole is looked for to land on, see [landBeside]. */
@@ -399,14 +399,18 @@ abstract class ObstaclePassingMode(
 		 * The height to hold from [y]: [targetY], over a hole once [topped] only as high as it is. Pulling back up there
 		 * costs the speed that carries it to the floor after the hole, it sinks all the more after.
 		 */
-		fun holdY(y: Double, along: Double, speed: Double, topped: Boolean = this.topped, touched: Boolean = this.touched) = when {
-			// Just above the top to touch down on until a tick before its middle, then down onto it.
-			touch != null && !touched -> if (diving(along, speed, touched)) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
+		fun holdY(
+			y: Double, along: Double, speed: Double, topped: Boolean = this.topped, touched: Boolean = this.touched,
+			dive: Boolean = diving(along, speed, touched),
+		) = when {
+			// Just above the top to touch down on until over it, then down onto it.
+			touch != null && !touched -> if (dive) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
 			hole && topped -> min(targetY, max(y, needFrom(along) + HOP_MARGIN))
 			else -> targetY
 		}
 		/** How fast it may sink at [along] the line: over the top to touch down on fast, down onto it while over it. */
-		fun sinkAt(along: Double, speed: Double, touched: Boolean = this.touched) = if (diving(along, speed, touched)) TOUCH_SINK else HOLD_SINK
+		fun sinkAt(along: Double, speed: Double, touched: Boolean = this.touched, dive: Boolean = diving(along, speed, touched)) =
+			if (dive) TOUCH_SINK else HOLD_SINK
 		/**
 		 * Diving onto the top to touch down on, from a tick before the box gets over it at [speed]: it sinks slowly the
 		 * first tick, staying above it until over it, and comes down near its middle.
@@ -424,7 +428,7 @@ abstract class ObstaclePassingMode(
 	 * A block's top at [y] to touch down on and bounce off, under the box from where to where along the line in [range],
 	 * through its middle on the [lane] that far across the line.
 	 */
-	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d)
+	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d, val block: BlockPos)
 
 	abstract val passerConfig: PasserSettings
 
@@ -586,9 +590,14 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
-		hop.touch?.takeIf { !hop.touched && progress(player.pos) in it.range && !hop.overTop }?.let {
+		// Diving onto the top only once the box is over it next tick, steered over to it or not: along the line alone it
+		// may still be beside it, diving there runs into its side.
+		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
+			player.pos.add(player.velocity.x, 0.0, player.velocity.z).let { Vec3d(it.x, touch.y, it.z) }.boxHasFloor()
+		} == true
+		if (dive && !hop.overTop) {
 			hop.overTop = true
-			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, diving onto it at y %.2f".format(player.y, player.velocity.y, it.y) }
+			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, diving onto it at y %.2f".format(player.y, player.velocity.y, hop.touch.y) }
 		}
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
@@ -598,7 +607,7 @@ abstract class ObstaclePassingMode(
 		if (climb > 0) held.rose = true
 		val progress = progress(player.pos)
 		val speed = player.velocity.horizontalLength()
-		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed), player.finalGravity, held.sinkAt(progress, speed))
+		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed, dive = dive), player.finalGravity, held.sinkAt(progress, speed, dive = dive))
 	}
 
 	/** How long obstacle passing took this tick so far. */
@@ -946,7 +955,7 @@ abstract class ObstaclePassingMode(
 			val over = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: withTouch(planned, linePoint, dir)
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
 			ElytraFly.debug {
-				val how = over.touch?.let { "touching down on it at y %.2f".format(it.y) }
+				val how = over.touch?.let { "touching down on ${it.block.toShortString()} at y %.2f".format(it.y) }
 					?: "gliding ${if (over.under) "under" else "over"} it at y %.2f${if (over.under || touchMiss.isEmpty()) "" else " ($touchMiss)"}".format(over.targetY)
 				"Obstacle %.1f ahead ($block), $how${if (over.hole) " and the hole after it" else ""}, %.1f long".format(distance, over.end - over.start)
 			}
@@ -1657,7 +1666,7 @@ abstract class ObstaclePassingMode(
 		}
 		if (lane == null || past == null) {
 			ElytraFly.debug {
-				val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
+				val touching = hole.touch?.let { ", touching down on ${it.block.toShortString()} at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
 					?: if (touchMiss.isEmpty()) "" else " ($touchMiss)"
 				"Hole %.1f ahead, %.1f long, gliding over it$touching".format(start, end - start)
 			}
@@ -1665,7 +1674,7 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 		ElytraFly.debug {
-			val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
+			val touching = hole.touch?.let { ", touching down on ${it.block.toShortString()} at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
 				?: if (touchMiss.isEmpty()) "" else " ($touchMiss)"
 			"Hole %.1f ahead, %.1f long, gliding over it$touching and over to ${lane.target.describe(dir)}${lane.leanText()} past what's %.1f ahead".format(start, end - start, past)
 		}
@@ -1848,7 +1857,7 @@ abstract class ObstaclePassingMode(
 						spaceEmpty(Box(spot.x - GLIDE_SIZE / 2, top + TOUCH_ABOVE, spot.z - GLIDE_SIZE / 2,
 							spot.x + GLIDE_SIZE / 2, top + TOUCH_ABOVE + GLIDE_SIZE, spot.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
 					}
-					if (clear) tops += abs(lane.dotProduct(across) - here) to Touch(at - reach..at + reach, top, lane)
+					if (clear) tops += abs(lane.dotProduct(across) - here) to Touch(at - reach..at + reach, top, lane, pos.toImmutable())
 				}
 				offset += TOUCH_SCAN_STEP
 			}
