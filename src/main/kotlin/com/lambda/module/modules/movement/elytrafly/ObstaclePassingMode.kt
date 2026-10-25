@@ -191,6 +191,8 @@ abstract class ObstaclePassingMode(
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
 		/** How fast a lane past an obstacle is looked for once none fits at the speed you have, see [slowingToFit]. */
 		private const val FIT_SPEED = 0.85
+		/** How far ahead, in ticks at the speed you have, floor beside a hole is looked for to land on, see [landBeside]. */
+		private const val LAND_AHEAD_TICKS = 12
 		/** How often an obstacle still far with no way past yet is looked at again, see [lookedLately]. */
 		private const val RELOOK_TICKS = 4
 		/** How close below its height over a hole counts as up there, see [Hop.topped]. */
@@ -434,6 +436,8 @@ abstract class ObstaclePassingMode(
 	private var fitDodge = false
 	/** On it at [FIT_SPEED] already, flying level so it doesn't get faster, slower it bounces on. */
 	private var atFitSpeed = false
+	/** Over a hole, steering over to floor beside it to land there, see [landBeside]. */
+	private var landing = false
 	/** Why [throughOpening] found no opening, for the log. */
 	private var openingMiss = ""
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
@@ -660,6 +664,12 @@ abstract class ObstaclePassingMode(
 		}
 
 		if (passerConfig.dodge && player.isGliding && !onLayer) planSpeed(closestLinePoint, snappedDir) else forgetSpeedNeed()
+
+		// Over the floor beside the hole now, down onto it.
+		if (landing && player.isGliding && !player.isOnGround && floorBelowYou()) {
+			landing = false
+			brake(progress(playerPos) + 1, "Over the floor beside the hole")
+		}
 
 		brakeAt?.let { at ->
 			if (!player.isOnGround) return false
@@ -1333,7 +1343,9 @@ abstract class ObstaclePassingMode(
 								dodgeTo(free, progress + distance, carpets = true)
 							} == true -> {}
 						// No other lane, something low enough to glide over on this one, glided over right there like on the line.
+						// In a hole the glide over the hole goes over it too, see [glideOverHole].
 						!carpetsOnly && !onLine && distance >= MIN_DODGE_DISTANCE &&
+							holesAhead(onLane, dir).none { it.start < progress + distance && it.endInclusive > progress } &&
 							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }?.let { glideOver(it.with(lane = lane)) } != null -> {}
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
@@ -1476,9 +1488,10 @@ abstract class ObstaclePassingMode(
 		// Farther, or in it: glided over from the line, bouncing on up to it faster than on a lane, and steered over to a
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
 		val lane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
+		// High enough for the blocks in it that can be glided over.
+		val (feetY, topY) = clearInside(from, dir, start, end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
 		// Partly over its edge the box stands, the rays found where it doesn't.
-		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE),
-			at + start, false, low = true, hole = true)
+		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, feetY, max(topY, feetY), at + start, false, low = true, hole = true)
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
@@ -1538,21 +1551,32 @@ abstract class ObstaclePassingMode(
 		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
 		val hole = holesAhead(linePoint, dir).firstOrNull { it.endInclusive > over.end && it.start <= over.end + bounceRoom } ?: return null
 		val at = progress(linePoint)
-		// Blocks in the hole too, as high as the highest of them needs. One that can't be glided over is steered past
-		// meanwhile, see [laneFromGlide].
-		var feetY = over.feetY
-		var topY = min(over.topY, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE))
-		var from = over.end - at
-		while (from < hole.endInclusive - at) {
-			val hit = linePoint.add(dir.multiply(from)).obstacleHit(dir, hole.endInclusive - at - from, mobs = false) ?: break
-			val inner = planHop(linePoint, dir, from + hit.distance) ?: break
-			feetY = max(feetY, inner.feetY)
-			topY = min(topY, inner.topY)
-			from = max(inner.end - at, from + hit.distance + HOP_SCAN_STEP)
-		}
+		val (feetY, topY) = clearInside(linePoint, dir, over.end - at, hole.endInclusive - at, over.feetY,
+			min(over.topY, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE)))
 		if (topY - feetY < HOP_MARGIN) return null
 		val both = Hop(over.start, hole.endInclusive, feetY, topY, over.obstacle, false, low = true, hole = true)
 		return both.takeIf { canGetOver(it, at) }
+	}
+
+	/**
+	 * From [feetY] to [topY], how high a glide along [linePoint] from [from] to [to] ahead has to be to clear the blocks
+	 * there that can be glided over, e.g. in a hole. One that can't be ends the look, it's steered past meanwhile, see
+	 * [laneFromGlide].
+	 */
+	private fun SafeContext.clearInside(linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, feetY: Double, topY: Double): Pair<Double, Double> {
+		val at = progress(linePoint)
+		var feet = feetY
+		var top = topY
+		var along = from
+		while (along < to) {
+			val hit = linePoint.add(dir.multiply(along)).obstacleHit(dir, to - along, mobs = false) ?: break
+			// Only how high, whether it gets up there in time is up to the glide over all of it.
+			val inner = planHop(linePoint, dir, along + hit.distance, anyway = true) ?: break
+			feet = max(feet, inner.feetY)
+			top = min(top, inner.topY)
+			along = max(inner.end - at, along + hit.distance + HOP_SCAN_STEP)
+		}
+		return feet to top
 	}
 
 	/**
@@ -2102,8 +2126,12 @@ abstract class ObstaclePassingMode(
 
 	/** Stops dodging and lands, to walk around the obstacle at [at] along the line, or past the [carpets]. Always false. */
 	private fun brake(at: Double, reason: String, carpets: Boolean = false): Boolean {
-		// Over a hole there's nothing to land on, it glides on and looks again, there may be floor farther on.
-		if (runSafe { overHole() } == true) return noLaneYet(at, "$reason, over a hole, gliding on")
+		// Over a hole there's nothing to land on: over to floor beside it, else it glides on and looks again, there may be
+		// floor farther on.
+		if (runSafe { overHole() } == true) {
+			if (runSafe { landBeside(at, reason) } == true) return false
+			return noLaneYet(at, "$reason, over a hole, gliding on")
+		}
 		ElytraFly.debug { "$reason, landing to walk around it" }
 		landedTicks = 0
 		stopDodge()
@@ -2113,10 +2141,36 @@ abstract class ObstaclePassingMode(
 		return false
 	}
 
+	/**
+	 * Over a hole with no way past what's at [at]: over to a lane beside it with floor a bit ahead, or a layer a block up
+	 * to land on top of, steered to like a dodge. Lands once over it, see [landing]. Whether there's one.
+	 */
+	private fun SafeContext.landBeside(at: Double, reason: String): Boolean {
+		val dir = getSnappedDir()
+		val linePoint = player.pos.findClosestPointOnLine(dir)
+		val across = across(dir)
+		val here = Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(across)
+		val ahead = linePoint.add(dir.multiply(player.velocity.horizontalLength() * LAND_AHEAD_TICKS))
+		val step = laneStep(dir) / 4
+		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val offset = (-sides..sides).map { it * step }.sortedBy { abs(it - here) }.firstOrNull { offset ->
+			ahead.add(across.multiply(offset)).let { spot -> spot.isLoaded && (spot.boxHasFloor() || spot.add(0.0, 1.0, 0.0).let { up -> up.boxHasFloor() && up.canStand() }) }
+		} ?: return false
+		ElytraFly.debug { "$reason, over a hole, landing beside it %+.2f across".format(offset) }
+		dodgeTo(Lane(across.multiply(offset), 0, offset), at)
+		landing = true
+		return true
+	}
+
+	/** Floor under you, or a layer a block up, to land on, see [landBeside]. */
+	private fun SafeContext.floorBelowYou() = Vec3d(player.x, startPos.y, player.z).let { feet ->
+		feet.boxHasFloor() || feet.add(0.0, 1.0, 0.0).let { up -> player.y >= up.y && up.boxHasFloor() }
+	}
+
 	/** Gliding above the floor's height over a hole. Fallen into it, it walks out. */
 	private fun SafeContext.overHole() =
 		player.isGliding && !player.isOnGround && player.y >= startPos.y - FELL_IN &&
-			Vec3d(player.x, startPos.y, player.z).let { it.isLoaded && !it.boxHasFloor() }
+			Vec3d(player.x, startPos.y, player.z).isLoaded && !floorBelowYou()
 
 	private fun Vec3d.describe(dir: Vec3d): String {
 		val offset = dotProduct(across(dir))
@@ -2268,6 +2322,7 @@ abstract class ObstaclePassingMode(
 		slowFor = null
 		fitDodge = false
 		atFitSpeed = false
+		landing = false
 		dodgeLean = 0
 		dodgeOffset = 0.0
 		dodgeCarpets = false
