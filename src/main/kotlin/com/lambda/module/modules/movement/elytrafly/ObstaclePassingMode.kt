@@ -202,8 +202,14 @@ abstract class ObstaclePassingMode(
 		/** How fast it may sink holding the height, smoothly, and down onto a top to touch down on, see [holdPitch]. */
 		private const val HOLD_SINK = 0.1
 		private const val TOUCH_SINK = 0.6
-		/** Room above a top to touch down on for the box and the jump off it. */
-		private const val TOUCH_ROOM = 1.2
+		/**
+		 * How tall you are to the server standing and crouching, and how high the jump off a top to touch down on takes
+		 * you a tick. Landed, the server takes you for standing: with a roof too close for that over the jump it sets you
+		 * back, crouching fits lower, see [crouchOnTop].
+		 */
+		private const val STAND_HEIGHT = 1.8
+		private const val CROUCH_HEIGHT = 1.5
+		private const val JUMP_RISE = 0.42
 		/** How long the box has to have a top under it to touch down on it. */
 		private const val MIN_TOUCH = 0.6
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
@@ -394,8 +400,11 @@ abstract class ObstaclePassingMode(
 		fun needFrom(along: Double) = raised.filter { it.first.endInclusive >= along }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
 	}
 
-	/** A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range]. */
-	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double)
+	/**
+	 * A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range]. With a
+	 * roof too close above it to [crouch] for the jump off it.
+	 */
+	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val crouch: Boolean)
 
 	abstract val passerConfig: PasserSettings
 
@@ -1756,33 +1765,49 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * The first top along [line] from [from] to [to] along the line to touch down on: one or two blocks above its floor,
-	 * under the box for [MIN_TOUCH] at least, with room above it to bounce off. Null with none.
+	 * under the box for [MIN_TOUCH] at least, with room above it to jump off it at least crouching. Null with none.
 	 */
 	private fun SafeContext.touchSpot(line: Vec3d, dir: Vec3d, from: Double, to: Double): Touch? {
 		val at = progress(line)
 		var start: Double? = null
 		var height = 0.0
+		var crouch = false
+		fun room(point: Vec3d, y: Double, tall: Double) =
+			spaceEmpty(Box(point.x - GLIDE_SIZE / 2, y, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, y + tall + JUMP_RISE, point.z + GLIDE_SIZE / 2))
 		var along = from
 		while (along <= to) {
 			val point = line.add(dir.multiply(along - at))
 			val top = (1..2).map { line.y + it }.firstOrNull { y ->
-				y <= maxHopY() && Vec3d(point.x, y, point.z).boxHasFloor() &&
-					spaceEmpty(Box(point.x - GLIDE_SIZE / 2, y, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, y + TOUCH_ROOM, point.z + GLIDE_SIZE / 2))
+				y <= maxHopY() && Vec3d(point.x, y, point.z).boxHasFloor() && room(point, y, CROUCH_HEIGHT)
 			}
+			if (top != null && !room(point, top, STAND_HEIGHT)) crouch = true
 			when {
 				top != null && start == null -> {
 					start = along
 					height = top
 				}
 				start != null && top != height -> {
-					if (along - start >= MIN_TOUCH) return Touch(start..along - HOP_SCAN_STEP, height)
+					if (along - start >= MIN_TOUCH) return Touch(start..along - HOP_SCAN_STEP, height, crouch)
 					start = if (top != null) along else null
 					top?.let { height = it }
+					crouch = top != null && !room(point, top, STAND_HEIGHT)
 				}
 			}
 			along += HOP_SCAN_STEP
 		}
-		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it..to, height) }
+		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it..to, height, crouch) }
+	}
+
+	/**
+	 * Whether to crouch for touching down on a top with a roof close above it: landed the server takes you for standing,
+	 * and standing the jump off it takes you into the roof, it sets you back. From the tick you come down onto it, the
+	 * server takes the crouch a tick late, until the jump is off.
+	 */
+	protected fun SafeContext.crouchOnTop(): Boolean {
+		val hop = hop ?: return false
+		val touch = hop.touch?.takeIf { it.crouch } ?: return false
+		if (hop.touched) return player.age - hop.touchedAt <= 1
+		return progress(player.pos) in touch.range && player.y - touch.y < JUMP_RISE
 	}
 
 	/** What [clearInside] found: where how high, how high it may go, where to hold it, and a block that can't be glided over. */
