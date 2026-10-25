@@ -411,8 +411,8 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * A top at [y] to touch down on and bounce off, under the middle of the box from where to where along the line in
-	 * [range], on the [lane] that far across the line.
+	 * A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range], on the
+	 * [lane] that far across the line. Aimed at its [middle], see [Hop.diving].
 	 */
 	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d = Vec3d.ZERO) {
 		val middle = (range.start + range.endInclusive) / 2
@@ -1803,7 +1803,7 @@ abstract class ObstaclePassingMode(
 		while (along <= to) {
 			val point = line.add(dir.multiply(along - at))
 			val top = (1..2).map { line.y + it }.firstOrNull { y ->
-				y <= maxHopY() && Vec3d(point.x, y, point.z).hasFloor() &&
+				y <= maxHopY() && Vec3d(point.x, y, point.z).boxHasFloor() &&
 					spaceEmpty(Box(point.x - GLIDE_SIZE / 2, y, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, y + TOUCH_ROOM, point.z + GLIDE_SIZE / 2))
 			}
 			when {
