@@ -440,7 +440,13 @@ abstract class ObstaclePassingMode(
 		) = when {
 			// Just above the top to touch down on until a tick before its middle, then down onto it. Below its height only
 			// with the box over it already: a move goes down first, then across, beside it that runs into its side.
-			touch != null && !touched -> if (!dive) touch.y + TOUCH_ABOVE else if (overTop) touch.y - TOUCH_DIVE else touch.y + TOUCH_SKIM
+			// Skimming only coming down onto it from above: still climbing up to it, easing off below its height runs into its
+			// side.
+			touch != null && !touched -> when {
+				!dive || y < touch.y + TOUCH_SKIM -> touch.y + TOUCH_ABOVE
+				overTop -> touch.y - TOUCH_DIVE
+				else -> touch.y + TOUCH_SKIM
+			}
 			hole && topped -> min(targetY, max(y, needFrom(along) + HOP_MARGIN))
 			else -> targetY
 		}
@@ -2534,10 +2540,19 @@ abstract class ObstaclePassingMode(
 				climb = c
 				speed = s
 			}
+			val wasOnTop = hop.touch?.range?.contains(along) == true
 			y += climb
 			along += speed
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = hop.touch?.range?.contains(along) == true
+			// Coming over it lower than its top runs into its side.
+			if (onTop && !wasOnTop && !touched && y < hop.touch!!.y) {
+				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, below the top at y %.2f to touch down on"
+					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.touch.y)
+				// Not a near miss to go for anyway, see [hopShort].
+				hopShort = Double.POSITIVE_INFINITY
+				return false
+			}
 			val low = if (onTop && !touched) Double.NEGATIVE_INFINITY else hop.feetAt(along) + if (onTop) 0.0 else margin
 			if (along >= hop.start && (y < low || y > hop.topY)) {
 				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
