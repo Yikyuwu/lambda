@@ -319,6 +319,8 @@ abstract class ObstaclePassingMode(
 		val aim: Double? = null,
 		/** Over a magma cube, held this high instead when fast enough once it's held, see [holdingFor]. */
 		val highAim: Double? = null,
+		/** Stretches along the line, e.g. blocks in a hole, the feet have to be higher than [feetY] over, and how high. */
+		val raised: List<Pair<ClosedFloatingPointRange<Double>, Double>> = emptyList(),
 	) {
 		val targetY = aim ?: when {
 			under -> (feetY + topY) / 2
@@ -327,7 +329,7 @@ abstract class ObstaclePassingMode(
 		}
 		/** Changed so, how far it is glided over it kept, e.g. steering over to a lane mid-glide. */
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim).also {
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim, raised).also {
 				it.waiting = waiting
 				it.held = held
 				it.heldCheckedAt = heldCheckedAt
@@ -351,7 +353,12 @@ abstract class ObstaclePassingMode(
 		 * The height to hold from [y]: [targetY], over a hole once [topped] only as high as it is. Pulling back up there
 		 * costs the speed that carries it to the floor after the hole, it sinks all the more after.
 		 */
-		fun holdY(y: Double, topped: Boolean = this.topped) = if (hole && topped) min(targetY, max(y, feetY + HOP_MARGIN)) else targetY
+		fun holdY(y: Double, along: Double, topped: Boolean = this.topped) =
+			if (hole && topped) min(targetY, max(y, needFrom(along) + HOP_MARGIN)) else targetY
+		/** How high the feet have to be at [along] the line. */
+		fun feetAt(along: Double) = raised.filter { along in it.first }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
+		/** How high the feet have to stay from [along] on until past the last of [raised]. */
+		fun needFrom(along: Double) = raised.filter { it.first.endInclusive >= along }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
 	}
 
 	abstract val passerConfig: PasserSettings
@@ -505,7 +512,7 @@ abstract class ObstaclePassingMode(
 		val held = this@ObstaclePassingMode.hop ?: hop
 		if (held.hole && (player.y >= held.targetY - TOPPED_MARGIN || held.rose && climb <= 0)) held.topped = true
 		if (climb > 0) held.rose = true
-		holdPitch(player.y, climb, player.velocity.horizontalLength(), held.holdY(player.y), player.finalGravity)
+		holdPitch(player.y, climb, player.velocity.horizontalLength(), held.holdY(player.y, progress(player.pos)), player.finalGravity)
 	}
 
 	/** How long obstacle passing took this tick so far. */
@@ -1414,9 +1421,9 @@ abstract class ObstaclePassingMode(
 		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it, over the blocks in it too.
 		val laneAt = progress(lane)
-		val (feetY, topY, aim) = clearInside(lane, dir, hole.start - laneAt, hole.endInclusive - laneAt,
-			lane.y + passerConfig.minObstacleHeight, min(maxFlightY(), lane.y + MAX_BOUNCE_RISE))
-		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, feetY, max(topY, feetY), hole.start, false, low = true, hole = true, aim = aim)
+		val (raised, topY, aim) = clearInside(lane, dir, hole.start - laneAt, hole.endInclusive - laneAt, min(maxFlightY(), lane.y + MAX_BOUNCE_RISE))
+		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, lane.y + passerConfig.minObstacleHeight, topY, hole.start, false,
+			low = true, hole = true, aim = aim, raised = raised)
 		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
 		val speed = player.velocity.horizontalLength()
 		val wants = !makesIt(speed)
@@ -1493,9 +1500,10 @@ abstract class ObstaclePassingMode(
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
 		val lane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
 		// High enough for the blocks in it that can be glided over.
-		val (feetY, topY, aim) = clearInside(from, dir, start, end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
+		val (raised, topY, aim) = clearInside(from, dir, start, end, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
 		// Partly over its edge the box stands, the rays found where it doesn't.
-		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, feetY, max(topY, feetY), at + start, false, low = true, hole = true, aim = aim)
+		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, from.y + passerConfig.minObstacleHeight, topY, at + start, false,
+			low = true, hole = true, aim = aim, raised = raised)
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
@@ -1555,37 +1563,43 @@ abstract class ObstaclePassingMode(
 		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
 		val hole = holesAhead(linePoint, dir).firstOrNull { it.endInclusive > over.end && it.start <= over.end + bounceRoom } ?: return null
 		val at = progress(linePoint)
-		val (feetY, topY, aim) = clearInside(linePoint, dir, over.end - at, hole.endInclusive - at, over.feetY,
-			min(over.topY, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE)))
-		if (topY - feetY < HOP_MARGIN) return null
-		val both = Hop(over.start, hole.endInclusive, feetY, topY, over.obstacle, false, low = true, hole = true, aim = aim)
+		// Higher over the block it starts with and the ones in it, over the rest just above the floor.
+		val (raised, topY, aim) = clearInside(linePoint, dir, over.end - at, hole.endInclusive - at, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE), over)
+		if (topY - raised.maxOf { it.second } < HOP_MARGIN) return null
+		val both = Hop(over.start, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight, topY, over.obstacle, false,
+			low = true, hole = true, aim = aim, raised = raised)
 		return both.takeIf { canGetOver(it, at) }
 	}
 
 	/**
-	 * From [feetY] up, how high a glide along [linePoint] from [from] to [to] ahead has to be to clear the blocks there
-	 * that can be glided over, e.g. in a hole: the lowest and highest the feet may go, and where to hold them. [topY] is
-	 * only how high it'd rather go, for blocks needing more it goes as high as there's room over them, held a bit above
-	 * what they need. Null where to hold them with none. One that can't be glided over ends the look, it's steered past
-	 * meanwhile, see [laneFromGlide].
+	 * How high a glide along [linePoint] from [from] to [to] ahead has to be to clear the blocks there that can be glided
+	 * over, e.g. in a hole: where along the line the feet have to be how high, how high they may go, and where to hold
+	 * them. [topY] is only how high it'd rather go, for blocks needing more it goes as high as there's room over them,
+	 * held a bit above what they need. Null where to hold them with none. One that can't be glided over ends the look,
+	 * it's steered past meanwhile, see [laneFromGlide]. With the glide over a block [before] it, that one too.
 	 */
 	private fun SafeContext.clearInside(
-		linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, feetY: Double, topY: Double,
-	): Triple<Double, Double, Double?> {
+		linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, topY: Double, before: Hop? = null,
+	): Triple<List<Pair<ClosedFloatingPointRange<Double>, Double>>, Double, Double?> {
 		val at = progress(linePoint)
-		var feet = feetY
+		val raised = mutableListOf<Pair<ClosedFloatingPointRange<Double>, Double>>()
 		var room = maxHopY()
+		before?.let {
+			raised += it.start..it.end to it.feetY
+			room = min(room, it.topY)
+		}
 		var along = from
 		while (along < to) {
 			val hit = linePoint.add(dir.multiply(along)).obstacleHit(dir, to - along, mobs = false) ?: break
 			// Only how high, whether it gets up there in time is up to the glide over all of it.
 			val inner = planHop(linePoint, dir, along + hit.distance, anyway = true) ?: break
-			feet = max(feet, inner.feetY)
+			raised += inner.start..inner.end to inner.feetY
 			room = min(room, inner.topY)
 			along = max(inner.end - at, along + hit.distance + HOP_SCAN_STEP)
 		}
-		if (feet + HOP_MARGIN <= min(topY, room)) return Triple(feet, min(topY, room), null)
-		return Triple(feet, room, min(room - HOP_MARGIN, feet + RAISED_HOLD))
+		val highest = raised.maxOfOrNull { it.second } ?: return Triple(raised, topY, null)
+		if (highest + HOP_MARGIN <= min(topY, room)) return Triple(raised, min(topY, room), null)
+		return Triple(raised, room, min(room - HOP_MARGIN, highest + RAISED_HOLD))
 	}
 
 	/**
@@ -1883,16 +1897,16 @@ abstract class ObstaclePassingMode(
 			holding = holding || if (holdFrom != null) tick >= holdFrom else hop.start - along <= speed * leadTicks(hop)
 			if (holding && hop.hole && (y >= hop.targetY - TOPPED_MARGIN || rose && climb <= 0)) topped = true
 			if (holding && climb > 0) rose = true
-			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, topped), gravity) else bounce(y, climb)
+			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, topped), gravity) else bounce(y, climb)
 			glide(climb, speed, pitch, gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			y += climb
 			along += speed
-			if (along >= hop.start && (y < hop.feetY || y > hop.topY)) {
+			if (along >= hop.start && (y < hop.feetAt(along) || y > hop.topY)) {
 				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
-					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.feetY, hop.topY)
+					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.feetAt(along), hop.topY)
 				return false
 			}
 			if (along > hop.end) {
