@@ -503,6 +503,9 @@ abstract class ObstaclePassingMode(
 	private var hopMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
 	private var touchMiss = ""
+
+	/** How the lane to touch down on in a hole was picked, for the log. */
+	private var touchLaneText = ""
 	/** The lane of a top to touch down on in a hole ahead, and until where along the line, see [startDodge]. */
 	private var touchSide: Pair<Vec3d, Double>? = null
 	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
@@ -1694,7 +1697,7 @@ abstract class ObstaclePassingMode(
 		// Touching down on a top in it, on the lane picked for that through the hole, over to it while still bouncing.
 		hole.touch?.let { touch ->
 			val across = hole.lane.dotProduct(across(dir))
-			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it on the lane %+.2f across, touching down on the top at y %.2f %.1f ahead".format(start, end - start, across, touch.y, touch.range.start - at) }
+			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it on the lane %+.2f across, touching down on the top at y %.2f %.1f ahead ($touchLaneText)".format(start, end - start, across, touch.y, touch.range.start - at) }
 			if (abs(across - (dodge?.dotProduct(across(dir)) ?: 0.0)) > 0.01) dodgeTo(Lane(hole.lane, 0, across), hole.end + TOUCH_PAST)
 			hop = hole
 			return true
@@ -1874,26 +1877,38 @@ abstract class ObstaclePassingMode(
 				spaceEmpty(Box(point.x - GLIDE_SIZE / 2, bottom, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, top, point.z + GLIDE_SIZE / 2)
 					.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
 			}
-		var miss: String? = null
-		for (lane in (-sides..sides).map { it * step }.sortedBy { abs(it - here) }) {
+		// How much of the box is over the top halfway along it, on a lane covering it better a bit of drift across
+		// doesn't take it off the edge.
+		fun coverage(middle: Vec3d, y: Double) = (-2..2).sumOf { dx -> (-2..2).count { dz -> topAt(middle.x + dx * GLIDE_SIZE / 5, middle.z + dz * GLIDE_SIZE / 5, y) } }
+		val lanes = (-sides..sides).map { it * step }.mapNotNull { lane ->
 			val laneLine = startPos.add(across.multiply(lane)).add(0.0, floor - startPos.y, 0.0)
-			val touch = touchSpot(laneLine, dir, hop.start, hop.end) ?: continue
+			val touch = touchSpot(laneLine, dir, hop.start, hop.end) ?: return@mapNotNull null
 			// The middle part of the box over it halfway along it, like diving onto it needs, see [topUnderSoon]: on a corner
 			// sliver it'd miss it. Not its very middle, a lane past a pillar beside it may cover it well enough.
 			val middle = laneLine.add(forward.multiply(touch.middle))
-			if (listOf(-1, 1).none { dx -> listOf(-1, 1).any { dz -> topAt(middle.x + dx * GLIDE_SIZE / 4, middle.z + dz * GLIDE_SIZE / 4, touch.y) } }) continue
+			if (listOf(-1, 1).none { dx -> listOf(-1, 1).any { dz -> topAt(middle.x + dx * GLIDE_SIZE / 4, middle.z + dz * GLIDE_SIZE / 4, touch.y) } }) return@mapNotNull null
+			Triple(lane, touch, coverage(middle, touch.y))
+		}.sortedWith(compareByDescending<Triple<Double, Touch, Int>> { it.third }.thenBy { abs(it.first - here) })
+		var miss: String? = null
+		val tried = mutableListOf<String>()
+		for ((lane, touch, covered) in lanes) {
 			val held = touch.y + TOUCH_ABOVE
 			if (!clear(lane, progress + DODGE_STEER_AHEAD, hop.obstacle, floor + passerConfig.minObstacleHeight, floor + MAX_BOUNCE_RISE) ||
 				!clear(lane, hop.obstacle, touch.range.start, held, held + GLIDE_SIZE) ||
-				!clear(lane, touch.range.endInclusive, hop.end + TOUCH_PAST, held, held + GLIDE_SIZE)) continue
+				!clear(lane, touch.range.endInclusive, hop.end + TOUCH_PAST, held, held + GLIDE_SIZE)) {
+				tried += "%+.2f (%d/25 over it) blocked".format(lane, covered)
+				continue
+			}
 			// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
 			// may take you higher than the top, sinking to just above it after.
 			val touching = hop.with(touch = touch, lane = across.multiply(lane), topY = max(hop.topY, maxHopY()))
 			if (canGetOver(touching, progress)) {
 				touchMiss = ""
 				touchSide = touching.lane to hop.end
+				touchLaneText = "%d/25 of the box over it%s".format(covered, tried.joinToString("") { ", tried before: $it" })
 				return touching
 			}
+			tried += "%+.2f (%d/25 over it) misses".format(lane, covered)
 			if (miss == null) miss = "touching down on the top at y %.2f %.1f ahead on the lane %+.2f across misses too, $hopMiss".format(touch.y, touch.range.start - progress, lane)
 		}
 		touchMiss = miss ?: "no lane over a top free past the hole"
