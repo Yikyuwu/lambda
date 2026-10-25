@@ -182,7 +182,7 @@ abstract class ObstaclePassingMode(
 		private const val SLOW_CUBE_HOLD_DELAY = 1
 		/**
 		 * The speed a tick gliding over a magma cube high in the room above it has to leave you with, else it's glided
-		 * over low. Climbing up there costs speed, too slow after it another cube right behind can't be got over.
+		 * over low. Gliding over it costs speed, too slow after it another cube right behind can't be got over.
 		 */
 		private const val HIGH_CUBE_EXIT_SPEED = 1.0
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
@@ -302,6 +302,8 @@ abstract class ObstaclePassingMode(
 		val anyway: Boolean = false,
 		/** Held at this height instead, e.g. higher over a magma cube where there's room. */
 		val aim: Double? = null,
+		/** Over a magma cube, held this high instead when fast enough once it's held, see [holdingFor]. */
+		val highAim: Double? = null,
 	) {
 		val targetY = aim ?: when {
 			under -> (feetY + topY) / 2
@@ -309,7 +311,7 @@ abstract class ObstaclePassingMode(
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -436,7 +438,9 @@ abstract class ObstaclePassingMode(
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
-		holdPitch(player.y, climb, player.velocity.horizontalLength(), hop.targetY, player.finalGravity)
+		// Switched to gliding over it higher just now, see [holdingFor].
+		val target = (this@ObstaclePassingMode.hop ?: hop).targetY
+		holdPitch(player.y, climb, player.velocity.horizontalLength(), target, player.finalGravity)
 	}
 
 	/** How long obstacle passing took this tick so far. */
@@ -759,14 +763,13 @@ abstract class ObstaclePassingMode(
 		hopTooSlow = false
 		fun plan(anyway: Boolean = false) = planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = anyway)
 		plan()?.let { over ->
-			val low = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true)
-			// With room above, e.g. a highway without pavement under its ceiling, held in the middle of it, further off a
-			// cube that jumps, as long as it still gets up there in time and is fast enough after it.
-			val high = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true, aim = (over.feetY + over.topY) / 2)
-				.takeIf { !over.under && it.targetY > low.targetY && canGetOver(it, progress(linePoint)) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
-			val chosen = high ?: low
-			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f (room y %.2f to %.2f), %.1f long".format(distance, chosen.targetY, over.feetY, over.topY, over.end - over.start) }
-			hop = chosen
+			// With room above, e.g. a highway without pavement under its ceiling, held in the middle of it when fast enough.
+			val highAim = ((over.feetY + over.topY) / 2).takeIf { !over.under && it > over.targetY }
+			ElytraFly.debug {
+				"Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f${highAim?.let { ", %.2f if fast enough".format(it) } ?: ""}, %.1f long"
+					.format(distance, over.targetY, over.end - over.start)
+			}
+			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, highAim = highAim)
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
@@ -1595,13 +1598,30 @@ abstract class ObstaclePassingMode(
 			hop.anyway -> true
 			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther. Under one up on
 			// the railing too, gliding low loses speed fast.
-			hop.cube -> !canHopLater(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
+			hop.cube -> holdCube(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
 			else -> hop.start - progress <= speed * leadTicks(hop)
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
+	}
+
+	/**
+	 * Whether to hold the height over the magma cube of [hop] now, once any later wouldn't make it. Fast enough to still
+	 * be after it, see [HIGH_CUBE_EXIT_SPEED], at its [Hop.highAim] instead: farther off the cube, more time to see
+	 * what's next. That one's held a bit sooner, it's higher up. Decided now, not when planned far off and slower.
+	 */
+	private fun SafeContext.holdCube(hop: Hop, progress: Double, delay: Int): Boolean {
+		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, cube = true, aim = it) }
+			?.takeIf { canHop(it, progress, 0) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
+			?: return !canHopLater(hop, progress, delay)
+		if (canHopLater(high, progress, delay)) return false
+		high.held = true
+		high.heldCheckedAt = player.age
+		this@ObstaclePassingMode.hop = high
+		ElytraFly.debug { "Fast enough to glide over the mob high, at y %.2f, %.2f after it".format(high.targetY, hopExitSpeed) }
+		return true
 	}
 
 	/**
