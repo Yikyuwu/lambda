@@ -26,6 +26,7 @@ import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.managers.rotating.Rotation
+import com.lambda.module.modules.world.HighwayTools
 import com.lambda.task.RootTask
 import com.lambda.task.tasks.OpenContainerTask
 import com.lambda.util.BlockUtils.isPassable
@@ -128,10 +129,10 @@ object SpleefGuard : Loadable {
     /**
      * A mob small enough to fall through a hole that can't hop, fly or climb back out. A calm enderman gets a hole
      * 3 deep, which crouching reaches, and the digging never looks at it, see [staresAtEnderman].
-     * An angry one would teleport out.
+     * An angry one would teleport out. HighwayTools can be set to kill calm ones instead.
      */
     fun BuildConfig.canSpleef(entity: Entity) =
-        if (entity is EndermanEntity) spleefEndermen && entity.isAlive && !entity.isAngry
+        if (entity is EndermanEntity) spleefEndermen && entity.isAlive && !entity.isAngry && !HighwayTools.killsCalmEndermen
         else entity is LivingEntity && entity !is PlayerEntity && entity !is SlimeEntity && entity !is BlazeEntity &&
             entity !is Flutterer && entity !is BatEntity && !entity.hasNoGravity() &&
             entity.width <= spleefMaxWidth + SIZE_EPSILON && entity.height <= spleefMaxHeight + SIZE_EPSILON
