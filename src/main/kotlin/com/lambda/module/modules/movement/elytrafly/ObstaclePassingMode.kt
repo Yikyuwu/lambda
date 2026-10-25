@@ -618,10 +618,11 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Whether the box comes over a top at [y] the next tick or the one after: a block there ending at [y] with air above
-	 * it, not a block reaching higher, e.g. a pillar on the way it'd dive into.
+	 * Whether the box is over a top at [y], or comes over it the next tick or the one after: a block there ending at [y]
+	 * with air above it, not a block reaching higher, e.g. a pillar on the way it'd dive into. Over it now counts too,
+	 * the dive takes a couple of ticks and mustn't stop halfway.
 	 */
-	private fun SafeContext.topUnderSoon(y: Double) = (1..2).any { ticks ->
+	private fun SafeContext.topUnderSoon(y: Double) = (0..2).any { ticks ->
 		val at = player.pos.add(player.velocity.x * ticks, 0.0, player.velocity.z * ticks)
 		listOf(-1, 1).any { dx -> listOf(-1, 1).any { dz ->
 			// Half way out from the middle, a sliver of a corner isn't enough to come down on.
@@ -1154,11 +1155,13 @@ abstract class ObstaclePassingMode(
 	 * itself first. With [carpets] free of them too, for [past] after it. Looked at from [lead] ahead on, with that much
 	 * more to steer over to it first. With [fewestCarpets] the one with the fewest of them ahead instead, the one you're on
 	 * and then the line on a tie. Without [mobs] magma cubes and hoglins aren't in the way, they're glided over. At
-	 * [speed] a tick, the box swings out farther the faster.
+	 * [speed] a tick, the box swings out farther the faster. Closest to [toward] first when given, e.g. the side of a top
+	 * to touch down on on the way.
 	 */
 	private fun SafeContext.freeLane(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
 		lead: Double = 0.0, fewestCarpets: Boolean = false, mobs: Boolean = true, speed: Double = player.velocity.horizontalLength(),
+		toward: Vec3d? = null,
 	): Lane? {
 		val across = across(dir)
 		val step = laneStep(dir)
@@ -1177,7 +1180,8 @@ abstract class ObstaclePassingMode(
 		val taken = mutableListOf<Pair<Double, Int>>()
 		val lanes = (-maxOffset..maxOffset)
 			.filter { fewestCarpets || it != currentOffset }
-			.sortedWith(compareBy({ it != currentOffset }, { it != 0 }, { abs(it - currentOffset) }, { -it }))
+			.sortedWith(compareBy({ toward?.let { lane -> abs(it * laneStep - lane.dotProduct(across)) } ?: 0.0 }, { it != currentOffset }, { it != 0 },
+				{ abs(it - currentOffset) }, { -it }))
 		// Up on a layer, one staying on it first. Off it you drop down beside it, where the layer is in the way.
 		return (if (onLayer) listOf(true, false) else listOf(true)).firstNotNullOfOrNull { sameFloor -> misses.clear(); taken.clear(); lanes.asSequence().mapNotNull { offset ->
 				val laneOffset = offset * laneStep
@@ -1950,7 +1954,9 @@ abstract class ObstaclePassingMode(
 			else from = at + HOP_GAP
 		}
 		val (distance, what) = next ?: return null
-		val lane = freeLane(here, linePoint, dir, distance, current)?.takeIf { it.target != current } ?: return null
+		// On the side of a top to touch down on on the way, crossing over to it there's no time for.
+		val toward = hop.touch?.takeIf { !hop.touched }?.lane
+		val lane = freeLane(here, linePoint, dir, distance, current, toward = toward)?.takeIf { it.target != current } ?: return null
 		ElytraFly.debug { "Gliding over it, $what %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(distance) }
 		dodgeTo(lane, progress + distance)
 		return hop.with(lane = lane.target).also { this@ObstaclePassingMode.hop = it }
