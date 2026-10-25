@@ -17,6 +17,8 @@
 
 package com.lambda.interaction.managers.interacting
 
+import net.minecraft.registry.Registries
+import com.lambda.Lambda.LOG
 import com.lambda.config.blocks.InteractConfig
 import com.lambda.config.blocks.InteractConfig.AirPlaceMode
 import com.lambda.context.Automated
@@ -353,6 +355,8 @@ object InteractManager : Manager<InteractRequest>(
 		val blockState = item.getPlacementState(itemPlacementContext) ?: return ActionResult.FAIL
 
 		sendInteractPacket(hand, hitResult)
+		// Every block placed, to tell afterwards what placed one where it shouldn't be.
+		LOG.info("[Place] ${Registries.BLOCK.getId(blockState.block).path} at ${itemPlacementContext.blockPos.toShortString()} against ${hitResult.side.asString()} of ${hitResult.blockPos.toShortString()}, expected ${interactContext.expectedState}, standing at ${player.blockPos.toShortString()} facing ${player.horizontalFacing.asString()}")
 
 		if (interactConfig.interactConfirmationMode != InteractConfig.InteractConfirmationMode.None) {
 			InteractInfo(interactContext, request.pendingInteractions, request.onPlace, interactConfig).startPending()
