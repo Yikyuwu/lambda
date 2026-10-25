@@ -199,8 +199,10 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_ABOVE = 0.2
 		/** How far below a top to touch down on the hold aims once over it, down onto it. */
 		private const val TOUCH_DIVE = 1.0
-		/** How many ticks before the middle of a top to touch down on the dive onto it starts, sinking takes the glide that long. */
-		private const val TOUCH_DIVE_TICKS = 2
+		/** How far apart along and across the way blocks to touch down on are looked for, less than a block. */
+		private const val TOUCH_SCAN_STEP = 0.5
+		/** How many tops to touch down on, closest first, the glide is simulated to, see [withTouch]. */
+		private const val MAX_TOUCH_TRIES = 3
 		/** How fast it may sink holding the height, smoothly, and down onto a top to touch down on, see [holdPitch]. */
 		private const val HOLD_SINK = 0.1
 		private const val TOUCH_SINK = 0.6
@@ -210,13 +212,12 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val TOUCH_ROOM = 1.9
 		/** How long the box has to have a top under it to touch down on it. */
-		private const val MIN_TOUCH = 0.6
 		/**
 		 * How far before and after the top to touch down on its landing is held back, see [touchFloor]: coming down on its
 		 * edge the same tick may carry you on past it.
 		 */
 		private const val TOUCH_HELD_AROUND = 2.0
-		/** How far before a top on another lane it's steered over to it, see [laneTouch]. */
+		/** How far before a top to touch down on beside you it's steered over to it, see [touchTops]. */
 		private const val TOUCH_APPROACH = 8.0
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
 		private const val TOUCH_GRACE_TICKS = 5
@@ -407,11 +408,11 @@ abstract class ObstaclePassingMode(
 		/** How fast it may sink at [along] the line: over the top to touch down on fast, down onto it while over it. */
 		fun sinkAt(along: Double, speed: Double, touched: Boolean = this.touched) = if (diving(along, speed, touched)) TOUCH_SINK else HOLD_SINK
 		/**
-		 * Diving onto the top to touch down on, from [TOUCH_DIVE_TICKS] before its middle at [speed]: the glide takes that
-		 * long to sink, and it comes down on the middle. On its edge it may slide off it in the same tick.
+		 * Diving onto the top to touch down on, from a tick before the box gets over it at [speed]: it sinks slowly the
+		 * first tick, staying above it until over it, and comes down near its middle.
 		 */
 		fun diving(along: Double, speed: Double, touched: Boolean = this.touched) =
-			touch != null && !touched && along >= touch.middle - speed * TOUCH_DIVE_TICKS && along <= touch.range.endInclusive
+			touch != null && !touched && along >= touch.range.start - speed && along <= touch.range.endInclusive
 		/** How high the feet have to be at [along] the line. Over the top to touch down on, down on it. */
 		fun feetAt(along: Double) = if (touch != null && along in touch.range) touch.y
 			else raised.filter { along in it.first }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
@@ -420,12 +421,10 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range], on the
-	 * [lane] that far across the line. Aimed at its [middle], see [Hop.diving].
+	 * A block's top at [y] to touch down on and bounce off, under the box from where to where along the line in [range],
+	 * through its middle on the [lane] that far across the line.
 	 */
-	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d = Vec3d.ZERO) {
-		val middle = (range.start + range.endInclusive) / 2
-	}
+	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d)
 
 	abstract val passerConfig: PasserSettings
 
@@ -1792,89 +1791,71 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * [hop] touching down on the first top on its way that it can, e.g. a pillar or a block in a hole, bouncing off it
-	 * resets the glide and speeds it up. As it was when there's none, or the glide doesn't get there.
+	 * [hop] touching down on a top on its way, e.g. a pillar or a block in a hole, bouncing off it resets the glide and
+	 * speeds it up. The closest one to where you are across the way that the glide gets to, see [touchTops]. As it was
+	 * when there's none.
 	 */
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
-		// On the lane flown along only with the middle of the box over it, else beside it, through its middle.
-		val touch = touchSpot(line, dir, hop.start, hop.end)?.takeIf { centered(line, dir, it) } ?: laneTouch(hop, line, dir)
-			?: return hop.also { touchMiss = "no top to touch down on" }
-		// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
-		// may take you higher than the top, sinking to just above it after.
-		val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
-		if (canGetOver(touching, progress(player.pos))) return touching.also { touchMiss = "" }
-		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(touch.y, touch.range.start - progress(player.pos))
+		val tops = touchTops(hop, line, dir)
+		if (tops.isEmpty()) return hop.also { touchMiss = "no top to touch down on" }
+		val progress = progress(player.pos)
+		tops.take(MAX_TOUCH_TRIES).forEach { touch ->
+			// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
+			// may take you higher than the top, sinking to just above it after.
+			val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
+			if (canGetOver(touching, progress)) return touching.also { touchMiss = "" }
+		}
+		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(tops.first().y, tops.first().range.start - progress)
 		return hop
 	}
 
 	/**
-	 * The first top along [line] from [from] to [to] along the line to touch down on: one or two blocks above its floor,
-	 * under the box for [MIN_TOUCH] at least, with [TOUCH_ROOM] above it. Null with none.
+	 * The blocks along [hop] to touch down on, through their middle: one or two above the floor of [line], no farther
+	 * across the way than a dodge goes, with [TOUCH_ROOM] above them and room for the box swinging out on the way there
+	 * for the last [TOUCH_APPROACH], steered over to it there. Closest to [line] across the way first.
 	 */
-	private fun SafeContext.touchSpot(line: Vec3d, dir: Vec3d, from: Double, to: Double): Touch? {
-		val at = progress(line)
+	private fun SafeContext.touchTops(hop: Hop, line: Vec3d, dir: Vec3d): List<Touch> {
 		val across = across(dir)
-		val lane = across.multiply(line.subtract(startPos).dotProduct(across))
-		var start: Double? = null
-		var height = 0.0
-		var along = from
-		while (along <= to) {
-			val point = line.add(dir.multiply(along - at))
-			val top = (1..2).map { line.y + it }.firstOrNull { y ->
-				y <= maxHopY() && Vec3d(point.x, y, point.z).boxHasFloor() &&
-					spaceEmpty(Box(point.x - GLIDE_SIZE / 2, y, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, y + TOUCH_ROOM, point.z + GLIDE_SIZE / 2))
-			}
-			when {
-				top != null && start == null -> {
-					start = along
-					height = top
-				}
-				start != null && top != height -> {
-					if (along - start >= MIN_TOUCH) return Touch(start..along - HOP_SCAN_STEP, height, lane)
-					start = if (top != null) along else null
-					top?.let { height = it }
-				}
-			}
-			along += HOP_SCAN_STEP
-		}
-		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it..to, height, lane) }
-	}
-
-	/**
-	 * A top to touch down on beside [line] for [hop], the closest lane with one, e.g. a block in a hole beside the lane
-	 * past what's after it: steered over to it for the bounce, then on to the lane. Only with room at the height it's
-	 * held at for the last [TOUCH_APPROACH] before it on that lane, steered over to it there. Before that it's on its own
-	 * lane, e.g. past a pillar at the start of a hole on the line the top is on.
-	 */
-	private fun SafeContext.laneTouch(hop: Hop, line: Vec3d, dir: Vec3d): Touch? {
-		val across = across(dir)
-		// Lanes across the line itself, no farther out than a dodge goes, closest to the one flown along first.
+		val forward = dir.normalize()
 		val here = line.subtract(startPos).dotProduct(across)
-		val middle = line.subtract(across.multiply(here))
-		// Half a lane apart, a top a block wide isn't missed between them, and it's looked for every few ticks.
-		val step = laneStep(dir) / 2
-		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
-		val progress = progress(player.pos)
-		val at = progress(line)
+		val floor = line.y
+		// From its middle to where the box is over it no more, along the line.
+		val reach = (0.5 + GLIDE_SIZE / 2) * (abs(forward.x) + abs(forward.z))
 		val swing = sweep(dir)
-		return (-sides..sides).map { it * step }.filter { abs(it - here) > step / 2 }.sortedBy { abs(it - here) }.firstNotNullOfOrNull { offset ->
-			val lane = middle.add(across.multiply(offset))
-			touchSpot(lane, dir, hop.start, hop.end)?.takeIf { touch ->
-				centered(lane, dir, touch) &&
-					// Room for the box swinging out on the way there, steering over to a lane by a wall it'd swing into it.
-					generateSequence(max(progress, touch.range.start - TOUCH_APPROACH)) { it + HOP_SCAN_STEP }.takeWhile { it < touch.range.start }.all { along ->
-						val point = lane.add(dir.multiply(along - at))
-						spaceEmpty(Box(point.x - GLIDE_SIZE / 2, touch.y + TOUCH_ABOVE, point.z - GLIDE_SIZE / 2,
-							point.x + GLIDE_SIZE / 2, touch.y + TOUCH_ABOVE + GLIDE_SIZE, point.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
+		val progress = progress(player.pos)
+		val seen = HashSet<Long>()
+		val tops = mutableListOf<Pair<Double, Touch>>()
+		var along = hop.start
+		while (along <= hop.end) {
+			var offset = -passerConfig.maxDodge.toDouble()
+			while (offset <= passerConfig.maxDodge) {
+				val point = startPos.add(forward.multiply(along)).add(across.multiply(offset))
+				for (height in 1..2) {
+					val top = floor + height
+					val pos = BlockPos.ofFloored(point.x, top - 1, point.z)
+					if (!seen.add(pos.asLong()) || top > maxHopY() || shapeAt(pos) !== VoxelShapes.fullCube()) continue
+					val middle = Vec3d(pos.x + 0.5, top, pos.z + 0.5)
+					val lane = across.multiply(middle.subtract(startPos).dotProduct(across))
+					if (abs(lane.dotProduct(across)) > passerConfig.maxDodge) continue
+					fun room(at: Vec3d, y: Double, tall: Double) = spaceEmpty(Box(at.x - GLIDE_SIZE / 2, y, at.z - GLIDE_SIZE / 2,
+						at.x + GLIDE_SIZE / 2, y + tall, at.z + GLIDE_SIZE / 2))
+					if (!room(middle, top, TOUCH_ROOM)) continue
+					val at = middle.subtract(startPos).dotProduct(forward)
+					val laneLine = startPos.add(lane).add(0.0, top - startPos.y, 0.0)
+					val clear = generateSequence(max(progress, at - reach - TOUCH_APPROACH)) { it + HOP_SCAN_STEP }.takeWhile { it < at - reach }.all {
+						val spot = laneLine.add(forward.multiply(it))
+						spaceEmpty(Box(spot.x - GLIDE_SIZE / 2, top + TOUCH_ABOVE, spot.z - GLIDE_SIZE / 2,
+							spot.x + GLIDE_SIZE / 2, top + TOUCH_ABOVE + GLIDE_SIZE, spot.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
 					}
+					if (clear) tops += abs(lane.dotProduct(across) - here) to Touch(at - reach..at + reach, top, lane)
+				}
+				offset += TOUCH_SCAN_STEP
 			}
+			along += TOUCH_SCAN_STEP
 		}
+		return tops.sortedBy { it.first }.map { it.second }
 	}
-
-	/** Whether the middle of the box is over [touch] halfway along it on [line], coming down on its middle, not an edge. */
-	private fun SafeContext.centered(line: Vec3d, dir: Vec3d, touch: Touch) =
-		line.add(dir.multiply(touch.middle - progress(line))).let { Vec3d(it.x, touch.y, it.z) }.hasFloor()
 
 	/**
 	 * The top being touched down on while over it, until the jump off it, else null: bounced off like the floor, the
@@ -2764,7 +2745,7 @@ abstract class ObstaclePassingMode(
 	 * side, away from what's dodged.
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
-		// Over to the lane with the top to touch down on from shortly before it until bounced off it, see [laneTouch].
+		// Over to the lane with the top to touch down on from shortly before it until bounced off it, see [touchTops].
 		hop.touch != null && !hop.touched && progress >= hop.touch.range.start - TOUCH_APPROACH -> steerYaw(linePoint, hop.touch.lane, dir)
 		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
 		else -> steerYaw(linePoint, hop.lane, dir)
