@@ -421,6 +421,8 @@ abstract class ObstaclePassingMode(
 	private var hopExitSpeed = 0.0
 	/** How long you've been down after braking, waiting for the server to end the glide. */
 	private var landedTicks = 0
+	/** Why [throughOpening] found no opening, for the log. */
+	private var openingMiss = ""
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
 	private var noLaneAt: Double? = null
 	/** Where along the line obstacles and holes with no way past yet are, and the [passTicks] each was looked at. */
@@ -816,8 +818,13 @@ abstract class ObstaclePassingMode(
 		if (!onLayer && distance > brakeDistance() + DODGE_STEER_AHEAD && dodgeOverHole(linePoint, dir, distance))
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), steering past it over the hole before it".format(distance))
 		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
-			?: return throughOpening(from, linePoint, dir, distance, block) || if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
-			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)))
+			?: run {
+				// Looking for an opening glides over it on each lane, that'd replace why not on the line.
+				val notOver = hopRejection
+				val noLane = laneMiss
+				return throughOpening(from, linePoint, dir, distance, block) || if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane to dodge to yet ($noLane), no opening in it ($openingMiss)".format(distance))
+				else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), %.2f off the line, no free lane to dodge to ($noLane), no opening in it ($openingMiss)".format(distance, from.distanceTo(linePoint)))
+			}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 		return dodgeTo(lane, at)
 	}
@@ -1473,6 +1480,9 @@ abstract class ObstaclePassingMode(
 		val step = laneStep(dir) / 4
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val here = from.subtract(linePoint).dotProduct(across)
+		// The closest lane to an opening that's too narrow, for the log. Diagonally each tick moves along one axis and
+		// then the other, the box swings out across the way, so a single block missing is too narrow at speed.
+		var closest: String? = null
 		val (offset, over) = (-sides..sides).sortedBy { abs(it) }.asSequence().mapNotNull { side ->
 			val offset = side * step
 			val lanePoint = linePoint.add(across.multiply(offset))
@@ -1481,7 +1491,11 @@ abstract class ObstaclePassingMode(
 			val reached = steerPath(here, dir, offset, 0, wall, wall).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
 			if (reached == null || reached > wall - 1) return@mapNotNull null
 			planHop(lanePoint, dir, wall)?.let { offset to it }
-		}.firstOrNull() ?: return false
+				?: null.also { if (closest == null) closest = "%+.2f across: $hopRejection".format(offset) }
+		}.firstOrNull() ?: run {
+			openingMiss = closest ?: "none"
+			return false
+		}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), no free lane, through the opening in it %+.2f across, gliding at y %.2f".format(distance, offset, over.targetY) }
 		val lane = across.multiply(offset)
 		dodgeTo(Lane(lane, 0, offset), over.end)
