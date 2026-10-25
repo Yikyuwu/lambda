@@ -188,6 +188,10 @@ abstract class ObstaclePassingMode(
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
+		/** How often the lanes ahead are scanned, see [scanAhead]. */
+		private const val AHEAD_SCAN_TICKS = 4
+		/** The fastest looked at for what a hole needs, a tick, for the debug log. Bouncing doesn't get you much faster. */
+		private const val MAX_PLAN_SPEED = 2.2
 		/** How far before braking would be needed to stop waiting to get fast enough to glide over, and dodge instead. */
 		private const val HOP_RETRY_MARGIN = 24.0
 		/** The fastest [holdPitch] climbs to the height held. Slower, a block up takes longer than it's held ahead. */
@@ -406,9 +410,18 @@ abstract class ObstaclePassingMode(
 	 * again every tick at the speed you have. Not past carpets, there's nothing to speed into and it's planned for
 	 * bouncing on.
 	 */
-	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane
+	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane && !speedingUp
 	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
 	private var onLane = false
+	/** The lanes ahead as last scanned, see [scanAhead]. */
+	private var ahead = emptyList<LaneAhead>()
+	private var aheadTicks = 0
+	/** Too slow to glide over the next hole on the way, see [planSpeed]. */
+	private var wantsSpeed = false
+	/** Where that hole starts, for logging each once. */
+	private var speedNeedAt = Double.NaN
+	/** Bouncing on while swinging over to a lane too, too slow for the hole ahead, see [planSpeed]. */
+	private var speedingUp = false
 	/** Dodging what's right after a mob glided over, the lane doesn't keep clear of the mob, see [dodgeAfterCube]. */
 	private var dodgeAfterMob = false
 	/** Landing before an obstacle no lane gets past, to walk around it. */
@@ -471,6 +484,8 @@ abstract class ObstaclePassingMode(
 			landedTicks = 0
 			lastGoal = null
 			sameGoals = 0
+			ahead = emptyList()
+			forgetSpeedNeed()
 		}
 		onDisable {
 			passingToPos = null
@@ -595,6 +610,8 @@ abstract class ObstaclePassingMode(
 			}
 			return true
 		}
+
+		if (passerConfig.dodge && player.isGliding && !onLayer) planSpeed(closestLinePoint, snappedDir) else forgetSpeedNeed()
 
 		brakeAt?.let { at ->
 			if (!player.isOnGround) return false
@@ -1231,6 +1248,92 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * One lane [offset] across the line, as [scanAhead] saw it: where along the line the first block is in the way, and
+	 * the holes in the floor, from where to where along it. The last open when there's no floor in sight after it.
+	 */
+	private class LaneAhead(val offset: Double, val blocked: Double?, val holes: List<ClosedFloatingPointRange<Double>>)
+
+	/**
+	 * Every lane ahead of [linePoint] as far as [PasserSettings.dodgeLookAhead], each a lane step across like [freeLane]
+	 * looks at, up to [PasserSettings.maxDodge] to each side. Holes with too little floor between them to bounce on are
+	 * one, like [glideOverHole] glides over them.
+	 */
+	private fun SafeContext.scanAhead(linePoint: Vec3d, dir: Vec3d): List<LaneAhead> {
+		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val step = laneStep(dir)
+		val at = progress(linePoint)
+		val reach = passerConfig.dodgeLookAhead.toDouble()
+		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
+		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		return (-sides..sides).map { side ->
+			val lane = linePoint.add(across.multiply(side * step))
+			val holes = mutableListOf<ClosedFloatingPointRange<Double>>()
+			var holeStart: Double? = null
+			var along = HOLE_SCAN_STEP
+			while (along <= reach) {
+				val spot = lane.add(dir.multiply(along))
+				if (!spot.isLoaded) break
+				val floor = spot.boxHasFloor()
+				if (!floor && holeStart == null) holeStart = holes.lastOrNull()?.takeIf { along - (it.endInclusive - at) < bounceRoom }
+					?.let { holes.removeAt(holes.lastIndex).start - at } ?: along
+				if (floor && holeStart != null) {
+					holes += at + holeStart..at + along
+					holeStart = null
+				}
+				along += HOLE_SCAN_STEP
+			}
+			holeStart?.let { holes += at + it..at + along }
+			LaneAhead(side * step, lane.obstacleHit(dir, reach, mobs = false)?.let { at + it.distance }, holes)
+		}
+	}
+
+	/**
+	 * How fast to be for what's ahead: too slow to glide over the next hole on the lane you're on or dodging to, or on the
+	 * line, like [glideOverHole] would, it bounces on to speed up instead of flying level, also swinging over to a lane
+	 * while what's dodged is still far, so it gets over the hole after it instead of landing before it. Looked at with
+	 * each scan, the glide over it is simulated.
+	 */
+	private fun SafeContext.planSpeed(linePoint: Vec3d, dir: Vec3d) {
+		if (ahead.isNotEmpty() && ++aheadTicks < AHEAD_SCAN_TICKS) return
+		ahead = scanAhead(linePoint, dir)
+		aheadTicks = 0
+		val progress = progress(player.pos)
+		val laneOffset = if (dodge != null) dodgeOffset else 0.0
+		val lanes = listOfNotNull(ahead.minByOrNull { abs(it.offset - laneOffset) }, ahead.minByOrNull { abs(it.offset) }).distinct()
+		val hole = lanes.flatMap { it.holes }.filter { it.start > progress }.minByOrNull { it.start }
+			?: return forgetSpeedNeed()
+		// Like [glideOverHole] glides over it.
+		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight,
+			min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE), hole.start, false, low = true, hole = true)
+		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
+		val speed = player.velocity.horizontalLength()
+		val wants = !makesIt(speed)
+		// Not tilting past what's dodged yet, nor close to it, bouncing on into it there.
+		speedingUp = wants && dodge != null && !leaning(progress) && dodgeEnd - progress > brakeDistance() + DODGE_STEER_AHEAD
+		if (abs(hole.start - speedNeedAt) > 1 || wants != wantsSpeed) ElytraFly.debug {
+			// The slowest that makes it, a dozen more simulations, only for the log.
+			var low = speed
+			var high = MAX_PLAN_SPEED
+			val need = if (!wants) "" else if (!makesIt(high)) ", too long to glide over" else {
+				repeat(8) {
+					val mid = (low + high) / 2
+					if (makesIt(mid)) high = mid else low = mid
+				}
+				", needs %.2f a tick to glide over, bouncing on to speed up".format(high)
+			}
+			"Hole %.1f ahead, %.1f long, at %.2f$need".format(hole.start - progress, hole.endInclusive - hole.start, speed)
+		}
+		speedNeedAt = hole.start
+		wantsSpeed = wants
+	}
+
+	private fun forgetSpeedNeed() {
+		wantsSpeed = false
+		speedNeedAt = Double.NaN
+		speedingUp = false
+	}
+
+	/**
 	 * Glides over a hole in the floor ahead of [from], up to [MAX_HOLE_LENGTH] long and before [before] where something's
 	 * in the way, like over a block: bouncing on unless you'd come down in it. Lands before it to walk when it can't get
 	 * over in time. Whether it's past it in the air.
@@ -1499,16 +1602,16 @@ abstract class ObstaclePassingMode(
 	/**
 	 * Whether holding the height with [holdPitch] gets you over [hop] from [progress] on, bouncing off the floor
 	 * on the way if need be. From [holdFrom] ticks on, by default once close enough like [holdingFor]. Simulates the glide
-	 * tick by tick.
+	 * tick by tick, at [from] a tick for now.
 	 */
-	private fun SafeContext.canHop(hop: Hop, progress: Double, holdFrom: Int? = null): Boolean {
+	private fun SafeContext.canHop(hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = player.velocity.horizontalLength()): Boolean {
 		val floor = startPos.y
 		val gravity = player.finalGravity
 		val target = hop.targetY
 		val bounce = bouncePitch()
 		var y = player.y
 		var climb = player.velocity.y
-		var speed = player.velocity.horizontalLength()
+		var speed = from
 		var along = progress
 		// Held already like hopPitch does, it doesn't let go again as the speed drops a little.
 		var holding = hop.held
