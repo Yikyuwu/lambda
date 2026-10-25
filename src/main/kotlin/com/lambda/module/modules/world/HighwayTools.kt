@@ -48,6 +48,9 @@ import com.lambda.interaction.managers.rotating.Rotation.Companion.dist
 import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.interaction.material.container.containers.EnderChestContainer
 import com.lambda.module.Module
+import com.lambda.module.modules.combat.AutoArmor
+import com.lambda.module.modules.combat.AutoTotem
+import com.lambda.module.modules.combat.autodisconnect.AutoDisconnect
 import com.lambda.module.modules.player.AutoEat
 import com.lambda.module.tag.ModuleTag
 import com.lambda.task.RootTask.run
@@ -275,6 +278,10 @@ object HighwayTools : Module(
             // The tool restock is what takes the pickaxes out of the shulker, so without it the shulker isn't fetched.
             if (inventoryConfig.accessEnderChest && restockPickaxes && !toolRestock.enabled)
                 warn("Restock Tools is off, so no pickaxe shulkers get taken from the ender chest")
+            // Digging AFK, these keep you alive or log you out before you die.
+            listOf(AutoArmor, AutoDisconnect, AutoTotem).filter { !it.isEnabled }.takeIf { it.isNotEmpty() }?.let { off ->
+                warn("${off.joinToString { it.name }} ${if (off.size == 1) "is" else "are"} off, turn ${if (off.size == 1) "it" else "them"} on to stay safe while digging AFK")
+            }
             // In the queue the inventory isn't there yet, so restocks would think everything is missing.
             waitingForServer = player.isSpectator
             // Already in the world, so the inventory is there.
