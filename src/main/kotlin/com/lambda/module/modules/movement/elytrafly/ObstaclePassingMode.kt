@@ -784,6 +784,7 @@ abstract class ObstaclePassingMode(
 		if (skipHopAt?.let { abs(it - at) < 1.5 } == true) return false
 		hopTooSlow = false
 		fun plan(anyway: Boolean = false) = planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = anyway)
+		if (pastMobAndNext(from, linePoint, dir, distance, block)) return true
 		plan()?.let { over ->
 			// With room above, e.g. a highway without pavement under its ceiling, held in the middle of it when fast enough.
 			val highAim = ((over.feetY + over.topY) / 2).takeIf { !over.under && it > over.targetY }
@@ -808,6 +809,29 @@ abstract class ObstaclePassingMode(
 		}
 		ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
 		return false
+	}
+
+	/**
+	 * A block in the way right after the mob [distance] ahead, glided over with it it'd be one obstacle too high to get
+	 * over. Past both on a lane that keeps out of the mob's reach, else over the mob on a lane past the block, gliding
+	 * over it there where the block isn't in the way. Whether it's on its way past them.
+	 */
+	private fun SafeContext.pastMobAndNext(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String): Boolean {
+		val next = from.add(dir.multiply(distance)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return false
+		val end = distance + next.distance
+		val at = progress(from)
+		freeLane(from, linePoint, dir, end, Vec3d.ZERO)?.let { lane ->
+			ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, dodging past both ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
+			return dodgeTo(lane, at + end)
+		}
+		val lane = freeLane(from, linePoint, dir, end, Vec3d.ZERO, mobs = false) ?: return false
+		val across = Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(lane.offset)
+		val over = planHop(linePoint.add(across), dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH)) ?: return false
+		ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, over to ${lane.target.describe(dir)}${lane.leanText()} gliding over the mob there at y %.2f".format(distance, next.distance, over.targetY) }
+		dodgeTo(lane, at + end)
+		dodgeAfterMob = true
+		hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, lane = lane.target, under = over.under, cube = true)
+		return true
 	}
 
 	/**
@@ -1575,7 +1599,15 @@ abstract class ObstaclePassingMode(
 		// Only overhead, glided under without touching the floor, a bounce would throw you up into it. Only if the box fits
 		// right above the floor all the way, else something's in the way down there too that the rays above missed.
 		val under = !onFloor && fits(heights.first())
-		val feetY = heights.firstOrNull { fits(it) } ?: return noHop("too high to get over under y %.2f".format(maxHopY))
+		val feetY = heights.firstOrNull { fits(it) } ?: run {
+			// What's in the way up there, for the log.
+			val blocked = samples.firstOrNull { !free(box(it, maxHopY).expand(swing, 0.0, swing)) }
+			val what = blocked?.let { along ->
+				val box = box(along, maxHopY).expand(swing, 0.0, swing)
+				if (!world.isSpaceEmpty(player, box)) "a block %.1f ahead".format(along) else "a mob's reach %.1f ahead".format(along)
+			} ?: "nothing"
+			return noHop("too high to get over under y %.2f, $what, %.1f long".format(maxHopY, end - distance))
+		}
 		// As high as there's room over it all, a roof or a block hanging above.
 		val topY = heights.dropWhile { it < feetY }.takeWhile { fits(it) }.last()
 		if (topY - feetY < HOP_MARGIN) return noHop("only %.2f room between y %.2f and %.2f".format(topY - feetY, feetY, topY))
