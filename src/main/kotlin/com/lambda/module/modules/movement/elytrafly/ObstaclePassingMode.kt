@@ -208,6 +208,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_SKIM = 0.02
 		/** How many ticks before the box comes over the top it skims down to just above it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM_TICKS = 4
+		/** How far before and past where the lane planned crosses the top it may come over it, see [hopPitch]. */
+		private const val TOUCH_NEAR = 1.5
 		/** How long after the last tick diving onto a top or touching down on it the landing is still held back, see [touchFloor]. */
 		private const val TOUCH_DIVE_HOLD_TICKS = 2
 		/**
@@ -647,9 +649,14 @@ abstract class ObstaclePassingMode(
 		// Along the line it's time to dive, only with a top really under the box now or soon: off the middle of it, or not
 		// steered over quite far enough, diving along the line alone runs into its side.
 		// Skimming down to just above it a few ticks early, see [Hop.holdY], down onto it only once over its middle.
-		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
-			hop.diving(progress(player.pos), player.velocity.horizontalLength() * TOUCH_SKIM_TICKS / TOUCH_DIVE_TICKS) && topUnderSoon(touch.y)
+		// Where the box really comes over it, not where the lane planned crosses it: still steering over to that lane, e.g.
+		// from the line over a hole, it comes over it elsewhere along the way.
+		val near = hop.touch?.takeIf { !hop.touched }?.let { touch ->
+			val along = progress(player.pos)
+			along >= touch.range.start - player.velocity.horizontalLength() * (TOUCH_SKIM_TICKS + 1) - TOUCH_NEAR &&
+				along <= touch.range.endInclusive + TOUCH_NEAR
 		} == true
+		val dive = near && topUnderSoon(hop.touch!!.y)
 		// Down onto it as near its middle as it gets: on the tick the box is over it the most, unless the next is more. Off
 		// to the side of its middle that's halfway across it along the way, as far from where it came onto it as from where
 		// it'd leave it. On its edge it'd slide off it in the same tick, a move goes down first, then across. Once down, it
@@ -658,11 +665,19 @@ abstract class ObstaclePassingMode(
 			val now = topOverlap(player.pos, touch.y)
 			now >= TOUCH_MIN_OVERLAP && (hop.overTop || now >= topOverlap(player.pos.add(player.velocity.x, 0.0, player.velocity.z), touch.y))
 		} ?: true
-		if (dive && overTop) diveTop = hop.touch.y to player.age
+		if (near) hop.touch?.let { touch ->
+			ElytraFly.debug {
+				"  touch: %.2f along (top %.2f..%.2f), coming over it %b, %.0f%% of the box over it now, %.0f%% next tick, y %.3f climbing %.3f".format(
+					progress(player.pos), touch.range.start, touch.range.endInclusive, dive, topOverlap(player.pos, touch.y) / (GLIDE_SIZE * GLIDE_SIZE) * 100,
+					topOverlap(player.pos.add(player.velocity.x, 0.0, player.velocity.z), touch.y) / (GLIDE_SIZE * GLIDE_SIZE) * 100, player.y, player.velocity.y)
+			}
+		}
+		if (dive && overTop) diveTop = hop.touch!!.y to player.age
 		if (dive && overTop && !hop.overTop) {
 			hop.overTop = true
+			val touch = hop.touch!!
 			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, %.0f%% of the box over it, diving onto it at y %.2f"
-				.format(player.y, player.velocity.y, topOverlap(player.pos, hop.touch.y) / (GLIDE_SIZE * GLIDE_SIZE) * 100, hop.touch.y) }
+				.format(player.y, player.velocity.y, topOverlap(player.pos, touch.y) / (GLIDE_SIZE * GLIDE_SIZE) * 100, touch.y) }
 		}
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
@@ -913,7 +928,7 @@ abstract class ObstaclePassingMode(
 				// Touching down on a top ends the glide until the bounce off it takes off again.
 				!player.isGliding && !(hop.touched && player.age - hop.touchedAt <= TOUCH_GRACE_TICKS) -> this@ObstaclePassingMode.hop = null
 				// Past the top without touching down on it, held low for it: planned again from here.
-				hop.touch.let { it != null && !hop.touched && progress > it.range.endInclusive + HOP_SCAN_STEP } -> {
+				hop.touch.let { it != null && !hop.touched && progress > it.range.endInclusive + TOUCH_NEAR } -> {
 					ElytraFly.debug { "Missed the top to touch down on, looking again" }
 					this@ObstaclePassingMode.hop = null
 				}
