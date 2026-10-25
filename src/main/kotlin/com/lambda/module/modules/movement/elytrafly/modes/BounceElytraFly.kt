@@ -100,8 +100,8 @@ class BounceElytraFly(
 		private const val MAX_NETHER_FLIGHT_Y = 121.5
 		/** Up on a layer, as high as the gliding box stays clear of that roof by a bit. */
 		private const val MAX_NETHER_LAYER_FLIGHT_Y = 122.2
-		/** How far above the flight line gliding over an obstacle may go. */
-		private const val MAX_HOP_RISE = 2.5
+		/** How far above the flight line gliding over an obstacle may go. From a floor at y 119 as high as from one at 120. */
+		private const val MAX_HOP_RISE = 3.5
 		/** Gliding over an obstacle, as high as the gliding box just stays under that roof. */
 		private const val MAX_NETHER_HOP_Y = 122.35
 		/** How far up a block roof over you is looked for. */
