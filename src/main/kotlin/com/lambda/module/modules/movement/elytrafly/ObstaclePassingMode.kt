@@ -218,6 +218,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_HELD_AROUND = 2.0
 		/** How far before a top on another lane it's steered over to it, see [laneTouch]. */
 		private const val TOUCH_APPROACH = 8.0
+		/** How far past a hole's end the lane to touch down on in it has to be free, e.g. past a pillar there. */
+		private const val TOUCH_PAST = 3.0
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
 		private const val TOUCH_GRACE_TICKS = 5
 		/** How far ahead, in ticks at the speed you have, floor beside a hole is looked for to land on, see [landBeside]. */
@@ -834,6 +836,11 @@ abstract class ObstaclePassingMode(
 			when {
 				// Touching down on a top ends the glide until the bounce off it takes off again.
 				!player.isGliding && !(hop.touched && player.age - hop.touchedAt <= TOUCH_GRACE_TICKS) -> this@ObstaclePassingMode.hop = null
+				// Past the top without touching down on it, held low for it: planned again from here.
+				hop.touch.let { it != null && !hop.touched && progress > it.range.endInclusive + HOP_SCAN_STEP } -> {
+					ElytraFly.debug { "Missed the top to touch down on, looking again" }
+					this@ObstaclePassingMode.hop = null
+				}
 				inTheWay != null -> {
 					ElytraFly.debug { "In the way %.1f ahead before the obstacle at this speed (${inTheWay.what}), not gliding over it".format(inTheWay.distance + skip) }
 					this@ObstaclePassingMode.hop = null
@@ -1669,7 +1676,8 @@ abstract class ObstaclePassingMode(
 		// it's in the way like a wall in the hole, waited for or landed before while there's room to. Right at its edge
 		// braking drops you in, it's glided over and steered past once there's a lane, see [laneFromGlide]. What's
 		// dodged the lane already gets past.
-		val pastBlocked = if (nextLane != null || blocked == null || start <= brakeDistance() || dodging && at + blocked <= dodgeEnd + DODGE_MARGIN) null
+		// On the lane picked for touching down in it that's free past it all, see [touchLane].
+		val pastBlocked = if (hole.touch != null || nextLane != null || blocked == null || start <= brakeDistance() || dodging && at + blocked <= dodgeEnd + DODGE_MARGIN) null
 			else freeLane(from, linePoint, dir, blocked, dodge ?: Vec3d.ZERO)?.takeIf { it.target != (dodge ?: Vec3d.ZERO) } ?: run {
 				val reason = "Hole %.1f ahead, %.1f long, ${from.obstacleBlock(dir, blocked + 1)} %.1f ahead in it can't be glided over, no lane past it ($laneMiss)"
 					.format(start, end - start, blocked)
@@ -1680,6 +1688,14 @@ abstract class ObstaclePassingMode(
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"})".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
+		}
+		// Touching down on a top in it, on the lane picked for that through the hole, over to it while still bouncing.
+		hole.touch?.let { touch ->
+			val across = hole.lane.dotProduct(across(dir))
+			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it on the lane %+.2f across, touching down on the top at y %.2f %.1f ahead".format(start, end - start, across, touch.y, touch.range.start - at) }
+			if (abs(across - (dodge?.dotProduct(across(dir)) ?: 0.0)) > 0.01) dodgeTo(Lane(hole.lane, 0, across), hole.end + TOUCH_PAST)
+			hop = hole
+			return true
 		}
 		if (lane == null || past == null) {
 			ElytraFly.debug {
@@ -1822,6 +1838,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
+		if (hop.hole) return touchLane(hop, line, dir)
 		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
 		// Its side remembered for dodging what's before it, see [startDodge].
 		if (hop.hole) touchSide = touch.lane to hop.end
@@ -1832,6 +1849,56 @@ abstract class ObstaclePassingMode(
 		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(touch.y, touch.range.start - progress(player.pos))
 		return hop
 	}
+
+	/**
+	 * Over the hole of [hop], the lane to glide it on touching down on a top in it, closest to [line] across the way, as
+	 * [hop] on that lane: gliding over a hole there's hardly any steering across, the lane is picked before it, bouncing
+	 * over to it on the way there. One that crosses a top through its middle and is free on the way: at bounce height
+	 * until the hole, e.g. past a pillar at its start, at the height held above the top until it, and up there after it
+	 * to past the hole's end, e.g. past a pillar there. Simulated with the bounce off the top. As it was when there's none.
+	 */
+	private fun SafeContext.touchLane(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
+		val across = across(dir)
+		val forward = dir.normalize()
+		val here = line.subtract(startPos).dotProduct(across)
+		val step = laneStep(dir) / 4
+		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val progress = progress(player.pos)
+		val swing = sweep(dir)
+		val floor = line.y
+		fun clear(lane: Double, from: Double, to: Double, bottom: Double, top: Double) =
+			generateSequence(max(from, progress)) { it + HOP_SCAN_STEP }.takeWhile { it <= to }.all { along ->
+				val point = startPos.add(forward.multiply(along)).add(across.multiply(lane))
+				spaceEmpty(Box(point.x - GLIDE_SIZE / 2, bottom, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, top, point.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
+			}
+		var miss: String? = null
+		for (lane in (-sides..sides).map { it * step }.sortedBy { abs(it - here) }) {
+			val laneLine = startPos.add(across.multiply(lane)).add(0.0, floor - startPos.y, 0.0)
+			val touch = touchSpot(laneLine, dir, hop.start, hop.end) ?: continue
+			// Through its middle, coming down on an edge it'd slide off or miss it.
+			val middle = laneLine.add(forward.multiply(touch.middle))
+			if (!topAt(middle.x, middle.z, touch.y)) continue
+			val held = touch.y + TOUCH_ABOVE
+			if (!clear(lane, progress + DODGE_STEER_AHEAD, hop.obstacle, floor + passerConfig.minObstacleHeight, floor + MAX_BOUNCE_RISE) ||
+				!clear(lane, hop.obstacle, touch.range.start, held, held + GLIDE_SIZE) ||
+				!clear(lane, touch.range.endInclusive, hop.end + TOUCH_PAST, held, held + GLIDE_SIZE)) continue
+			// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
+			// may take you higher than the top, sinking to just above it after.
+			val touching = hop.with(touch = touch, lane = across.multiply(lane), topY = max(hop.topY, maxHopY()))
+			if (canGetOver(touching, progress)) {
+				touchMiss = ""
+				touchSide = touching.lane to hop.end
+				return touching
+			}
+			if (miss == null) miss = "touching down on the top at y %.2f %.1f ahead on the lane %+.2f across misses too, $hopMiss".format(touch.y, touch.range.start - progress, lane)
+		}
+		touchMiss = miss ?: "no lane crossing a top through its middle free past the hole"
+		return hop
+	}
+
+	/** Whether there's a top at [y] at [x], [z]: a whole block ending there with air above it. */
+	private fun SafeContext.topAt(x: Double, z: Double, y: Double) =
+		shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && shapeAt(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
 
 	/**
 	 * The first top along [line] from [from] to [to] along the line to touch down on: one or two blocks above its floor,
@@ -1920,6 +1987,8 @@ abstract class ObstaclePassingMode(
 		// On the line, or on the lane dodged to, swinging back to the line too.
 		val current = dodge ?: Vec3d.ZERO
 		if (hop.lane != current || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole || passTicks % RELOOK_TICKS != 0) return null
+		// Its lane was picked free past the hole, see [touchLane].
+		if (hop.touch != null && !hop.touched) return null
 		val onLane = current != Vec3d.ZERO
 		val here = Vec3d(player.x, linePoint.y, player.z)
 		val lanePoint = if (onLane) dodgeLanePoint(linePoint, dir) else linePoint
@@ -2776,8 +2845,9 @@ abstract class ObstaclePassingMode(
 	 * side, away from what's dodged.
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
-		// Over to the lane with the top to touch down on from shortly before it until bounced off it, see [laneTouch].
-		hop.touch != null && !hop.touched && progress >= hop.touch.range.start - TOUCH_APPROACH -> steerYaw(linePoint, hop.touch.lane, dir)
+		// On the lane with the top to touch down on until bounced off it, see [touchLane]. Beside an obstacle only shortly
+		// before it, see [laneTouch].
+		hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) -> steerYaw(linePoint, hop.touch.lane, dir)
 		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
 		else -> steerYaw(linePoint, hop.lane, dir)
 	}
