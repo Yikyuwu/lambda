@@ -1446,17 +1446,30 @@ abstract class ObstaclePassingMode(
 	 * room to steer past, see [glideOverHole]. Only with a lane past it free from where the hole starts.
 	 */
 	/**
-	 * Gliding over a hole on the line, something in it or right after it: over to a lane past it once there's one,
-	 * still gliding, looked for every [RELOOK_TICKS]. Seen from farther than a lane past it was free, or past the look
-	 * ahead before. The glide steered over to it, null while none.
+	 * Gliding over a hole or a block on the line, something ahead that can't be glided over: over to a lane past it once
+	 * there's one, still gliding, looked for every [RELOOK_TICKS] as far as [PasserSettings.dodgeLookAhead]. Seen from
+	 * farther than a lane past it was free, or past the look ahead before. Once over it, too close to steer past. The
+	 * glide steered over to it, null while none.
 	 */
 	private fun SafeContext.laneFromGlide(hop: Hop, linePoint: Vec3d, dir: Vec3d, progress: Double): Hop? {
-		if (!hop.hole || hop.lane != Vec3d.ZERO || dodge != null || passTicks % RELOOK_TICKS != 0) return null
+		if (hop.lane != Vec3d.ZERO || dodge != null || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole ||
+			passTicks % RELOOK_TICKS != 0) return null
 		val here = Vec3d(player.x, linePoint.y, player.z)
-		val next = here.obstacleHit(dir, hop.end - progress + brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return null
-		val lane = freeLane(here, linePoint, dir, next.distance, Vec3d.ZERO) ?: return null
-		ElytraFly.debug { "Gliding over the hole, ${next.what} %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(next.distance) }
-		dodgeTo(lane, progress + next.distance)
+		val reach = passerConfig.dodgeLookAhead.toDouble()
+		// What's in a hole counts, over a block from where the glide over it ends. Things to glide over on the way are
+		// left to that, the first one that can't be is what a lane gets past.
+		var from = if (hop.hole) 0.0 else (hop.end - progress).coerceAtLeast(0.0)
+		var next: Pair<Double, String>? = null
+		while (from < reach && next == null) {
+			val hit = here.add(dir.multiply(from)).obstacleHit(dir, reach - from, mobs = false) ?: return null
+			val at = from + hit.distance
+			if (planHop(linePoint, dir, at) == null) next = at to hit.what
+			else from = at + HOP_GAP
+		}
+		val (distance, what) = next ?: return null
+		val lane = freeLane(here, linePoint, dir, distance, Vec3d.ZERO) ?: return null
+		ElytraFly.debug { "Gliding over it, $what %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(distance) }
+		dodgeTo(lane, progress + distance)
 		return hop.with(lane = lane.target).also { this@ObstaclePassingMode.hop = it }
 	}
 
