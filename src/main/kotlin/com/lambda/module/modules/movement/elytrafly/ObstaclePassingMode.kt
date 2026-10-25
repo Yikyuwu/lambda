@@ -228,6 +228,11 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_LANE_OFF = 0.15
 		/** How much later steering in toward the lane over a top in a hole is tried next, see [touchLane]. */
 		private const val TOUCH_SWITCH_STEP = 0.5
+		/**
+		 * How long before what's beside the lane through a hole it's tilted past, see [touchLane]. Long enough for the
+		 * flight to take on [MIN_LEAN_DEGREES], short so it doesn't drift off the lane, it can't steer in meanwhile.
+		 */
+		private const val TOUCH_LEAN_TICKS = 8
 		/** How much more room than the box a lane to touch down on in a hole needs on the way, see [touchLane]. */
 		private const val LANE_CLEAR_MARGIN = 0.05
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
@@ -1919,7 +1924,7 @@ abstract class ObstaclePassingMode(
 		fun blockedOn(lane: Double, held: Double, side: Int = 0) =
 			blocked.getOrPut(Triple(lane, held, side)) { BooleanArray(grid.size) { !clearAt(grid[it], lane, held, side) } }
 		// Staying on [lane] from [from] to [to], where it'd swing into something tilted away from the line past it, from
-		// [LEAN_TICKS] before on for the flight to take it on. Those stretches, null when it doesn't get past even so.
+		// [TOUCH_LEAN_TICKS] before on for the flight to take it on. Those stretches, null when it doesn't get past even so.
 		fun laneLeans(lane: Double, from: Double, to: Double, held: Double): List<ClosedFloatingPointRange<Double>>? {
 			val either = blockedOn(lane, held)
 			val tilted = if (lane == 0.0) either else blockedOn(lane, held, sign(lane).toInt())
@@ -1928,7 +1933,7 @@ abstract class ObstaclePassingMode(
 				val along = grid[i]
 				if (along < from || along > to || !either[i]) continue
 				if (tilted[i]) return null
-				val lean = along - steerSpeed * LEAN_TICKS..along + HOP_SCAN_STEP
+				val lean = along - steerSpeed * TOUCH_LEAN_TICKS..along + HOP_SCAN_STEP
 				if (leans.lastOrNull()?.let { it.endInclusive >= lean.start } == true) leans[leans.lastIndex] = leans.last().start..lean.endInclusive
 				else leans += lean
 			}
@@ -2003,12 +2008,14 @@ abstract class ObstaclePassingMode(
 		// below after missing another.
 		val off = player.pos.subtract(startPos).dotProduct(across)
 		val speed = player.velocity.horizontalLength()
+		// The way over to it free, the box swinging out to either side.
 		fun reachable(plan: Plan): Boolean {
 			if (plan.touch.middle - progress < speed * (TOUCH_DIVE_TICKS + 1)) return false
-			val by = if (progress < hop.obstacle) hop.obstacle else min(plan.touch.switchAt, plan.touch.range.start)
+			val by = min(plan.touch.switchAt, plan.touch.range.start)
 			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
-			val reached = steerOffsets(off, plan.lane, speed, by - progress).last().second
-			return abs(reached - plan.lane) <= TOUCH_LANE_OFF
+			val path = steerOffsets(off, plan.lane, speed, by - progress)
+			return abs(path.last().second - plan.lane) <= TOUCH_LANE_OFF &&
+				pathClear(progress, path.takeWhile { abs(it.second - plan.lane) > TOUCH_LANE_OFF / 2 } + path.take(1), by, plan.touch.y + TOUCH_ABOVE)
 		}
 		plans.removeAll { plan -> !reachable(plan).also { if (!it) tried += "${plan.text} (${plan.covered}/25) can't be steered over to in time" } }
 		val sorted = plans.sortedWith(compareByDescending<Plan> { it.covered }.thenBy { abs(it.lane - off) })
@@ -3007,9 +3014,15 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
 		// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].
+		// Steering out farther still if need be, not in.
 		hop.hole && hop.touch?.leans?.any { progress in it } == true &&
-			abs(player.pos.subtract(linePoint).dotProduct(across(dir)) - hop.lane.dotProduct(across(dir))) <= TOUCH_LANE_OFF ->
-			leanYaw(dir, sign(hop.lane.dotProduct(across(dir))).toInt())
+			abs(player.pos.subtract(linePoint).dotProduct(across(dir)) - hop.lane.dotProduct(across(dir))) <= TOUCH_LANE_OFF -> {
+			val side = sign(hop.lane.dotProduct(across(dir)))
+			val steer = steerYaw(linePoint, hop.lane, dir)
+			val lean = leanYaw(dir, side.toInt())
+			fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across(dir)) * side
+			if (out(steer) > out(lean)) steer else lean
+		}
 		// On the lane with the top to touch down on until bounced off it, see [touchLane]. Beside an obstacle only shortly
 		// before it, see [laneTouch].
 		hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) ->
