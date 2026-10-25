@@ -412,6 +412,8 @@ abstract class ObstaclePassingMode(
 	private var brakeAt: Double? = null
 	/** Landing for carpets, walking on to where there are none ahead, to take off clear of them. */
 	private var brakeCarpets = false
+	/** The height bounced on when it started landing, landed up on a layer it may bounce on there instead. */
+	private var brakeY = 0.0
 
 	private var hop: Hop? = null
 	/** Down from a brake, the glide over, walking may start. */
@@ -688,6 +690,11 @@ abstract class ObstaclePassingMode(
 			if (landedTicks >= MAX_LANDING_TICKS) ElytraFly.debug { "Still gliding after landing, walking anyway" }
 			landedTicks = 0
 			brakeAt = null
+			// Came down on top of a layer, e.g. one right after a hole, with the way on up there free: bouncing on it.
+			if (startPos.y > brakeY + 0.01 && !Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).isObstructed(snappedDir)) {
+				ElytraFly.debug { "Landed up on the blocks, the way on is free up there, bouncing on" }
+				return false
+			}
 			// From right before the obstacle, as that may still be a way ahead.
 			val beforeIt = closestLinePoint.add(snappedDir.multiply(at - progress(closestLinePoint) - 1))
 			landed = true
@@ -1317,6 +1324,16 @@ abstract class ObstaclePassingMode(
 						planHop(onLane, dir, distance, true, carpets = true, lean = tilt)?.let { up ->
 							ElytraFly.debug { "Low $block %.1f ahead on the lane, a layer of them to bounce on, gliding up onto it at y %.2f".format(distance, up.feetY) }
 							hop = up.with(stepHeight = CARPET_HEIGHT, lane = lane)
+							dodgeYaw = steerYaw(linePoint, lane, dir)
+							return true
+						}
+					// A layer of blocks on the lane, bounced onto from there like from the line, e.g. right after a hole glided
+					// over high. Close too, the glide sees whether it gets up there. Not with a hole before it, gliding over that.
+					if (!dodgeCarpets && !onLine && skipHopAt?.let { abs(it - (progress + distance)) < 1.5 } != true &&
+						holesAhead(onLane, dir).none { it.start < progress + distance && it.endInclusive > progress } && isStepUp(onLane, dir, distance))
+						planHop(from, dir, distance, true, lean = tilt)?.let { up ->
+							ElytraFly.debug { "Obstacle %.1f ahead on the lane ($block), a layer to bounce on, gliding up onto it at y %.2f".format(distance, up.feetY) }
+							hop = up.with(lane = lane)
 							dodgeYaw = steerYaw(linePoint, lane, dir)
 							return true
 						}
@@ -2161,6 +2178,7 @@ abstract class ObstaclePassingMode(
 		hop = null
 		brakeAt = at
 		brakeCarpets = carpets
+		brakeY = startPos.y
 		return false
 	}
 
