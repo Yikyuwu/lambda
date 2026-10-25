@@ -224,6 +224,8 @@ abstract class ObstaclePassingMode(
 		private const val LEAN_TICKS = 20
 		/** How far apart the rays across the way are, close enough that no block corner slips between them. */
 		private const val RAY_SPACING = 0.25
+		/** How far above two blocks over the floor the top of a bounce goes, bumping a roof there. */
+		private const val ROOF_BUMP = 0.1
 		/** How far around you entities as solid as blocks, e.g. boats, are looked for, as far as the planner looks. */
 		private const val SOLID_ENTITY_RANGE = 128.0
 		/** Faster than now a bit, for speeding up on the way. */
@@ -289,7 +291,6 @@ abstract class ObstaclePassingMode(
 		private const val MAX_FLOOR_DROP = 4.0
 	}
 
-	/** What's in the way [distance] ahead, [what] it is for the debug log. */
 	/** In the way [distance] ahead. A [mob] is dodged, gliding over or under it the glide only sees blocks. */
 	private class Obstacle(val distance: Double, val mob: Boolean = false, describe: () -> String) {
 		/** Only put together for the debug log, there's a hit for each ray. */
@@ -755,6 +756,15 @@ abstract class ObstaclePassingMode(
 					this@ObstaclePassingMode.hop = null
 					// The lane past what's after it doesn't keep clear of it, see [pastMobAndNext].
 					if (dodgeAfterMob) stopDodge()
+				}
+				// A hole this close there's no landing before, and dropping the glide leaves you lost over it. As high as it
+				// goes, the simulation misses by a little at times where the flight doesn't.
+				!makesIt && hop.hole -> {
+					if (!hop.held) ElytraFly.debug { "Can't quite get over the hole at %.1f ($hopMiss), holding as high as it goes anyway".format(hop.start - progress) }
+					hop.held = true
+					hop.heldCheckedAt = player.age
+					dodgeYaw = hopYaw(closestLinePoint, laneFromGlide(hop, closestLinePoint, snappedDir, progress) ?: hop, snappedDir, progress)
+					return false
 				}
 				!makesIt -> {
 					ElytraFly.debug { "Can't get over the obstacle at %.1f in time ($hopMiss), dodging instead".format(hop.start - progress) }
@@ -1670,15 +1680,10 @@ abstract class ObstaclePassingMode(
 	)
 
 	/**
-	 * Whether the obstacle [distance] ahead of [linePoint] is better dodged over a hole on the line before it: bouncing
-	 * on the line up to the hole is faster than on a lane, more speed to get over the hole with, and over it there's
-	 * room to steer past, see [glideOverHole]. Only with a lane past it free from where the hole starts.
-	 */
-	/**
 	 * Gliding over a hole or a block on the line or the lane dodged to, something ahead on it that can't be glided over:
-	 * over to a lane past it once there's one, still gliding, looked for every [RELOOK_TICKS] as far as [PasserSettings.dodgeLookAhead]. Seen from
-	 * farther than a lane past it was free, or past the look ahead before. Once over it, too close to steer past. The
-	 * glide steered over to it, null while none.
+	 * over to a lane past it once there's one, still gliding, looked for every [RELOOK_TICKS] as far as
+	 * [PasserSettings.dodgeLookAhead]. Seen from farther than a lane past it was free, or past the look ahead before.
+	 * Once over it, too close to steer past. The glide steered over to it, null while none.
 	 */
 	private fun SafeContext.laneFromGlide(hop: Hop, linePoint: Vec3d, dir: Vec3d, progress: Double): Hop? {
 		// On the line, or on the lane dodged to, swinging back to the line too.
@@ -1707,6 +1712,11 @@ abstract class ObstaclePassingMode(
 		return hop.with(lane = lane.target).also { this@ObstaclePassingMode.hop = it }
 	}
 
+	/**
+	 * Whether the obstacle [distance] ahead of [linePoint] is better dodged over a hole on the line before it: bouncing
+	 * on the line up to the hole is faster than on a lane, more speed to get over the hole with, and over it there's
+	 * room to steer past, see [glideOverHole]. Only with a lane past it free from where the hole starts.
+	 */
 	private fun SafeContext.dodgeOverHole(linePoint: Vec3d, dir: Vec3d, distance: Double): Boolean {
 		val start = generateSequence(HOLE_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance - MIN_DODGE_DISTANCE }
 			.firstOrNull { linePoint.add(dir.multiply(it)).let { spot -> spot.isLoaded && !spot.boxHasFloor() } } ?: return false
@@ -2340,15 +2350,15 @@ abstract class ObstaclePassingMode(
 		val high = halfWidth + if (lean < 0) 0.0 else sweep
 		val rays = ceil((high - low) / RAY_SPACING).toInt()
 		val offsets = (0..rays).map { across.multiply(low + (high - low) * it / rays) }
-		// Up to the top of the gliding box, as high as it bounces.
+		// Up to the top of the gliding box, as high as it may fly, see [roofInTheWay].
 		val glideTop = with(safeContext) { maxFlightY() } + GLIDE_SIZE - y - WIDTH_MARGIN
-		val heights = if (passerConfig.headHitters) listOf(passerConfig.minObstacleHeight, 1.01, 1.99) + listOf(glideTop).filter { it > 1.99 && it.isFinite() }
-			else listOf(passerConfig.minObstacleHeight)
+		val heights = if (passerConfig.headHitters) listOf(passerConfig.minObstacleHeight, 1.01, 1.99) else listOf(passerConfig.minObstacleHeight)
+		val roofStarts = if (passerConfig.headHitters && glideTop > 1.99 && glideTop.isFinite()) offsets.map { add(it).add(0.0, glideTop, 0.0) } else emptyList()
 		// Carpets as far as the box swings out too: touching down, you move down first and then along each axis, along
 		// the floor, and diagonally into one beside the way.
 		val carpetStarts = if (!carpets) emptyList() else offsets.map { add(it).add(0.0, CARPET_RAY, 0.0) }
 		val blockStarts = heights.flatMap { height -> offsets.map { add(it).add(0.0, height, 0.0) } }
-		val starts = carpetStarts + blockStarts
+		val starts = carpetStarts + blockStarts + roofStarts
 		// Boats, minecarts and shulkers are as solid as blocks to you, the rays only see blocks. Magma cubes too, of any
 		// size, their box grows with it: gliding into one hurts and throws you off. The rays are close enough for the
 		// smallest.
@@ -2379,7 +2389,8 @@ abstract class ObstaclePassingMode(
 			}
 			return nearest
 		}
-		val block = nearest(blockStarts, maxDistance)
+		val below = nearest(blockStarts, maxDistance)
+		val block = (if (roofInTheWay()) nearest(roofStarts, below?.distance ?: maxDistance) else null) ?: below
 		// Carpets only before it, past it they don't matter.
 		val carpet = nearest(carpetStarts, block?.distance ?: maxDistance)
 		return (if (carpet != null && (block == null || carpet.distance < block.distance)) carpet else block) to block
@@ -2444,6 +2455,14 @@ abstract class ObstaclePassingMode(
 		val end = start.add(direction.multiply(reach))
 		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos -> shapeAt(pos).raycast(start, end, pos) }, { null })
 	}
+
+	/**
+	 * Whether a roof only the highest ray hits is in the way, two blocks or more above the floor of the line at [Vec3d.y]:
+	 * bouncing on under it, e.g. in a tunnel two high, the bounces bump it at most. Only flying higher than that, e.g.
+	 * coasting high to slow down, it's in the way.
+	 */
+	context(safeContext: SafeContext)
+	private fun Vec3d.roofInTheWay() = safeContext.player.y + GLIDE_SIZE > y + 2 + ROOF_BUMP
 
 	/** What [obstacleDistance] ran into, for the debug log. */
 	context(safeContext: SafeContext)
