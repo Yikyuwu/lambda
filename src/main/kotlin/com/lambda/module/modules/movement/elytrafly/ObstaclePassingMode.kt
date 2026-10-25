@@ -1803,6 +1803,15 @@ abstract class ObstaclePassingMode(
 	 * and standing the jump off it takes you into the roof, it sets you back. From the tick you come down onto it, the
 	 * server takes the crouch a tick late, until the jump is off.
 	 */
+	/**
+	 * Whether this tick jumped off a top with a roof close above it, see [crouchOnTop]. The glide is started right after
+	 * the jump: the server takes it a tick later, rising on until then even crouching you'd reach the roof.
+	 */
+	protected fun SafeContext.jumpingOffTop(): Boolean {
+		val hop = hop ?: return false
+		return hop.touch?.crouch == true && hop.touchedAt == player.age && !player.isOnGround && player.velocity.y > 0
+	}
+
 	protected fun SafeContext.crouchOnTop(): Boolean {
 		val hop = hop ?: return false
 		val touch = hop.touch?.takeIf { it.crouch } ?: return false
