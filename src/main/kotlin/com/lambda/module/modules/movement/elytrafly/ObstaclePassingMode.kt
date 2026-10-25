@@ -1536,12 +1536,13 @@ abstract class ObstaclePassingMode(
 		// High enough for the blocks in it that can be glided over.
 		val (raised, topY, aim, blocked) = clearInside(from, dir, start, end, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
 		// One in it that can't be, e.g. on the lane dodged to, only with a lane past it to steer over to meanwhile. Else
-		// it's in the way like a wall in the hole.
-		val pastBlocked = if (nextLane != null || blocked == null) null
+		// it's in the way like a wall in the hole, waited for or landed before while there's room to. Right at its edge
+		// braking drops you in, it's glided over and steered past once there's a lane, see [laneFromGlide].
+		val pastBlocked = if (nextLane != null || blocked == null || start <= brakeDistance()) null
 			else freeLane(from, linePoint, dir, blocked, dodge ?: Vec3d.ZERO)?.takeIf { it.target != (dodge ?: Vec3d.ZERO) } ?: run {
 				val reason = "Hole %.1f ahead, %.1f long, ${from.obstacleBlock(dir, blocked + 1)} %.1f ahead in it can't be glided over, no lane past it ($laneMiss)"
 					.format(start, end - start, blocked)
-				return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
+				return if (start > brakeDistance() + DODGE_STEER_AHEAD) noLaneYet(at + start, reason) else brake(at + start, reason)
 			}
 		val lane = nextLane ?: pastBlocked
 		val past = next ?: blocked
@@ -1652,6 +1653,21 @@ abstract class ObstaclePassingMode(
 		return Clearance(raised, room, min(room - HOP_MARGIN, highest + RAISED_HOLD), blocked)
 	}
 
+	/**
+	 * Why the hole right after the end of the layer [edge] ahead of [linePoint] can't be glided over from up there, null
+	 * when it can or there's none.
+	 */
+	private fun SafeContext.holeAfterEdgeMiss(linePoint: Vec3d, dir: Vec3d, edge: Double): String? {
+		val floorLine = linePoint.add(0.0, baseY - linePoint.y, 0.0)
+		val at = progress(linePoint)
+		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
+		val hole = holesAhead(floorLine, dir).firstOrNull { it.endInclusive > at + edge && it.start <= at + edge + bounceRoom } ?: return null
+		val (raised, topY, aim) = clearInside(floorLine, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), floorLine.y + MAX_BOUNCE_RISE))
+		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, floorLine.y + passerConfig.minObstacleHeight, topY, hole.start, false,
+			low = true, hole = true, aim = aim, raised = raised)
+		return if (canGetOver(over, at)) null else hopMiss
+	}
+
 	/** What [clearInside] found: where how high, how high it may go, where to hold it, and a block that can't be glided over. */
 	private data class Clearance(
 		val raised: List<Pair<ClosedFloatingPointRange<Double>, Double>>, val topY: Double, val aim: Double?, val blocked: Double?,
@@ -1747,6 +1763,11 @@ abstract class ObstaclePassingMode(
 			// Carpets right after a layer of them, down there too close to steer past. Over to a lane free of them
 			// still up here, the layer leaves room for it.
 			if (onCarpets && lane == Vec3d.ZERO) laneAfterCarpets(linePoint, dir, edge)?.let { (lane, at) -> return dodgeTo(lane, at, carpets = true) }
+			// A hole right after it down there, too fast to stop once off the edge. Too slow to glide over it, e.g. slowed
+			// down gliding up onto the layer, landing up here before the edge to walk around it.
+			if (edge > brakeDistance()) holeAfterEdgeMiss(linePoint, dir, edge)?.let { miss ->
+				return brake(progress(linePoint) + edge, "The blocks end %.1f ahead, a hole right after it, can't get over it ($miss)".format(edge))
+			}
 			// Gliding off the edge at the layer's height, the next bounce is down on the floor.
 			val off = planHop(linePoint, dir, (edge - DROP_BEFORE).coerceAtLeast(HOP_SCAN_STEP), true, DROP_BEFORE + STEP_ON, carpets = onCarpets) ?: run {
 				ElytraFly.debug { "The blocks end %.1f ahead, bouncing on down at y %.0f after, not gliding off ($hopRejection)".format(edge, baseY) }
@@ -2055,10 +2076,10 @@ abstract class ObstaclePassingMode(
 		val speed = player.velocity.horizontalLength()
 		hop.held = when {
 			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later. With blocks
-			// in it to get up over, from an earlier one when only that one still makes it. At its edge there's no bouncing
-			// on, held anyway.
-			hop.hole -> progress >= hop.start - speed || canHop(hop, progress, 0) &&
-				(lastBounceBefore(hop, progress) || hop.raised.isNotEmpty() && !canHopLater(hop, progress, 1))
+			// in it to get up over, from the first bounce that gets over them: waiting for the last one that still does,
+			// a near miss lets it slip by. At its edge there's no bouncing on, held anyway.
+			hop.hole -> progress >= hop.start - speed || (lastBounceBefore(hop, progress) ||
+				hop.raised.isNotEmpty() && player.velocity.y > 0 && !player.isOnGround) && canHop(hop, progress, 0)
 			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			hop.anyway -> true
@@ -2239,10 +2260,18 @@ abstract class ObstaclePassingMode(
 		val ahead = linePoint.add(dir.multiply(player.velocity.horizontalLength() * LAND_AHEAD_TICKS))
 		val step = laneStep(dir) / 4
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
-		val offset = (-sides..sides).map { it * step }.sortedBy { abs(it - here) }.firstOrNull { offset ->
-			ahead.add(across.multiply(offset)).let { spot -> spot.isLoaded && (spot.boxHasFloor() || spot.add(0.0, 1.0, 0.0).let { up -> up.boxHasFloor() && up.canStand() }) }
-		} ?: return false
-		ElytraFly.debug { "$reason, over a hole, landing beside it %+.2f across".format(offset) }
+		// Room at your height on the way over there too, beside the hole may be right at the wall. The box swings out at speed.
+		val swing = sweep(dir)
+		fun roomAt(spot: Vec3d) = spaceEmpty(Box(spot.x - GLIDE_SIZE / 2 - swing, player.y, spot.z - GLIDE_SIZE / 2 - swing,
+			spot.x + GLIDE_SIZE / 2 + swing, player.y + GLIDE_SIZE, spot.z + GLIDE_SIZE / 2 + swing))
+		fun fits(offset: Double) = ahead.add(across.multiply(offset)).let { spot ->
+			spot.isLoaded && (spot.boxHasFloor() || spot.add(0.0, 1.0, 0.0).let { up -> up.boxHasFloor() && up.canStand() }) &&
+				roomAt(spot) && roomAt(linePoint.add(dir.multiply(player.velocity.horizontalLength() * LAND_AHEAD_TICKS / 2)).add(across.multiply((here + offset) / 2)))
+		}
+		// The one picked before while it still fits, picking again each tick it'd swing from side to side.
+		val offset = dodgeOffset.takeIf { landing && dodge != null && fits(it) }
+			?: (-sides..sides).map { it * step }.sortedBy { abs(it - here) }.firstOrNull(::fits) ?: return false
+		if (!landing || offset != dodgeOffset) ElytraFly.debug { "$reason, over a hole, landing beside it %+.2f across".format(offset) }
 		dodgeTo(Lane(across.multiply(offset), 0, offset), at)
 		landing = true
 		return true
