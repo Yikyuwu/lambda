@@ -188,6 +188,8 @@ abstract class ObstaclePassingMode(
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
+		/** How often an obstacle still far with no way past yet is looked at again, see [lookedLately]. */
+		private const val RELOOK_TICKS = 4
 		/** How close below its height over a hole counts as up there, see [Hop.topped]. */
 		private const val TOPPED_MARGIN = 0.1
 		/** How often the holes ahead are looked at, see [planSpeed]. */
@@ -324,8 +326,13 @@ abstract class ObstaclePassingMode(
 		var held = false
 		/** The tick [held] was last looked at, it takes a few simulations of the glide. */
 		var heldCheckedAt = -1
-		/** Over a hole, up at [targetY] once. From then on it keeps the height it has, sinking as it slows, see [holdY]. */
+		/**
+		 * Over a hole, up at [targetY] once, or as high as it got: rising while held, then not. From then on it keeps the
+		 * height it has, sinking as it slows, see [holdY].
+		 */
 		var topped = false
+		/** Rising while held, see [topped]. */
+		var rose = false
 		/**
 		 * The height to hold from [y]: [targetY], over a hole once [topped] only as high as it is. Pulling back up there
 		 * costs the speed that carries it to the floor after the hole, it sinks all the more after.
@@ -408,6 +415,10 @@ abstract class ObstaclePassingMode(
 	private var landedTicks = 0
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
 	private var noLaneAt: Double? = null
+	/** The [passTicks] it was last looked at, see [lookedLately]. */
+	private var noLaneTick = 0
+	/** Ticks obstacles were passed in, a clock for [lookedLately]. */
+	private var passTicks = 0
 	/** Where along the line an obstacle is that got too close to get over, which is dodged instead. */
 	private var skipHopAt: Double? = null
 	/** Where along the line the layer you bounce on ends with no gliding across to more of it, not to look again. */
@@ -463,7 +474,8 @@ abstract class ObstaclePassingMode(
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
 		// Switched to gliding over it higher just now, see [holdingFor].
 		val held = this@ObstaclePassingMode.hop ?: hop
-		if (held.hole && player.y >= held.targetY - TOPPED_MARGIN) held.topped = true
+		if (held.hole && (player.y >= held.targetY - TOPPED_MARGIN || held.rose && climb <= 0)) held.topped = true
+		if (climb > 0) held.rose = true
 		holdPitch(player.y, climb, player.velocity.horizontalLength(), held.holdY(player.y), player.finalGravity)
 	}
 
@@ -542,6 +554,7 @@ abstract class ObstaclePassingMode(
 	fun SafeContext.handlePassingObstacles() = timed { passObstacles() }
 
 	private fun SafeContext.passObstacles(): Boolean {
+		passTicks++
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
 		// Past it, or on a lane or landing for it.
@@ -761,6 +774,7 @@ abstract class ObstaclePassingMode(
 	/** Glides over to a free lane past the obstacle [distance] ahead, or lands to walk around it when there's none. */
 	private fun SafeContext.startDodge(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, mob: Boolean = false): Boolean {
 		val at = progress(from) + distance
+		if (lookedLately(at, distance)) return false
 		val block = from.obstacleBlock(dir, distance + 1)
 		if (mob) return passCube(from, linePoint, dir, distance, at, block)
 		hopRejection = "it got too close to get over before"
@@ -1359,6 +1373,7 @@ abstract class ObstaclePassingMode(
 		val start = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
 		if (within != null && start > within) return false
 		val at = progress(from)
+		if (lookedLately(at + start, start)) return false
 		if (skipHopAt?.let { abs(it - (at + start)) < 1.5 } == true) return false
 		// Long ones too, holding the height as long as it gets over them. Longer, e.g. a step down to a lower floor, it's
 		// left as before.
@@ -1630,6 +1645,7 @@ abstract class ObstaclePassingMode(
 		val floor = startPos.y
 		val gravity = player.finalGravity
 		var topped = hop.topped
+		var rose = hop.rose
 		val bounce = bouncePitch()
 		var y = player.y
 		var climb = player.velocity.y
@@ -1645,7 +1661,8 @@ abstract class ObstaclePassingMode(
 			}
 			// Bouncing on until then.
 			holding = holding || if (holdFrom != null) tick >= holdFrom else hop.start - along <= speed * leadTicks(hop)
-			if (holding && hop.hole && y >= hop.targetY - TOPPED_MARGIN) topped = true
+			if (holding && hop.hole && (y >= hop.targetY - TOPPED_MARGIN || rose && climb <= 0)) topped = true
+			if (holding && climb > 0) rose = true
 			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, topped), gravity) else bounce(y, climb)
 			glide(climb, speed, pitch, gravity).let { (c, s) ->
 				climb = c
@@ -1854,8 +1871,17 @@ abstract class ObstaclePassingMode(
 	private fun noLaneYet(at: Double, reason: String): Boolean {
 		if (noLaneAt?.let { abs(it - at) < 1.5 } != true) ElytraFly.debug { reason }
 		noLaneAt = at
+		noLaneTick = passTicks
 		return false
 	}
+
+	/**
+	 * Whether the obstacle or hole at [at] along the line, [distance] ahead, found no way past a moment ago and is still
+	 * far. Looking again only every [RELOOK_TICKS] then, every lane and glide over it is simulated each time. Close by
+	 * each tick.
+	 */
+	private fun SafeContext.lookedLately(at: Double, distance: Double) =
+		noLaneAt?.let { abs(it - at) < 1.5 } == true && passTicks - noLaneTick < RELOOK_TICKS && distance > brakeDistance() + DODGE_STEER_AHEAD
 
 	/** Stops dodging and lands, to walk around the obstacle at [at] along the line, or past the [carpets]. Always false. */
 	private fun brake(at: Double, reason: String, carpets: Boolean = false): Boolean {
