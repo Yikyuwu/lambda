@@ -173,13 +173,13 @@ class BounceElytraFly(
 				// Only bouncing. Held back after a setback or while landing, the server sees you stand still, sets you back
 				// again and again. Nor falling off a block you bounced on. Also the tick before touching down, the server
 				// often ended the glide when the landing came on its own.
-				!flightPaused && player.y >= bounceFloor && player.y + min(player.velocity.y, 0.0) - bounceFloor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163
+				!flightPaused && bounceFloor.let { floor -> player.y >= floor && player.y + min(player.velocity.y, 0.0) - floor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163 }
 
 	/**
 	 * The floor you bounce on. The flight line moves up onto a layer before you first touch it, the floor you last
 	 * stood on only after: that first touch the server would see and end the glide.
 	 */
-	private val bounceFloor get() = if (passerConfig.passObstacles) startPos.y else groundY
+	private val SafeContext.bounceFloor get() = touchFloor() ?: if (passerConfig.passObstacles) startPos.y else groundY
 
 	private val diagonal: Boolean
 		get() {
@@ -304,8 +304,6 @@ class BounceElytraFly(
 
 		listen<TickEvent.Post>({ -100 }) {
 			interrupting = false
-			// Off a top with a roof close above it, the glide starts right after the jump, see jumpingOffTop.
-			if (jumpingOffTop()) connection.sendPacket(ClientCommandC2SPacket(player, ClientCommandC2SPacket.Mode.START_FALL_FLYING))
 		}
 
 		listen<MovementEvent.InputUpdate> { event ->
@@ -340,9 +338,6 @@ class BounceElytraFly(
 				sneakRight = false
 				return@listen
 			}
-			// Crouching onto a top with a roof close above it, the jump off it fits under the roof, see crouchOnTop.
-			if (crouchOnTop()) input.playerInput = PlayerInput(playerInput.forward, playerInput.backward, playerInput.left,
-				playerInput.right, playerInput.jump, true, playerInput.sprint)
 			if (!wantJump) return@listen
 			if (flightPaused) return@listen
 			input.jump()

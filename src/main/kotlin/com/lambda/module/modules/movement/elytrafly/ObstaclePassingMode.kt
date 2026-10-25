@@ -203,13 +203,10 @@ abstract class ObstaclePassingMode(
 		private const val HOLD_SINK = 0.1
 		private const val TOUCH_SINK = 0.6
 		/**
-		 * How tall you are to the server standing and crouching, and how high the jump off a top to touch down on takes
-		 * you a tick. Landed, the server takes you for standing: with a roof too close for that over the jump it sets you
-		 * back, crouching fits lower, see [crouchOnTop].
+		 * Room above a top to touch down on and bounce off. Held back with the jump, the server doesn't see the landing
+		 * and you glide on to it, low like in a tunnel two high. Should it end the glide after all, crouching fits.
 		 */
-		private const val STAND_HEIGHT = 1.8
-		private const val CROUCH_HEIGHT = 1.5
-		private const val JUMP_RISE = 0.42
+		private const val TOUCH_ROOM = 1.9
 		/** How long the box has to have a top under it to touch down on it. */
 		private const val MIN_TOUCH = 0.6
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
@@ -400,11 +397,8 @@ abstract class ObstaclePassingMode(
 		fun needFrom(along: Double) = raised.filter { it.first.endInclusive >= along }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
 	}
 
-	/**
-	 * A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range]. With a
-	 * roof too close above it to [crouch] for the jump off it.
-	 */
-	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val crouch: Boolean)
+	/** A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range]. */
+	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double)
 
 	abstract val passerConfig: PasserSettings
 
@@ -477,6 +471,8 @@ abstract class ObstaclePassingMode(
 	private var hopTooSlow = false
 	/** Where [canHop] found the glide falls short, for the debug log. */
 	private var hopMiss = ""
+	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
+	private var touchMiss = ""
 	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
 	private var hopShort = Double.POSITIVE_INFINITY
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
@@ -921,7 +917,8 @@ abstract class ObstaclePassingMode(
 			val over = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: withTouch(planned, linePoint, dir)
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
 			ElytraFly.debug {
-				val how = over.touch?.let { "touching down on it at y %.2f".format(it.y) } ?: "gliding ${if (over.under) "under" else "over"} it at y %.2f".format(over.targetY)
+				val how = over.touch?.let { "touching down on it at y %.2f".format(it.y) }
+					?: "gliding ${if (over.under) "under" else "over"} it at y %.2f${if (over.under || touchMiss.isEmpty()) "" else " ($touchMiss)"}".format(over.targetY)
 				"Obstacle %.1f ahead ($block), $how${if (over.hole) " and the hole after it" else ""}, %.1f long".format(distance, over.end - over.start)
 			}
 			hop = over
@@ -1624,7 +1621,7 @@ abstract class ObstaclePassingMode(
 		val lane = nextLane ?: pastBlocked
 		val past = if (nextLane != null) next else blocked
 		if (!canGetOver(hole, at)) {
-			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
+			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"})".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
 		}
 		if (lane == null || past == null) {
@@ -1749,7 +1746,7 @@ abstract class ObstaclePassingMode(
 		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), line.y + MAX_BOUNCE_RISE))
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
 			low = true, hole = true, aim = aim, raised = raised)
-		return (if (raised.isEmpty()) over else withTouch(over, line, dir)) to blocked
+		return (if (raised.isEmpty()) over.also { touchMiss = "" } else withTouch(over, line, dir)) to blocked
 	}
 
 	/**
@@ -1758,65 +1755,53 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
-		val touch = touchSpot(line, dir, hop.start, hop.end) ?: return hop
+		val touch = touchSpot(line, dir, hop.start, hop.end) ?: return hop.also { touchMiss = "no top to touch down on" }
 		val touching = hop.with(touch = touch)
-		return if (canGetOver(touching, progress(player.pos))) touching else hop
+		if (canGetOver(touching, progress(player.pos))) return touching.also { touchMiss = "" }
+		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(touch.y, touch.range.start - progress(player.pos))
+		return hop
 	}
 
 	/**
 	 * The first top along [line] from [from] to [to] along the line to touch down on: one or two blocks above its floor,
-	 * under the box for [MIN_TOUCH] at least, with room above it to jump off it at least crouching. Null with none.
+	 * under the box for [MIN_TOUCH] at least, with [TOUCH_ROOM] above it. Null with none.
 	 */
 	private fun SafeContext.touchSpot(line: Vec3d, dir: Vec3d, from: Double, to: Double): Touch? {
 		val at = progress(line)
 		var start: Double? = null
 		var height = 0.0
-		var crouch = false
-		fun room(point: Vec3d, y: Double, tall: Double) =
-			spaceEmpty(Box(point.x - GLIDE_SIZE / 2, y, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, y + tall + JUMP_RISE, point.z + GLIDE_SIZE / 2))
 		var along = from
 		while (along <= to) {
 			val point = line.add(dir.multiply(along - at))
 			val top = (1..2).map { line.y + it }.firstOrNull { y ->
-				y <= maxHopY() && Vec3d(point.x, y, point.z).boxHasFloor() && room(point, y, CROUCH_HEIGHT)
+				y <= maxHopY() && Vec3d(point.x, y, point.z).boxHasFloor() &&
+					spaceEmpty(Box(point.x - GLIDE_SIZE / 2, y, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, y + TOUCH_ROOM, point.z + GLIDE_SIZE / 2))
 			}
-			if (top != null && !room(point, top, STAND_HEIGHT)) crouch = true
 			when {
 				top != null && start == null -> {
 					start = along
 					height = top
 				}
 				start != null && top != height -> {
-					if (along - start >= MIN_TOUCH) return Touch(start..along - HOP_SCAN_STEP, height, crouch)
+					if (along - start >= MIN_TOUCH) return Touch(start..along - HOP_SCAN_STEP, height)
 					start = if (top != null) along else null
 					top?.let { height = it }
-					crouch = top != null && !room(point, top, STAND_HEIGHT)
 				}
 			}
 			along += HOP_SCAN_STEP
 		}
-		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it..to, height, crouch) }
+		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it..to, height) }
 	}
 
 	/**
-	 * Whether to crouch for touching down on a top with a roof close above it: landed the server takes you for standing,
-	 * and standing the jump off it takes you into the roof, it sets you back. From the tick you come down onto it, the
-	 * server takes the crouch a tick late, until the jump is off.
+	 * The top being touched down on while over it, until the jump off it, else null: bounced off like the floor, the
+	 * landing is held back with the jump. Handled on its own, the server ends the glide and the jump off it right under
+	 * a roof, e.g. a pillar two high, takes you into it standing.
 	 */
-	/**
-	 * Whether this tick jumped off a top with a roof close above it, see [crouchOnTop]. The glide is started right after
-	 * the jump: the server takes it a tick later, rising on until then even crouching you'd reach the roof.
-	 */
-	protected fun SafeContext.jumpingOffTop(): Boolean {
-		val hop = hop ?: return false
-		return hop.touch?.crouch == true && hop.touchedAt == player.age && !player.isOnGround && player.velocity.y > 0
-	}
-
-	protected fun SafeContext.crouchOnTop(): Boolean {
-		val hop = hop ?: return false
-		val touch = hop.touch?.takeIf { it.crouch } ?: return false
-		if (hop.touched) return player.age - hop.touchedAt <= 1
-		return progress(player.pos) in touch.range && player.y - touch.y < JUMP_RISE
+	protected fun SafeContext.touchFloor(): Double? {
+		val hop = hop ?: return null
+		val touch = hop.touch ?: return null
+		return touch.y.takeIf { if (hop.touched) player.age - hop.touchedAt <= 1 else progress(player.pos) in touch.range }
 	}
 
 	/** What [clearInside] found: where how high, how high it may go, where to hold it, and a block that can't be glided over. */
@@ -1897,9 +1882,9 @@ abstract class ObstaclePassingMode(
 			.takeWhile { (_, point) -> point.isLoaded }
 		val edge = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
 		// Off its end already, e.g. a glide off it that got cut short. A lane beside a layer of blocks is off it from the
-		// start, you're still up there.
+		// start, while the line still is on it you're still up there.
 		if (edge <= HOP_SCAN_STEP) {
-			if (lane != Vec3d.ZERO && !onCarpets) return false
+			if (lane != Vec3d.ZERO && !onCarpets && line.boxHasFloor()) return false
 			offTheLayer()
 			return false
 		}
