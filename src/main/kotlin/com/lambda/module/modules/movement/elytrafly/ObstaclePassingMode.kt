@@ -393,14 +393,18 @@ abstract class ObstaclePassingMode(
 		 * The height to hold from [y]: [targetY], over a hole once [topped] only as high as it is. Pulling back up there
 		 * costs the speed that carries it to the floor after the hole, it sinks all the more after.
 		 */
-		fun holdY(y: Double, along: Double, speed: Double, topped: Boolean = this.topped, touched: Boolean = this.touched) = when {
+		fun holdY(
+			y: Double, along: Double, speed: Double, topped: Boolean = this.topped, touched: Boolean = this.touched,
+			dive: Boolean = diving(along, speed, touched),
+		) = when {
 			// Just above the top to touch down on until a tick before its middle, then down onto it.
-			touch != null && !touched -> if (diving(along, speed, touched)) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
+			touch != null && !touched -> if (dive) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
 			hole && topped -> min(targetY, max(y, needFrom(along) + HOP_MARGIN))
 			else -> targetY
 		}
 		/** How fast it may sink at [along] the line: over the top to touch down on fast, down onto it while over it. */
-		fun sinkAt(along: Double, speed: Double, touched: Boolean = this.touched) = if (diving(along, speed, touched)) TOUCH_SINK else HOLD_SINK
+		fun sinkAt(along: Double, speed: Double, touched: Boolean = this.touched, dive: Boolean = diving(along, speed, touched)) =
+			if (dive) TOUCH_SINK else HOLD_SINK
 		/**
 		 * Diving onto the top to touch down on, from [TOUCH_DIVE_TICKS] before its middle at [speed]: the glide takes that
 		 * long to sink, and it comes down on the middle. On its edge it may slide off it in the same tick.
@@ -582,9 +586,14 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
-		hop.touch?.takeIf { !hop.touched && progress(player.pos) in it.range && !hop.overTop }?.let {
+		// Along the line it's time to dive, only with a top really under the box now or soon: off the middle of it, or not
+		// steered over quite far enough, diving along the line alone runs into its side.
+		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
+			hop.diving(progress(player.pos), player.velocity.horizontalLength()) && topUnderSoon(touch.y)
+		} == true
+		if (dive && !hop.overTop) {
 			hop.overTop = true
-			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, diving onto it at y %.2f".format(player.y, player.velocity.y, it.y) }
+			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, diving onto it at y %.2f".format(player.y, player.velocity.y, hop.touch.y) }
 		}
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
@@ -594,7 +603,21 @@ abstract class ObstaclePassingMode(
 		if (climb > 0) held.rose = true
 		val progress = progress(player.pos)
 		val speed = player.velocity.horizontalLength()
-		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed), player.finalGravity, held.sinkAt(progress, speed))
+		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed, dive = dive), player.finalGravity, held.sinkAt(progress, speed, dive = dive))
+	}
+
+	/**
+	 * Whether the box is over a top at [y], or comes over it the next tick or the one after: a block there ending at [y]
+	 * with air above it, not a block reaching higher. The middle part of the box, a sliver of a corner isn't enough to
+	 * come down on. Over it now counts too, the dive takes a couple of ticks and mustn't stop halfway.
+	 */
+	private fun SafeContext.topUnderSoon(y: Double) = (0..2).any { ticks ->
+		val at = player.pos.add(player.velocity.x * ticks, 0.0, player.velocity.z * ticks)
+		listOf(-1, 1).any { dx -> listOf(-1, 1).any { dz ->
+			val x = at.x + dx * GLIDE_SIZE / 4
+			val z = at.z + dz * GLIDE_SIZE / 4
+			shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && shapeAt(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
+		} }
 	}
 
 	/** How long obstacle passing took this tick so far. */
