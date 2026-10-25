@@ -304,6 +304,8 @@ class BounceElytraFly(
 
 		listen<TickEvent.Post>({ -100 }) {
 			interrupting = false
+			// Off a top with a roof close above it, the glide starts right after the jump, see jumpingOffTop.
+			if (jumpingOffTop()) connection.sendPacket(ClientCommandC2SPacket(player, ClientCommandC2SPacket.Mode.START_FALL_FLYING))
 		}
 
 		listen<MovementEvent.InputUpdate> { event ->
