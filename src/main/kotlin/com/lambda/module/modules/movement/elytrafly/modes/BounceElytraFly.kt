@@ -338,6 +338,9 @@ class BounceElytraFly(
 				sneakRight = false
 				return@listen
 			}
+			// Crouching onto a top with a roof close above it, the jump off it fits under the roof, see crouchOnTop.
+			if (crouchOnTop()) input.playerInput = PlayerInput(playerInput.forward, playerInput.backward, playerInput.left,
+				playerInput.right, playerInput.jump, true, playerInput.sprint)
 			if (!wantJump) return@listen
 			if (flightPaused) return@listen
 			input.jump()
