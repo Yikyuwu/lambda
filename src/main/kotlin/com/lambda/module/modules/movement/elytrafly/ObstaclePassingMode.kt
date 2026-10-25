@@ -395,6 +395,8 @@ abstract class ObstaclePassingMode(
 		var rose = false
 		/** Over [touch] once, logged once. */
 		var overTop = false
+		/** Steering over to [touch]'s lane already, logged once and then every few ticks. */
+		var steering = false
 		/** The tick it touched down on [touch], -1 before. */
 		var touchedAt = -1
 		val touched get() = touchedAt >= 0
@@ -622,8 +624,9 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.topUnderSoon(y: Double) = (1..2).any { ticks ->
 		val at = player.pos.add(player.velocity.x * ticks, 0.0, player.velocity.z * ticks)
 		listOf(-1, 1).any { dx -> listOf(-1, 1).any { dz ->
-			val x = at.x + dx * (GLIDE_SIZE / 2 - 0.01)
-			val z = at.z + dz * (GLIDE_SIZE / 2 - 0.01)
+			// Half way out from the middle, a sliver of a corner isn't enough to come down on.
+			val x = at.x + dx * GLIDE_SIZE / 4
+			val z = at.z + dz * GLIDE_SIZE / 4
 			shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && shapeAt(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
 		} }
 	}
@@ -973,7 +976,7 @@ abstract class ObstaclePassingMode(
 			val over = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: withTouch(planned, linePoint, dir)
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
 			ElytraFly.debug {
-				val how = over.touch?.let { "touching down on it at y %.2f".format(it.y) }
+				val how = over.touch?.let { "touching down on it at y %.2f on the lane %+.2f across".format(it.y, it.lane.dotProduct(across(dir))) }
 					?: "gliding ${if (over.under) "under" else "over"} it at y %.2f${if (over.under || touchMiss.isEmpty()) "" else " ($touchMiss)"}".format(over.targetY)
 				"Obstacle %.1f ahead ($block), $how${if (over.hole) " and the hole after it" else ""}, %.1f long".format(distance, over.end - over.start)
 			}
@@ -1684,7 +1687,7 @@ abstract class ObstaclePassingMode(
 		}
 		if (lane == null || past == null) {
 			ElytraFly.debug {
-				val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
+				val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead on the lane %+.2f across, flying %+.2f".format(it.y, it.range.start - at, it.lane.dotProduct(across(dir)), from.subtract(startPos).dotProduct(across(dir))) }
 					?: if (touchMiss.isEmpty()) "" else " ($touchMiss)"
 				"Hole %.1f ahead, %.1f long, gliding over it$touching".format(start, end - start)
 			}
@@ -1692,7 +1695,7 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 		ElytraFly.debug {
-			val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
+			val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead on the lane %+.2f across, flying %+.2f".format(it.y, it.range.start - at, it.lane.dotProduct(across(dir)), from.subtract(startPos).dotProduct(across(dir))) }
 				?: if (touchMiss.isEmpty()) "" else " ($touchMiss)"
 			"Hole %.1f ahead, %.1f long, gliding over it$touching and over to ${lane.target.describe(dir)}${lane.leanText()} past what's %.1f ahead".format(start, end - start, past)
 		}
@@ -2789,7 +2792,14 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
 		// Over to the lane with the top to touch down on from shortly before it until bounced off it, see [laneTouch].
-		hop.touch != null && !hop.touched && progress >= hop.touch.range.start - TOUCH_APPROACH -> steerYaw(linePoint, hop.touch.lane, dir)
+		hop.touch != null && !hop.touched && progress >= hop.touch.range.start - TOUCH_APPROACH -> {
+			val off = player.pos.subtract(startPos).dotProduct(across(dir))
+			val to = hop.touch.lane.dotProduct(across(dir))
+			if (!hop.steering || passTicks % RELOOK_TICKS == 0)
+				ElytraFly.debug { "${if (hop.steering) "Steering" else "Steering over"} to the top's lane %+.2f across, at %+.2f, %.1f before it".format(to, off, hop.touch.range.start - progress) }
+			hop.steering = true
+			steerYaw(linePoint, hop.touch.lane, dir)
+		}
 		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
 		else -> steerYaw(linePoint, hop.lane, dir)
 	}
