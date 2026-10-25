@@ -28,6 +28,7 @@ import com.lambda.interaction.construction.simulation.result.results.InteractRes
 import com.lambda.interaction.construction.simulation.sim
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.ContainerHandler.findContainersWithMaterial
+import com.lambda.interaction.handlers.SpleefGuard.canBeIn
 import com.lambda.interaction.handlers.SpleefGuard.canSpleef
 import com.lambda.interaction.handlers.SpleefGuard.isUnderPlayer
 import com.lambda.interaction.handlers.SpleefGuard.onSpleef
@@ -314,10 +315,12 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 							return@mapNotNull null
 						}
 						val hitbox = entity.boundingBox
+						// Only the columns it really stands in. Drawn between two server positions it can seem to
+						// stick into a solid block next to its hole, which was dug out and placed back over and over.
 						val supports = entity.getPositionsWithinHitboxXZ(
 							(pos.y - (hitbox.maxY - hitbox.minY)).floorToInt(),
 							pos.y
-						)
+						).filter { canBeIn(entity, it) }
 						// Never dig out the player's footing, wait for the entity to move instead.
 						if (supports.any { isUnderPlayer(it) }) {
 							reportUnspleefable(entity)
