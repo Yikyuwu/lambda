@@ -235,6 +235,11 @@ abstract class ObstaclePassingMode(
 		/** The fastest [holdPitch] climbs to the height held. Slower, a block up takes longer than it's held ahead. */
 		private const val MAX_HOLD_CLIMB = 0.25
 		private const val JUMP_VELOCITY = 0.42
+		/**
+		 * The speed a bounce adds, the jump sprinting: 0.17 to 0.19 a tick seen. Left out, a glide simulated past a bounce
+		 * comes out too slow, e.g. over the rest of a hole after touching down on a pillar in it.
+		 */
+		private const val BOUNCE_SPEED_GAIN = 0.17
 		/** How high a bounce takes your feet off the floor where nothing else caps it. */
 		private const val MAX_BOUNCE_RISE = 2.0
 		/**
@@ -2182,6 +2187,7 @@ abstract class ObstaclePassingMode(
 			if (touch != null && !touched && along in touch.range && y <= touch.y && climb <= 0) {
 				y = touch.y
 				climb = JUMP_VELOCITY
+				speed += BOUNCE_SPEED_GAIN
 				touched = true
 				topped = true
 			}
@@ -2196,6 +2202,7 @@ abstract class ObstaclePassingMode(
 				if (y <= floor) {
 					y = floor
 					climb = JUMP_VELOCITY
+					speed += BOUNCE_SPEED_GAIN
 				}
 			}
 			// Bouncing on until then.
