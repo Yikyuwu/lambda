@@ -2535,7 +2535,11 @@ abstract class ObstaclePassingMode(
 			holding = holding || if (holdFrom != null) tick >= holdFrom else hop.start - along <= speed * leadTicks(hop)
 			if (holding && hop.hole && (y >= hop.targetY - TOPPED_MARGIN || rose && climb <= 0)) topped = true
 			if (holding && climb > 0) rose = true
-			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, speed, topped, touched), gravity, hop.sinkAt(along, speed, touched)) else bounce(y, climb)
+			// Like the flight: skimming just above the top to touch down on until over it, then down onto it, see [hopPitch].
+			val overTop = hop.touch?.range?.contains(along) ?: true
+			val dive = hop.diving(along, speed, touched)
+			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, speed, topped, touched, dive, overTop), gravity,
+				hop.sinkAt(along, speed, touched, dive && overTop)) else bounce(y, climb)
 			glide(climb, speed, pitch, gravity).let { (c, s) ->
 				climb = c
 				speed = s
