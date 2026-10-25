@@ -293,14 +293,16 @@ abstract class ObstaclePassingMode(
 		val cube: Boolean = false,
 		/** Not making it, climbing as high as it gets anyway, bumping into it lower is no worse. Held right away. */
 		val anyway: Boolean = false,
+		/** Held at this height instead, e.g. higher over a magma cube where there's room. */
+		val aim: Double? = null,
 	) {
-		val targetY = when {
+		val targetY = aim ?: when {
 			under -> (feetY + topY) / 2
 			hole -> topY - min(HOP_MARGIN, (topY - feetY) / 2)
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim)
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -744,8 +746,14 @@ abstract class ObstaclePassingMode(
 		hopTooSlow = false
 		fun plan(anyway: Boolean = false) = planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = anyway)
 		plan()?.let { over ->
-			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
-			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true)
+			val low = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true)
+			// With room above, e.g. a highway without pavement under its ceiling, held in the middle of it, further off a
+			// cube that jumps, as long as it still gets up there in time.
+			val high = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true, aim = (over.feetY + over.topY) / 2)
+				.takeIf { !over.under && it.targetY > low.targetY && canGetOver(it, progress(linePoint)) }
+			val chosen = high ?: low
+			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f (room y %.2f to %.2f), %.1f long".format(distance, chosen.targetY, over.feetY, over.topY, over.end - over.start) }
+			hop = chosen
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
