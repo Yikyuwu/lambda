@@ -25,6 +25,7 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
+import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.task.RootTask
 import com.lambda.task.tasks.OpenContainerTask
 import com.lambda.util.BlockUtils.isPassable
@@ -41,6 +42,7 @@ import net.minecraft.entity.passive.BatEntity
 import net.minecraft.entity.player.PlayerEntity
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
+import net.minecraft.util.math.Vec3d
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -54,6 +56,8 @@ object SpleefGuard : Loadable {
     private const val FORGET_RANGE = 16.0
     private const val SIZE_EPSILON = 1e-3
     private const val BLOCKER_MEMORY_MS = 1000L
+    /** Twice vanilla's 0.025, so a slightly different eye height on the server still doesn't anger it. */
+    private const val STARE_CONE = 0.05
 
     /** Spleefed positions and until when they're guarded. Written from simulation threads. */
     private val holes = ConcurrentHashMap<BlockPos, Long>()
@@ -62,6 +66,8 @@ object SpleefGuard : Loadable {
     private val blockers = ConcurrentHashMap<Entity, Long>()
     private val warnedBlockers = mutableSetOf<Entity>()
     private var guarding = false
+    /** Eyes of calm endermen in sight, which digging must never look at. Read from simulation threads. */
+    @Volatile private var calmEnderEyes = emptyList<Vec3d>()
 
     override fun load(): String {
         listen<TickEvent.Pre> {
@@ -81,6 +87,10 @@ object SpleefGuard : Loadable {
             // In water or lava crouching would keep the player from swimming up.
             guarding = (now < guardUntil || holeNearby) && !player.isTouchingWater && !player.isInLava
 
+            calmEnderEyes = world.entities
+                .filter { it is EndermanEntity && it.isAlive && !it.isAngry && isNear(it.blockPos, FORGET_RANGE) && player.canSee(it) }
+                .map { it.eyePos }
+
             blockers.entries.removeIf { (entity, time) -> !entity.isAlive || now - time > BLOCKER_MEMORY_MS }
             // Warned once while it's around, not again every time it blocks after a pause.
             warnedBlockers.removeIf { !it.isAlive || it.world !== world || !isNear(it.blockPos, FORGET_RANGE) }
@@ -94,6 +104,7 @@ object SpleefGuard : Loadable {
             guardUntil = 0L
             blockers.clear()
             warnedBlockers.clear()
+            calmEnderEyes = emptyList()
         }
 
         listen<MovementEvent.ClipAtLedge> {
@@ -114,11 +125,25 @@ object SpleefGuard : Loadable {
         return "Loaded Spleef Guard"
     }
 
-    /** A mob small enough to fall through a hole that can't hop, fly or climb back out. Endermen would need a hole 4 deep. */
+    /**
+     * A mob small enough to fall through a hole that can't hop, fly or climb back out. A calm enderman gets a hole
+     * 3 deep, which crouching reaches, and the digging never looks at it, see [staresAtEnderman].
+     * An angry one would teleport out.
+     */
     fun BuildConfig.canSpleef(entity: Entity) =
-        entity is LivingEntity && entity !is PlayerEntity && entity !is SlimeEntity && entity !is BlazeEntity &&
-            entity !is EndermanEntity && entity !is Flutterer && entity !is BatEntity && !entity.hasNoGravity() &&
+        if (entity is EndermanEntity) spleefEndermen && entity.isAlive && !entity.isAngry
+        else entity is LivingEntity && entity !is PlayerEntity && entity !is SlimeEntity && entity !is BlazeEntity &&
+            entity !is Flutterer && entity !is BatEntity && !entity.hasNoGravity() &&
             entity.width <= spleefMaxWidth + SIZE_EPSILON && entity.height <= spleefMaxHeight + SIZE_EPSILON
+
+    /** Whether looking along [rotation] from [eye] would stare at a calm enderman in sight and anger it. */
+    fun staresAtEnderman(eye: Vec3d, rotation: Rotation): Boolean {
+        val look = rotation.vector.normalize()
+        return calmEnderEyes.any { enderEye ->
+            val diff = enderEye.subtract(eye)
+            look.dotProduct(diff.normalize()) > 1.0 - STARE_CONE / diff.length()
+        }
+    }
 
     /** Whether breaking [pos] would dig out the ground under the player or right next to their feet. */
     fun SafeContext.isUnderPlayer(pos: BlockPos): Boolean {
