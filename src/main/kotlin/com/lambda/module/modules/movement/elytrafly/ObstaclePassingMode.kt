@@ -224,6 +224,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_STEER_SPEED = 1.6
 		/** How many ways to touch down on a top in a hole are simulated at most, best first, see [touchLane]. */
 		private const val TOUCH_PLANS_TRIED = 4
+		/** How far off the lane to touch down on in a hole from it may still be when it gets there, see [touchLane]. */
+		private const val TOUCH_LANE_OFF = 0.15
 		/** How much more room than the box a lane to touch down on in a hole needs on the way, see [touchLane]. */
 		private const val LANE_CLEAR_MARGIN = 0.05
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
@@ -519,6 +521,8 @@ abstract class ObstaclePassingMode(
 	private var touchLaneText = ""
 	/** The lane of a top to touch down on in a hole ahead, and until where along the line, see [startDodge]. */
 	private var touchSide: Pair<Vec3d, Double>? = null
+	/** Where the hole of [touchSide] starts along the line. */
+	private var touchHoleStart = 0.0
 	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
 	private var hopShort = Double.POSITIVE_INFINITY
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
@@ -1498,6 +1502,9 @@ abstract class ObstaclePassingMode(
 					// Still passing what's dodged, something farther on the lane is looked at once past it. Over to another
 					// lane now would cross the line right where what's dodged is.
 					if (!onLine && progress < dodgeEnd && progress + distance > dodgeEnd + DODGE_STEER_AHEAD) return@let
+					// In a hole with a top to touch down on, glided over: the lane through it is the hole's to pick, see
+					// [touchLane]. Over to another for it, e.g. away from the top's side, it can't steer back in time.
+					if (touchSide.let { it != null && progress + distance > touchHoleStart && progress + distance < it.second }) return@let
 					val next = when {
 						distance < MIN_DODGE_DISTANCE -> null
 						// Over to another only with fewer of them on it.
@@ -1950,10 +1957,26 @@ abstract class ObstaclePassingMode(
 		}
 		var miss: String? = null
 		val tried = mutableListOf<String>()
-		val sorted = plans.sortedWith(compareByDescending<Plan> { it.covered }.thenBy { abs(it.lane - here) })
+		// Over on its lane in time from where you are, steered over to it like a dodge: by the hole, in it by the top, or
+		// by steering in. Gliding a hole there's hardly any steering. With room to dive onto the top, e.g. not one right
+		// below after missing another.
+		val off = player.pos.subtract(startPos).dotProduct(across)
+		val speed = player.velocity.horizontalLength()
+		fun reachable(plan: Plan): Boolean {
+			if (plan.touch.middle - progress < speed * (TOUCH_DIVE_TICKS + 1)) return false
+			val by = if (progress < hop.obstacle) hop.obstacle else min(plan.touch.switchAt, plan.touch.range.start)
+			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
+			val reached = steerOffsets(off, plan.lane, speed, by - progress).last().second
+			return abs(reached - plan.lane) <= TOUCH_LANE_OFF
+		}
+		plans.removeAll { plan -> !reachable(plan).also { if (!it) tried += "${plan.text} (${plan.covered}/25) can't be steered over to in time" } }
+		val sorted = plans.sortedWith(compareByDescending<Plan> { it.covered }.thenBy { abs(it.lane - off) })
 		// Not making it yet, e.g. slow still: dodging before it stays on the side of the best way to touch down there,
 		// faster later it may.
-		sorted.firstOrNull()?.let { touchSide = across.multiply(it.lane) to hop.end }
+		sorted.firstOrNull()?.let {
+			touchSide = across.multiply(it.lane) to hop.end
+			touchHoleStart = hop.start
+		}
 		for (plan in sorted) {
 			// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
 			// may take you higher than the top, sinking to just above it after.
