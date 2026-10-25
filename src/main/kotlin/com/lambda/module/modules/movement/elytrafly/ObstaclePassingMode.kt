@@ -1235,8 +1235,18 @@ abstract class ObstaclePassingMode(
 				val from = if (tilt != 0 && onDodgeLane(linePoint, dir)) here else onLane
 				val ahead = from.add(dir.multiply(skip))
 				// Dodging carpets, more of them on the lane too.
-				// A magma cube is glided over from the line only, see passCube.
-				val (low, other) = ahead.obstacleHits(dir, passerConfig.dodgeLookAhead - skip, lean = tilt, carpets = dodgeCarpets, mobs = false)
+				// A magma cube or hoglin on the lane is glided over there like on the line, see passCube. Not getting over it,
+				// it's dodged like a block.
+				val (low, other) = ahead.obstacleHits(dir, passerConfig.dodgeLookAhead - skip, lean = tilt, carpets = dodgeCarpets)
+				if (low?.mob == true) {
+					val distance = low.distance + skip
+					planHop(from, dir, distance, lean = tilt, avoid = cubeBoxes(here, distance + MAX_HOLE_LENGTH))?.let { over ->
+						ElytraFly.debug { "Mob %.1f ahead on the lane (${low.what}), gliding ${if (over.under) "under" else "over"} it at y %.2f".format(distance, over.targetY) }
+						hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, lane = lane, under = over.under, cube = true)
+						dodgeYaw = steerYaw(linePoint, lane, dir)
+						return true
+					}
+				}
 				low?.let { hit ->
 					val distance = hit.distance + skip
 					val block = hit.what
@@ -1282,6 +1292,9 @@ abstract class ObstaclePassingMode(
 								ElytraFly.debug { "Low $block %.1f ahead on the lane, not gliding over it ($hopRejection), over to ${free.target.describe(dir)}${free.leanText()}, free of them".format(distance) }
 								dodgeTo(free, progress + distance, carpets = true)
 							} == true -> {}
+						// No other lane, something low enough to glide over on this one, glided over right there like on the line.
+						!carpetsOnly && !onLine && distance >= MIN_DODGE_DISTANCE &&
+							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }?.let { glideOver(it.with(lane = lane)) } != null -> {}
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
 						else -> return brake(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane ($laneMiss)".format(distance), dodgeCarpets)
@@ -1446,28 +1459,33 @@ abstract class ObstaclePassingMode(
 	 * room to steer past, see [glideOverHole]. Only with a lane past it free from where the hole starts.
 	 */
 	/**
-	 * Gliding over a hole or a block on the line, something ahead that can't be glided over: over to a lane past it once
-	 * there's one, still gliding, looked for every [RELOOK_TICKS] as far as [PasserSettings.dodgeLookAhead]. Seen from
+	 * Gliding over a hole or a block on the line or the lane dodged to, something ahead on it that can't be glided over:
+	 * over to a lane past it once there's one, still gliding, looked for every [RELOOK_TICKS] as far as [PasserSettings.dodgeLookAhead]. Seen from
 	 * farther than a lane past it was free, or past the look ahead before. Once over it, too close to steer past. The
 	 * glide steered over to it, null while none.
 	 */
 	private fun SafeContext.laneFromGlide(hop: Hop, linePoint: Vec3d, dir: Vec3d, progress: Double): Hop? {
-		if (hop.lane != Vec3d.ZERO || dodge != null || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole ||
-			passTicks % RELOOK_TICKS != 0) return null
+		// On the line, or on the lane dodged to, swinging back to the line too.
+		val current = dodge ?: Vec3d.ZERO
+		if (hop.lane != current || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole || passTicks % RELOOK_TICKS != 0) return null
+		val onLane = current != Vec3d.ZERO
 		val here = Vec3d(player.x, linePoint.y, player.z)
+		val lanePoint = if (onLane) linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset)) else linePoint
 		val reach = passerConfig.dodgeLookAhead.toDouble()
-		// What's in a hole counts, over a block from where the glide over it ends. Things to glide over on the way are
-		// left to that, the first one that can't be is what a lane gets past.
+		// What's in a hole counts, over a block from where the glide over it ends. On a lane what's dodged beside it doesn't,
+		// like the dodge looks at it. Things to glide over on the way are left to that, the first one that can't be is what
+		// a lane gets past.
 		var from = if (hop.hole) 0.0 else (hop.end - progress).coerceAtLeast(0.0)
+		if (onLane) from = max(from, dodgeEnd + DODGE_MARGIN - progress)
 		var next: Pair<Double, String>? = null
 		while (from < reach && next == null) {
-			val hit = here.add(dir.multiply(from)).obstacleHit(dir, reach - from, mobs = false) ?: return null
+			val hit = lanePoint.add(dir.multiply(from)).obstacleHit(dir, reach - from, mobs = false) ?: return null
 			val at = from + hit.distance
-			if (planHop(linePoint, dir, at) == null) next = at to hit.what
+			if (planHop(lanePoint, dir, at) == null) next = at to hit.what
 			else from = at + HOP_GAP
 		}
 		val (distance, what) = next ?: return null
-		val lane = freeLane(here, linePoint, dir, distance, Vec3d.ZERO) ?: return null
+		val lane = freeLane(here, linePoint, dir, distance, current)?.takeIf { it.target != current } ?: return null
 		ElytraFly.debug { "Gliding over it, $what %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(distance) }
 		dodgeTo(lane, progress + distance)
 		return hop.with(lane = lane.target).also { this@ObstaclePassingMode.hop = it }
