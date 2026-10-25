@@ -950,23 +950,11 @@ object HighwayTools : Module(
 
         val wallElevation = if (pavement != Material.None) rimHeight else 0 + if (pavement != Material.None) 1 else 0
         if (rightWall != Material.None) {
-            structure += generateDirectionalTube(
-	            orthogonal,
-	            1,
-	            height - wallElevation,
-	            -center + width,
-	            wallElevation,
-            ).associateWith { target(rightWall, wallMaterial) }
+            structure += wall(orthogonal, center, 1, wallElevation).associateWith { target(rightWall, wallMaterial) }
         }
 
         if (leftWall != Material.None) {
-            structure += generateDirectionalTube(
-	            orthogonal,
-	            1,
-	            height - wallElevation,
-	            -center - 1,
-	            wallElevation,
-            ).associateWith { target(leftWall, wallMaterial) }
+            structure += wall(orthogonal, center, -1, wallElevation).associateWith { target(leftWall, wallMaterial) }
         }
 
         if (floor != Material.None) {
@@ -985,6 +973,20 @@ object HighwayTools : Module(
         }
 
         return transformed
+    }
+
+    /**
+     * The blocks right next to the hole on its right ([side] 1) or left (-1), from [elevation] up to the ceiling.
+     * Along a diagonal the hole's sides are staircases, and a tube a block further out left a gap all along them.
+     */
+    private fun wall(orthogonal: EightWayDirection, center: Int, side: Int, elevation: Int): Set<BlockPos> {
+        val hole = generateDirectionalTube(orthogonal, width, 1, -center, 0)
+        fun across(pos: BlockPos) = pos.x * orthogonal.offsetX + pos.z * orthogonal.offsetZ
+        val edge = if (side < 0) hole.minOf(::across) else hole.maxOf(::across)
+        return hole
+            .flatMap { cell -> Direction.Type.HORIZONTAL.map { cell.offset(it) } }
+            .filter { across(it) == edge + side }
+            .flatMapTo(mutableSetOf()) { cell -> (elevation until height).map { cell.up(it) } }
     }
 
     private fun target(target: Material, material: Block) =
