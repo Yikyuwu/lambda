@@ -118,6 +118,11 @@ abstract class ObstaclePassingMode(
 		 * its height, not above or below it. The game's sqrt(2.04) - 0.6.
 		 */
 		private const val CUBE_REACH = 0.83
+		/**
+		 * How much farther than the climb up over (or the sink down under) a magma cube takes the height is held before
+		 * its reach, room for it jumping too, see [holdCube].
+		 */
+		private const val CUBE_HOLD_MARGIN = 3.0
 		/** How far up and down from you magma cubes are looked for, the biggest is about two blocks. */
 		private const val CUBE_SEARCH_HEIGHT = 4.0
 		/** How far ahead the line has to be free to swing back onto it, the swing takes about [DODGE_STEER_AHEAD]. */
@@ -2774,6 +2779,11 @@ abstract class ObstaclePassingMode(
 	 * what's next. That one's held a bit sooner, it's higher up. Decided now, not when planned far off and slower.
 	 */
 	private fun SafeContext.holdCube(hop: Hop, progress: Double): Boolean {
+		// Not before the climb (or the sink, under it) up there takes, with a bit of room in front of its reach: its box
+		// and reach are already in [Hop.start], the room is for a jump of it too.
+		val speed = player.velocity.horizontalLength()
+		val climbTicks = HOP_LEAD_TICKS + abs(hop.targetY - startPos.y) / MAX_HOLD_CLIMB
+		if (hop.start - progress > speed * climbTicks + CUBE_HOLD_MARGIN) return false
 		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, lane = hop.lane, cube = true, aim = it) }
 			?.takeIf { canHop(it, progress, 0) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
 			// Holding now has to make it too: far off, from the next bounce it glides too long as well, that's not too late.
