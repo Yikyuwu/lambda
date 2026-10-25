@@ -104,10 +104,10 @@ abstract class ObstaclePassingMode(
 		/** A magma cube is glided over like a block this high at least. */
 		private const val CUBE_HEIGHT = 2.0
 		/**
-		 * How far a magma cube hurts you at most, the biggest: your feet within 0.6 times its size of its feet, while your
-		 * box is within a block across and half a block up or down of its box.
+		 * How far across a mob attacks you, a magma cube just by touching: your box within this of its box sideways, at
+		 * its height, not above or below it. The game's sqrt(2.04) - 0.6.
 		 */
-		private const val CUBE_REACH = 2.4
+		private const val CUBE_REACH = 0.83
 		/** How far up and down from you magma cubes are looked for, the biggest is about two blocks. */
 		private const val CUBE_SEARCH_HEIGHT = 4.0
 		/** How far ahead the line has to be free to swing back onto it, the swing takes about [DODGE_STEER_AHEAD]. */
@@ -742,17 +742,9 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.passCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
 		if (skipHopAt?.let { abs(it - at) < 1.5 } == true) return false
 		hopTooSlow = false
-		// Out of a magma cube's reach, else as far from it as there's room for, e.g. a big one under the roof.
-		var reached = false
-		fun plan(anyway: Boolean = false): Hop? {
-			val slow = hopTooSlow
-			planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = anyway)?.let { return it }
-			// Out of its reach only too slow yet, it's looked at again.
-			if (hopTooSlow && !slow) return null
-			return planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH, hurts = false), anyway = anyway)?.also { reached = true }
-		}
+		fun plan(anyway: Boolean = false) = planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = anyway)
 		plan()?.let { over ->
-			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long${if (reached) ", no room out of its reach" else ""}".format(distance, over.targetY, over.end - over.start) }
+			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true)
 			return true
 		}
@@ -1529,28 +1521,21 @@ abstract class ObstaclePassingMode(
 	private fun Entity.glidedOver() = isAlive && (this is MagmaCubeEntity || this is HoglinEntity)
 
 	/**
-	 * The boxes of the magma cubes and hoglins up to [maxDistance] around [from], see [mobBox]. With [hurts] false only
-	 * their bodies, where it can't keep out of a magma cube's reach.
+	 * The boxes of the magma cubes and hoglins up to [maxDistance] around [from], see [mobBox].
 	 */
-	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double, hurts: Boolean = true) =
+	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
 		world.getOtherEntities(player, Box(from, from).expand(maxDistance, CUBE_SEARCH_HEIGHT, maxDistance)) { it.glidedOver() }
-			.map { mobBox(it, hurts) }
+			.map { mobBox(it) }
 
 	/**
-	 * Where your gliding box mustn't be past [mob], with room around it: glided over like a block two high, the biggest
-	 * just as high. A magma cube hurts you farther, see [CUBE_REACH], as far as its size makes it, so with [hurts] that
-	 * too: around your feet a box for its reach, where your box is close enough too. One mid-jump is taken as down on
-	 * what's below it again, the floor or the railing, it'll have landed by the time you're there.
+	 * Where your gliding box mustn't be past [mob]: glided over like a block two high, the biggest just as high, and
+	 * as far across as it attacks you, [CUBE_REACH], with room around that. Above or below it, it can't. One mid-jump
+	 * is taken as down on what's below it again, the floor or the railing, it'll have landed by the time you're there.
 	 */
-	private fun SafeContext.mobBox(mob: Entity, hurts: Boolean = true): Box {
+	private fun SafeContext.mobBox(mob: Entity): Box {
 		val body = mob.boundingBox.let { it.offset(0.0, (if (mob.isOnGround) it.minY else landingY(mob)) - it.minY, 0.0) }
-		val over = Box(body.minX, body.minY, body.minZ, body.maxX, body.minY + max(CUBE_HEIGHT, body.lengthY), body.maxZ)
-		if (!hurts || mob !is MagmaCubeEntity) return over.expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN)
-		val reach = 0.6 * mob.size
-		val center = body.center
-		val feet = Box(center.x - reach - GLIDE_SIZE / 2, body.minY - reach + GLIDE_SIZE, center.z - reach - GLIDE_SIZE / 2,
-			center.x + reach + GLIDE_SIZE / 2, body.minY + reach, center.z + reach + GLIDE_SIZE / 2)
-		return over.union(feet.intersection(body.expand(1.0, 0.5, 1.0))).expand(MAGMA_CUBE_MARGIN, 0.0, MAGMA_CUBE_MARGIN)
+		return Box(body.minX, body.minY, body.minZ, body.maxX, body.minY + max(CUBE_HEIGHT, body.lengthY), body.maxZ)
+			.expand(CUBE_REACH + MAGMA_CUBE_MARGIN, 0.0, CUBE_REACH + MAGMA_CUBE_MARGIN)
 	}
 
 
