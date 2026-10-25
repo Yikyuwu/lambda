@@ -59,6 +59,8 @@ object SpleefGuard : Loadable {
     private const val BLOCKER_MEMORY_MS = 1000L
     /** Twice vanilla's 0.025, so a slightly different eye height on the server still doesn't anger it. */
     private const val STARE_CONE = 0.05
+    /** Vanilla's 4.5 block reach with some margin, so a hole under an enderman can be dug 4 deep crouched, looking straight down. */
+    private const val SPLEEF_REACH = 4.4
 
     /** Spleefed positions and until when they're guarded. Written from simulation threads. */
     private val holes = ConcurrentHashMap<BlockPos, Long>()
@@ -146,11 +148,18 @@ object SpleefGuard : Loadable {
         }
     }
 
-    /** Whether breaking [pos] would dig out the ground under the player or right next to their feet. */
+    /**
+     * Whether breaking [pos] would dig out the ground under the player or right next to their feet.
+     * Air needs no digging, and deeper blocks aren't what they stand on, e.g. further down a hole they're crouched over.
+     */
     fun SafeContext.isUnderPlayer(pos: BlockPos): Boolean {
+        if (isPassable(pos) || pos.y !in player.blockPos.y - 1..player.blockPos.y) return false
         val box = player.boundingBox.expand(0.3, 0.0, 0.3)
-        return pos.y <= player.blockPos.y && box.intersects(Box(pos).withMinY(box.minY).withMaxY(box.maxY))
+        return box.intersects(Box(pos).withMinY(box.minY).withMaxY(box.maxY))
     }
+
+    /** How far [pos] may be dug from: further for a block under a spleefed mob, up to vanilla's reach. */
+    fun spleefReach(pos: BlockPos, reach: Double) = if (holes.containsKey(pos)) maxOf(reach, SPLEEF_REACH) else reach
 
     fun reportUnspleefable(entity: Entity) {
         blockers[entity] = System.currentTimeMillis()
