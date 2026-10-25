@@ -60,7 +60,8 @@ import kotlin.math.ceil
 /** Kills mobs the highway can't spleef out of the way, and hoglins and skeletons that come close. */
 class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     val enabled by c.setting("Kill Mobs", true, "Kill mobs the build can't spleef out of the way, and hoglins and skeletons that come close")
-    private val endermen by c.setting("Endermen", true, "Kill endermen in the way") { enabled }
+    private val angryEndermen by c.setting("Angry Endermen", true, "Kill endermen that attack you") { enabled }
+    private val calmEndermen by c.setting("Calm Endermen", false, "Kill calm endermen in the way instead of spleefing them") { enabled }
     private val ghasts by c.setting("Ghasts", true, "Kill ghasts in the way") { enabled }
     private val striders by c.setting("Striders", true, "Kill striders in the way") { enabled }
     private val magmaCubes by c.setting("Magma Cubes", true, "Kill magma cubes in the way") { enabled }
@@ -70,7 +71,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     private val angryPiglins by c.setting("Angry Piglins", true, "Kill piglins, piglin brutes and zombified piglins that attack you, e.g. after seeing a shulker or ender chest opened") { enabled }
     private val hoglinRange by c.setting("Hoglin Range", 3.0, 1.0..4.0, 0.25, "How close a hoglin has to come", " blocks") { enabled && hoglins }
     private val killGrabbers by c.setting("Kill Item Grabbers", true, "Kill mobs like baby piglins near a placed shulker or ender chest, they'd pick up its drop. Zombified piglins are waited out instead, since hitting one angers the others") { enabled }
-    private val onlyInTheWay by c.setting("Only In The Way", true, "Only attack endermen, ghasts, striders and magma cubes blocking the build") { enabled }
+    private val onlyInTheWay by c.setting("Only In The Way", true, "Only attack calm endermen, ghasts, striders and magma cubes blocking the build") { enabled }
     private val weapon by c.setting("Weapon", Weapon.NetheriteAxe, "Weapon in the hotbar to fight with") { enabled }
     private val anyWeapon by c.setting("Any Weapon", false, "Use the strongest sword or axe when that weapon isn't there") { enabled }
     private val rotate by c.setting("Rotate", true, "Rotate towards the mob") { enabled }
@@ -91,6 +92,8 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     private var target: Entity? = null
     /** A mob to fight is there, but a container is open or an item in use first. */
     private var waiting = false
+    /** Calm endermen in the way are left to the fight, so the build doesn't spleef them. */
+    val killsCalmEndermen get() = enabled && calmEndermen
     /** Whether a mob is being fought or about to be, so others close their container and wait instead of acting against it. */
     val isFighting get() = target != null || waiting
     private val settle = RotationSettle()
@@ -133,7 +136,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
 
     /** The mob being fought while it's in reach, so one knocked out of the way doesn't come back. Else the closest. */
     private fun SafeContext.findTarget(threatsOnly: Boolean = false): LivingEntity? {
-        if (!endermen && !ghasts && !striders && !magmaCubes && !skeletons && !hoglins && !angryPiglins && !killGrabbers) return null
+        if (!angryEndermen && !calmEndermen && !ghasts && !striders && !magmaCubes && !skeletons && !hoglins && !angryPiglins && !killGrabbers) return null
         val now = System.currentTimeMillis()
         unhittable.entries.removeIf { now - it.value > UNHITTABLE_MS }
         val reach = buildConfig.entityReach
@@ -141,7 +144,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
         val inReach = entitySearch<LivingEntity>(reach + SEARCH_EXTRA) {
             it.isAlive && it !in unhittable && (!threatsOnly || it.isThreat || it.isGrabberTarget) && it.isInReach(player.eyePos, reach) && when {
                 it.isGrabberTarget || it.isAngryPiglin -> true
-                it is EndermanEntity -> endermen
+                it is EndermanEntity -> if (it.isAngry) angryEndermen else calmEndermen
                 it is GhastEntity -> ghasts
                 it is StriderEntity -> striders
                 it is MagmaCubeEntity -> magmaCubes
@@ -161,7 +164,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
                     it is HoglinEntity -> it in SpleefGuard.recentBlockers || it.squaredDistanceTo(player) <= hoglinRange * hoglinRange
                     it is AbstractSkeletonEntity -> it.squaredDistanceTo(player) <= skeletonRange * skeletonRange
                     // An angry enderman is coming for you.
-                    it is EndermanEntity -> allowed || it.isAngry
+                    it is EndermanEntity -> it.isAngry || allowed
                     else -> allowed
                 }
             }
