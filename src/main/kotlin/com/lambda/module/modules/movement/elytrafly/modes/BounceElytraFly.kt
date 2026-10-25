@@ -213,7 +213,9 @@ class BounceElytraFly(
 					// foot, looking down the glide would take the first 0.42 up as only 0.33 and get set back.
 					player.isOnGround -> COAST_PITCH
 					// Straight down the glide moves like a jump on foot, which the server does until it takes the start.
-					player.velocity.y > 0 && player.y - groundY < MIN_TAKEOFF_HEIGHT -> 90.0
+					// Slowing down or coasting, the whole way up: easing up into the brake while still rising, on 2b2t the
+					// server set it back at the top of the bounce again and again, 120 times in a few hours.
+					player.velocity.y > 0 && (player.y - groundY < MIN_TAKEOFF_HEIGHT || slowingForChunks || slowingToFit || coasting) -> 90.0
 					// Under a low roof there's no room to climb far, and each bounce speeds it up again. Looking up it
 					// brakes and glides long without touching the floor, as high as flying level goes.
 					(slowingForChunks || slowingToFit) && pacer.lowRoof -> eased(holdHeightPitch(SLOW_PITCH, maxFlightY()))
