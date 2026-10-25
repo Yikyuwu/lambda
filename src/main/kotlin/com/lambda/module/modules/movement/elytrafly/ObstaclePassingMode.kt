@@ -447,8 +447,9 @@ abstract class ObstaclePassingMode(
 			// beside it that runs into its side. Skimming only coming down onto it from above: still climbing up to it,
 			// easing off below its height runs into its side.
 			touch != null && !touched -> when {
-				!dive || y < touch.y + TOUCH_SKIM -> touch.y + TOUCH_ABOVE
-				overTop -> touch.y - TOUCH_DIVE
+				!dive -> touch.y + TOUCH_ABOVE
+				overTop && y >= touch.y -> touch.y - TOUCH_DIVE
+				y < touch.y + TOUCH_SKIM -> touch.y + TOUCH_ABOVE
 				else -> touch.y + TOUCH_SKIM
 			}
 			hole && topped -> min(targetY, max(y, needFrom(along) + HOP_MARGIN))
@@ -1912,6 +1913,37 @@ abstract class ObstaclePassingMode(
 		return holesAhead(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir).firstOrNull { it.endInclusive > at + edge && it.start <= at + edge + bounceRoom }
 	}
 
+	/**
+	 * Up on a layer of blocks ending [edge] ahead of [linePoint] with a hole right after it down on the floor that's got
+	 * over from bouncing on: bounced on off the edge the way that's simulated, gliding off at the layer's height it'd come
+	 * over the hole lower and slower, e.g. too low to touch down on a top in it. With a top in it to touch down on, over to
+	 * the lane for that up here while still bouncing: gliding over the hole there's hardly any steering, from where you
+	 * happened to be, e.g. taking off off the middle of the way, no lane past what's in it may be left. Whether it's
+	 * handled, null when it's not got over that way, as before.
+	 */
+	private fun SafeContext.layerHole(linePoint: Vec3d, dir: Vec3d, edge: Double): Boolean? {
+		val hole = holeAfterEdge(linePoint, dir, edge) ?: return null
+		// The side of the top it's not over to yet only kept dodging over to it, see [touchSide].
+		val side = touchSide
+		val holeStart = touchHoleStart
+		fun keep() {
+			touchSide = side
+			touchHoleStart = holeStart
+		}
+		val over = holeHop(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir, hole).first
+		if (!canGetOver(over, progress(linePoint))) return null.also { keep() }
+		val across = across(dir)
+		val lane = over.lane.dotProduct(across)
+		val touch = over.touch
+		if (touch != null && abs(player.pos.subtract(startPos).dotProduct(across) - lane) > TOUCH_LANE_OFF) {
+			ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it, bouncing on over to the lane %+.2f up here to touch down on the top at y %.2f in it ($touchLaneText)".format(edge, lane, touch.y) }
+			return dodgeTo(Lane(over.lane, 0, lane), hole.endInclusive + TOUCH_PAST)
+		}
+		ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it, bouncing on off the edge for it".format(edge) }
+		keep()
+		return false
+	}
+
 	/** Why [hole] right after the end of the layer isn't got over from bouncing on up here, null when it is. */
 	private fun SafeContext.holeAfterEdgeMiss(linePoint: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): String? =
 		if (canGetOver(holeHop(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir, hole).first, progress(linePoint))) null else hopMiss
@@ -1964,9 +1996,11 @@ abstract class ObstaclePassingMode(
 		val floor = line.y
 		val steerSpeed = max(player.velocity.horizontalLength(), TOUCH_STEER_SPEED)
 		fun point(along: Double, lane: Double) = startPos.add(forward.multiply(along)).add(across.multiply(lane))
-		// The box and a bit at [at], at bounce height before the hole, at the height held above the top in it.
+		// The box and a bit at [at], at bounce height before the hole, at the height held above the top in it. Bouncing on a
+		// layer of blocks before it, e.g. planned from up there, see [layerHole], at bounce height above that.
 		fun boxClear(at: Vec3d, along: Double, held: Double): Boolean {
-			val (bottom, top) = if (along < hop.obstacle) floor + passerConfig.minObstacleHeight to floor + MAX_BOUNCE_RISE else held to held + GLIDE_SIZE
+			val ground = if (onLayer && along < hop.obstacle && Vec3d(at.x, startPos.y, at.z).boxHasFloor()) startPos.y else floor
+			val (bottom, top) = if (along < hop.obstacle) ground + passerConfig.minObstacleHeight to ground + MAX_BOUNCE_RISE else held to held + GLIDE_SIZE
 			return spaceEmpty(Box(at.x - GLIDE_SIZE / 2, bottom, at.z - GLIDE_SIZE / 2, at.x + GLIDE_SIZE / 2, top, at.z + GLIDE_SIZE / 2)
 				.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
 		}
@@ -2090,8 +2124,11 @@ abstract class ObstaclePassingMode(
 			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
 			val held = plan.touch.y + TOUCH_ABOVE
 			val path = steerOffsets(off, plan.lane, speed, by - progress)
-			if (abs(path.last().second - plan.lane) <= TOUCH_LANE_OFF)
-				return pathClear(progress, path.take(path.indexOfFirst { abs(it.second - plan.lane) <= TOUCH_LANE_OFF / 2 }.coerceAtLeast(1) + 1), by, held)
+			if (abs(path.last().second - plan.lane) <= TOUCH_LANE_OFF) {
+				// Up to where it's as good as on it, all of the way when it only just gets close enough.
+				val on = path.indexOfFirst { abs(it.second - plan.lane) <= TOUCH_LANE_OFF / 2 }
+				return pathClear(progress, if (on < 0) path else path.take(on.coerceAtLeast(1) + 1), by, held)
+			}
 			// Not quite over on it by then, still steering over to it: with the box over the top all the same when it gets
 			// there, e.g. coming from the line over a hole, the middle part of the box like [lanes] needs.
 			if (plan.touch.switchAt > Double.NEGATIVE_INFINITY) return false
@@ -2298,9 +2335,13 @@ abstract class ObstaclePassingMode(
 		if (noGapAt.near(at) || skipHopAt.near(at)) return false
 		noGapAt = at
 		// Deeper than the floor you started on, that's for walking around.
-		if (!linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0).boxHasFloor()) return false
+		val deeper = !linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0).boxHasFloor()
 		// Where there's floor under you again up here, more of the layer.
-		val resume = along.firstOrNull { (distance, point) -> distance > edge && distance <= edge + MAX_GAP && point.boxHasFloor() }?.first
+		val resume = if (deeper) null else along.firstOrNull { (distance, point) -> distance > edge && distance <= edge + MAX_GAP && point.boxHasFloor() }?.first
+		// No more of it after, a hole right after it down on the floor that's gotten over from bouncing on: planned from up
+		// here, see [layerHole].
+		if (!onCarpets && resume == null) layerHole(linePoint, dir, edge)?.let { return it }
+		if (deeper) return false
 		// Carpets, even a short gap is glided across: down in it you're stopped at the edge of the next one.
 		if (resume != null && resume - edge < MIN_GAP && !onCarpets) return false
 		if (resume == null) {
@@ -2310,14 +2351,9 @@ abstract class ObstaclePassingMode(
 			// A hole right after it down there, too fast to stop once off the edge. Too slow to glide over it, e.g. slowed
 			// down gliding up onto the layer, landing up here before the edge to walk around it.
 			if (edge > brakeDistance()) holeAfterEdge(linePoint, dir, edge)?.let { hole ->
-				val miss = holeAfterEdgeMiss(linePoint, dir, hole)
-					?: run {
-						// Over it from bouncing on off the edge like that was simulated, not gliding off at the layer's height:
-						// it'd come over the hole lower and slower than looked at, e.g. too low to touch down on a top in it.
-						ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it, bouncing on off the edge for it".format(edge) }
-						return false
-					}
-				return brake(progress(linePoint) + edge, "The blocks end %.1f ahead, a hole right after it, can't get over it ($miss)".format(edge))
+				holeAfterEdgeMiss(linePoint, dir, hole)?.let { miss ->
+					return brake(progress(linePoint) + edge, "The blocks end %.1f ahead, a hole right after it, can't get over it ($miss)".format(edge))
+				}
 			}
 			// Gliding off the edge at the layer's height, the next bounce is down on the floor.
 			val off = planHop(linePoint, dir, (edge - DROP_BEFORE).coerceAtLeast(HOP_SCAN_STEP), true, DROP_BEFORE + STEP_ON, carpets = onCarpets) ?: run {
