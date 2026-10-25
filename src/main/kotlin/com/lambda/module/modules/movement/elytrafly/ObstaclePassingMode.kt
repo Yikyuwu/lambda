@@ -514,6 +514,7 @@ abstract class ObstaclePassingMode(
 			lastGoal = null
 			sameGoals = 0
 			scanTicks = 0
+			noWayYet.clear()
 			forgetSpeedNeed()
 		}
 		onDisable {
@@ -670,7 +671,7 @@ abstract class ObstaclePassingMode(
 			// the box swings out only that side. From where you are, on a narrow lane its edges would be in the way.
 			val onDodgeLane = dodge.let { it != null && it != Vec3d.ZERO && hop.lane == it }
 			val tilt = if (onDodgeLane && leaning(progress)) dodgeLean else 0
-			val lookFrom = if (onDodgeLane) closestLinePoint.add(Vec3d(-snappedDir.z, 0.0, snappedDir.x).normalize().multiply(dodgeOffset))
+			val lookFrom = if (onDodgeLane) dodgeLanePoint(closestLinePoint, snappedDir)
 				else Vec3d(playerPos.x, closestLinePoint.y, playerPos.z)
 			val skip = if (onDodgeLane) (dodgeEnd + DODGE_MARGIN - progress).coerceAtLeast(0.0) else 0.0
 			val inTheWay = if (before > skip) lookFrom.add(snappedDir.multiply(skip)).obstacleHit(snappedDir, before - skip, lean = tilt) else null
@@ -815,7 +816,7 @@ abstract class ObstaclePassingMode(
 		if (!onLayer && distance > brakeDistance() + DODGE_STEER_AHEAD && dodgeOverHole(linePoint, dir, distance))
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), steering past it over the hole before it".format(distance))
 		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
-			?: return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
+			?: return throughOpening(from, linePoint, dir, distance, block) || if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
 			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)))
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 		return dodgeTo(lane, at)
@@ -876,7 +877,7 @@ abstract class ObstaclePassingMode(
 			return false
 		}
 		val avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH)
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(lane.offset)
+		val across = across(dir).multiply(lane.offset)
 		val over = planHop(linePoint.add(across), dir, distance, avoid = avoid) ?: planHop(linePoint, dir, distance, avoid = avoid) ?: return false
 		ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, over to ${lane.target.describe(dir)}${lane.leanText()} gliding over the mob there at y %.2f".format(distance, next.distance, over.targetY) }
 		dodgeTo(lane, at + end)
@@ -968,7 +969,7 @@ abstract class ObstaclePassingMode(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
 		lead: Double = 0.0, fewestCarpets: Boolean = false, mobs: Boolean = true,
 	): Lane? {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		val step = laneStep(dir)
 		val here = from.subtract(linePoint).dotProduct(across)
 		val leans = sweep(dir) > 0.01
@@ -1052,7 +1053,7 @@ abstract class ObstaclePassingMode(
 	 */
 	context(safeContext: SafeContext)
 	private fun Vec3d.carpetsAhead(dir: Vec3d, speed: Double, lean: Int): Pair<Int, Double?> {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		// As far as the box swings out touching down, like the look-ahead on the lane later. Tilted, only to that side.
 		val sweep = with(safeContext) { sweep(dir, speed) }
 		val low = -halfWidth(dir) - if (lean > 0) 0.0 else sweep
@@ -1102,12 +1103,18 @@ abstract class ObstaclePassingMode(
 
 	/** The yaw along the line tilted [degrees] to [lean] across it. */
 	private fun leanYaw(dir: Vec3d, lean: Int, degrees: Double = LEAN_DEGREES): Double {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		val heading = dir.normalize().add(across.multiply(lean * Math.tan(Math.toRadians(degrees))))
 		return Math.toDegrees(atan2(-heading.x, heading.z))
 	}
 
 	private fun Lane.leanText() = if (lean == 0) "" else ", tilted ${if (lean > 0) "right" else "left"} past it"
+
+	/** Across the way [dir] goes, to the right, a block long. */
+	private fun across(dir: Vec3d) = Vec3d(-dir.z, 0.0, dir.x).normalize()
+
+	/** Where on the lane dodged to [linePoint] is across from. */
+	private fun dodgeLanePoint(linePoint: Vec3d, dir: Vec3d) = linePoint.add(across(dir).multiply(dodgeOffset))
 
 	/**
 	 * How far apart the lanes are across [dir]. A block on the way spans the width of two lanes diagonally, so they're a
@@ -1146,7 +1153,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.centerLine() {
 		val dir = lockYawToStep(Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw))
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		val step = laneStep(dir)
 		fun free(at: Vec3d) = world.isSpaceEmpty(Box(at.x - GLIDE_SIZE / 2, at.y + passerConfig.minObstacleHeight, at.z - GLIDE_SIZE / 2, at.x + GLIDE_SIZE / 2, at.y + GLIDE_SIZE, at.z + GLIDE_SIZE / 2))
 		fun free(along: Double, lane: Int) = free(startPos.add(dir.multiply(along)).add(across.multiply(lane * step)))
@@ -1180,7 +1187,7 @@ abstract class ObstaclePassingMode(
 
 	/** The yaw to [lane] beside the line, steering at where the drift across it takes you in a few ticks. */
 	private fun SafeContext.steerYaw(linePoint: Vec3d, lane: Vec3d, dir: Vec3d): Double {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		val drift = across.multiply(player.velocity.dotProduct(across) * STEER_DAMPING_TICKS)
 		val target = linePoint.add(lane).add(dir.multiply(DODGE_STEER_AHEAD)).subtract(drift)
 		return Math.toDegrees(atan2(-(target.x - player.x), target.z - player.z))
@@ -1230,7 +1237,7 @@ abstract class ObstaclePassingMode(
 			else -> {
 				val skip = if (dodgeCarpets) 0.0 else (dodgeEnd + DODGE_MARGIN - progress).coerceAtLeast(0.0)
 				// Along the lane itself like when it was picked, the target is short of it by the tilt.
-				val onLane = linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset))
+				val onLane = dodgeLanePoint(linePoint, dir)
 				// Tilted, the box swings out only that side. On the lane from where you are, drifting across.
 				val tilt = if (leaning(progress)) dodgeLean else 0
 				val from = if (tilt != 0 && onDodgeLane(linePoint, dir)) here else onLane
@@ -1306,13 +1313,13 @@ abstract class ObstaclePassingMode(
 		val leaning = leaning(progress)
 		val wasOnLane = onLane
 		onLane = dodge.let { it != null && it != Vec3d.ZERO } && !leaning &&
-			abs(offset.dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize()) - dodgeOffset) < ON_LANE
+			abs(offset.dotProduct(across(dir)) - dodgeOffset) < ON_LANE
 		if (onLane && !wasOnLane) ElytraFly.debug { "Over on the lane, bouncing on at %.2f".format(player.velocity.horizontalLength()) }
 		dodgeYaw = if (leaning) dodgeLeanYaw(linePoint, dir) else steerYaw(linePoint, dodge ?: Vec3d.ZERO, dir)
 		ElytraFly.debug {
 			val v = player.velocity
 			"  dodge: %.2f off the line, to ${(dodge ?: Vec3d.ZERO).describe(dir)}${if (leaning) ", tilted" else ""}, steering yaw %.1f, moving yaw %.1f at %.2f, sent yaw %.1f"
-				.format(offset.dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize()), dodgeYaw, Math.toDegrees(atan2(-v.x, v.z)), v.horizontalLength(), RotationManager.activeRotation.yaw)
+				.format(offset.dotProduct(across(dir)), dodgeYaw, Math.toDegrees(atan2(-v.x, v.z)), v.horizontalLength(), RotationManager.activeRotation.yaw)
 		}
 		return true
 	}
@@ -1356,7 +1363,7 @@ abstract class ObstaclePassingMode(
 		scanTicks = 0
 		val progress = progress(player.pos)
 		// Only the lane you're on or dodging to, beside it it may look shorter, e.g. what's dodged stands in it on the line.
-		val lane = if (dodge.let { it != null && it != Vec3d.ZERO }) linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset)) else linePoint
+		val lane = if (dodge.let { it != null && it != Vec3d.ZERO }) dodgeLanePoint(linePoint, dir) else linePoint
 		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it.
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight,
@@ -1455,6 +1462,34 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * No lane past the obstacle [distance] ahead at bounce height and nothing to glide over on the line: an opening in it
+	 * beside the line, e.g. a wall with a hole high up on one side. On that lane the obstacle is the first thing, it's
+	 * steered over to before it, and a glide fits through it there, at the opening's height. Whether it's on its way.
+	 */
+	private fun SafeContext.throughOpening(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String): Boolean {
+		if (distance < MIN_DODGE_DISTANCE) return false
+		val across = across(dir)
+		// Like [freeLane], a quarter lane at a time, the opening may be narrower than a lane.
+		val step = laneStep(dir) / 4
+		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val here = from.subtract(linePoint).dotProduct(across)
+		val (offset, over) = (-sides..sides).sortedBy { abs(it) }.asSequence().mapNotNull { side ->
+			val offset = side * step
+			val lanePoint = linePoint.add(across.multiply(offset))
+			val wall = lanePoint.obstacleHit(dir, distance + DODGE_MARGIN, mobs = false)?.distance ?: return@mapNotNull null
+			if (wall < distance - 1) return@mapNotNull null
+			val reached = steerPath(here, dir, offset, 0, wall, wall).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
+			if (reached == null || reached > wall - 1) return@mapNotNull null
+			planHop(lanePoint, dir, wall)?.let { offset to it }
+		}.firstOrNull() ?: return false
+		ElytraFly.debug { "Obstacle %.1f ahead ($block), no free lane, through the opening in it %+.2f across, gliding at y %.2f".format(distance, offset, over.targetY) }
+		val lane = across.multiply(offset)
+		dodgeTo(Lane(lane, 0, offset), over.end)
+		hop = over.with(lane = lane)
+		return true
+	}
+
+	/**
 	 * [over], a glide over a block, with a hole starting right after it, too close to bounce in between: both glided over
 	 * as one, as high as over a hole from the start, not low over the block and pulling up over the hole after, and over
 	 * the blocks in it. Null when there's none or that doesn't get over it.
@@ -1497,7 +1532,7 @@ abstract class ObstaclePassingMode(
 		if (hop.lane != current || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole || passTicks % RELOOK_TICKS != 0) return null
 		val onLane = current != Vec3d.ZERO
 		val here = Vec3d(player.x, linePoint.y, player.z)
-		val lanePoint = if (onLane) linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset)) else linePoint
+		val lanePoint = if (onLane) dodgeLanePoint(linePoint, dir) else linePoint
 		val reach = passerConfig.dodgeLookAhead.toDouble()
 		// What's in a hole counts, over a block from where the glide over it ends. On a lane what's dodged beside it doesn't,
 		// like the dodge looks at it. Things to glide over on the way are left to that, the first one that can't be is what
@@ -1606,7 +1641,7 @@ abstract class ObstaclePassingMode(
 	 * or they're far enough after it to steer past from down there.
 	 */
 	private fun SafeContext.laneAfterCarpets(linePoint: Vec3d, dir: Vec3d, edge: Double): Pair<Lane, Double>? {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		val offset = across.multiply(Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(across))
 		val edgeLine = linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0)
 		val next = edgeLine.obstacleHit(dir, passerConfig.dodgeLookAhead.toDouble(), carpets = true) ?: return null
@@ -1669,7 +1704,7 @@ abstract class ObstaclePassingMode(
 		// across only right at each spot looked at, a bit more covers in between them, as far as the rays look.
 		val between = HOP_SCAN_STEP / 2 * 2 * abs(dir.x * dir.z) / dir.horizontalLengthSquared()
 		val swing = sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (lean == 0) 1 else 2) + between
-		val shift = Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(lean * sweep(dir) / 2)
+		val shift = across(dir).multiply(lean * sweep(dir) / 2)
 		fun box(along: Double, feetY: Double, height: Double = GLIDE_SIZE) = linePoint.add(dir.multiply(along)).add(shift).let {
 			Box(it.x - GLIDE_SIZE / 2, feetY, it.z - GLIDE_SIZE / 2, it.x + GLIDE_SIZE / 2, feetY + height, it.z + GLIDE_SIZE / 2)
 		}
@@ -1802,7 +1837,7 @@ abstract class ObstaclePassingMode(
 	 * look each tick, so it lags behind.
 	 */
 	private fun SafeContext.steerPath(offset: Double, dir: Vec3d, target: Double, lean: Int, leanFrom: Double, distance: Double): List<SteerState> {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
+		val across = across(dir)
 		val velocity = player.velocity
 		var speed = velocity.horizontalLength()
 		var heading = atan2(velocity.dotProduct(across), velocity.dotProduct(dir))
@@ -2010,6 +2045,7 @@ abstract class ObstaclePassingMode(
 	private fun noLaneYet(at: Double, reason: String): Boolean {
 		if (noLaneAt?.let { abs(it - at) < 1.5 } != true) ElytraFly.debug { reason }
 		noLaneAt = at
+		noWayYet.values.removeIf { passTicks - it >= RELOOK_TICKS }
 		noWayYet[at.roundToLong()] = passTicks
 		return false
 	}
@@ -2043,7 +2079,7 @@ abstract class ObstaclePassingMode(
 			Vec3d(player.x, startPos.y, player.z).let { it.isLoaded && !it.boxHasFloor() }
 
 	private fun Vec3d.describe(dir: Vec3d): String {
-		val offset = dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize())
+		val offset = dotProduct(across(dir))
 		return if (abs(offset) < 0.01) "the line" else "%.2f to the ${if (offset > 0) "right" else "left"}".format(abs(offset))
 	}
 
@@ -2072,7 +2108,7 @@ abstract class ObstaclePassingMode(
 	 */
 	context(safeContext: SafeContext)
 	private fun Vec3d.obstacleHits(direction: Vec3d, maxDistance: Double, extra: Double = 0.0, lean: Int = 0, speed: Double? = null, carpets: Boolean = false, mobs: Boolean = true): Pair<Obstacle?, Obstacle?> {
-		val across = Vec3d(-direction.z, 0.0, direction.x).normalize()
+		val across = across(direction)
 		val halfWidth = halfWidth(direction) + extra
 		val sweep = with(safeContext) { speed?.let { sweep(direction, it) } ?: sweep(direction) }
 		val low = -halfWidth - if (lean > 0) 0.0 else sweep
@@ -2168,7 +2204,7 @@ abstract class ObstaclePassingMode(
 
 	/** Whether you're over on the lane dodged to, or past it the way the heading tilts. */
 	private fun SafeContext.onDodgeLane(linePoint: Vec3d, dir: Vec3d) =
-		(Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize()) - dodgeOffset) * dodgeLean >= 0
+		(Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(across(dir)) - dodgeOffset) * dodgeLean >= 0
 
 	/** Whether the heading is tilted past what's dodged at [progress] along the line, from shortly before it on. */
 	private fun SafeContext.leaning(progress: Double) =
@@ -2318,7 +2354,7 @@ abstract class ObstaclePassingMode(
 	 */
 	context(safeContext: SafeContext)
 	private fun Vec3d.alongWidth(direction: Vec3d, height: Double, distance: Double): Boolean {
-		val edge = Vec3d(-direction.z, 0.0, direction.x).normalize().multiply(halfWidth(direction))
+		val edge = across(direction).multiply(halfWidth(direction))
 		val start = add(0.0, height, 0.0)
 		return start.rayCastObstructed(direction, distance) || start.add(edge).rayCastObstructed(direction, distance) ||
 			start.subtract(edge).rayCastObstructed(direction, distance)
