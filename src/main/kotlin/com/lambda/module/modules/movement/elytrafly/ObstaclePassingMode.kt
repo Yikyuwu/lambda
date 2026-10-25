@@ -1922,7 +1922,9 @@ abstract class ObstaclePassingMode(
 	 * handled, null when it's not got over that way, as before.
 	 */
 	private fun SafeContext.layerHole(linePoint: Vec3d, dir: Vec3d, edge: Double): Boolean? {
-		val hole = holeAfterEdge(linePoint, dir, edge) ?: return null
+		val hole = holeAfterEdge(linePoint, dir, edge) ?: return null.also {
+			ElytraFly.debug { "The blocks end %.1f ahead, no hole right after it".format(edge) }
+		}
 		// The side of the top it's not over to yet only kept dodging over to it, see [touchSide].
 		val side = touchSide
 		val holeStart = touchHoleStart
@@ -1931,7 +1933,10 @@ abstract class ObstaclePassingMode(
 			touchHoleStart = holeStart
 		}
 		val over = holeHop(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir, hole).first
-		if (!canGetOver(over, progress(linePoint))) return null.also { keep() }
+		if (!canGetOver(over, progress(linePoint))) return null.also {
+			ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, not gotten over from bouncing on ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"})".format(edge, hole.endInclusive - hole.start) }
+			keep()
+		}
 		val across = across(dir)
 		val lane = over.lane.dotProduct(across)
 		val touch = over.touch
