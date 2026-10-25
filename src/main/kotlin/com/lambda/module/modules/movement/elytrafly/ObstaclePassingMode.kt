@@ -196,7 +196,7 @@ abstract class ObstaclePassingMode(
 		/** How far above what blocks in a hole need a glide over it is held, when they need more than it'd rather go, see [clearInside]. */
 		private const val RAISED_HOLD = 0.5
 		/** How far above a top to touch down on the feet are held until over it, see [Touch]. */
-		private const val TOUCH_ABOVE = 0.2
+		private const val TOUCH_ABOVE = 0.3
 		/** How far below a top to touch down on the hold aims once over it, down onto it. */
 		private const val TOUCH_DIVE = 1.0
 		/** How far apart along and across the way blocks to touch down on are looked for, less than a block. */
@@ -505,6 +505,8 @@ abstract class ObstaclePassingMode(
 	private var hopTooSlow = false
 	/** Where [canHop] found the glide falls short, for the debug log. */
 	private var hopMiss = ""
+	/** A top [touchTops] left out, the way over to it blocked, for the debug log. */
+	private var touchBlocked: BlockPos? = null
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
 	private var touchMiss = ""
 	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
@@ -594,11 +596,12 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
-		// Diving onto the top only once the box is over it next tick, steered over to it or not: along the line alone it
-		// may still be beside it, diving there runs into its side.
+		// Diving onto the top once the box is over it in two ticks, steered over to it or not: along the line alone it may
+		// still be beside it, diving there runs into its side. The first tick it sinks only a bit, still above it at its
+		// edge, crossing a corner of it fast the box is over it only a tick.
 		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
-			val next = player.pos.add(player.velocity.x, 0.0, player.velocity.z)
-			abs(next.x - (touch.block.x + 0.5)) < 0.5 + GLIDE_SIZE / 2 && abs(next.z - (touch.block.z + 0.5)) < 0.5 + GLIDE_SIZE / 2
+			val ahead = player.pos.add(player.velocity.x * 2, 0.0, player.velocity.z * 2)
+			abs(ahead.x - (touch.block.x + 0.5)) < 0.5 + GLIDE_SIZE / 2 && abs(ahead.z - (touch.block.z + 0.5)) < 0.5 + GLIDE_SIZE / 2
 		} == true
 		if (dive && !hop.overTop) {
 			hop.overTop = true
@@ -1812,7 +1815,7 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
 		val tops = touchTops(hop, line, dir)
-		if (tops.isEmpty()) return hop.also { touchMiss = "no top to touch down on" }
+		if (tops.isEmpty()) return hop.also { touchMiss = touchBlocked?.let { "the way over to the top at ${it.toShortString()} is blocked" } ?: "no top to touch down on" }
 		val progress = progress(player.pos)
 		tops.take(MAX_TOUCH_TRIES).forEach { touch ->
 			// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
@@ -1841,6 +1844,7 @@ abstract class ObstaclePassingMode(
 		val progress = progress(player.pos)
 		val seen = HashSet<Long>()
 		val tops = mutableListOf<Pair<Double, Touch>>()
+		touchBlocked = null
 		var along = hop.start
 		while (along <= hop.end) {
 			var offset = -passerConfig.maxDodge.toDouble()
@@ -1867,6 +1871,7 @@ abstract class ObstaclePassingMode(
 							spot.x + GLIDE_SIZE / 2, top + TOUCH_ABOVE + GLIDE_SIZE, spot.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
 					}
 					if (clear) tops += abs(lane.dotProduct(across) - here) to Touch(at - reach..at + reach, top, lane, pos.toImmutable())
+					else if (touchBlocked == null) touchBlocked = pos.toImmutable()
 				}
 				offset += TOUCH_SCAN_STEP
 			}
@@ -1928,7 +1933,12 @@ abstract class ObstaclePassingMode(
 		val lane = freeLane(here, linePoint, dir, distance, current)?.takeIf { it.target != current } ?: return null
 		ElytraFly.debug { "Gliding over it, $what %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(distance) }
 		dodgeTo(lane, progress + distance)
-		return hop.with(lane = lane.target).also { this@ObstaclePassingMode.hop = it }
+		// A top to touch down on the way picked again from that lane, over to the old one it might not get back in time.
+		val steered = hop.with(lane = lane.target)
+		val touching = if (hop.touch == null || hop.touched) steered else withTouch(steered.with(touch = null), linePoint.add(lane.target), dir).also { picked ->
+			ElytraFly.debug { picked.touch?.let { "Touching down on ${it.block.toShortString()} on the way instead" } ?: "Not touching down on the way to it ($touchMiss)" }
+		}
+		return touching.also { this@ObstaclePassingMode.hop = it }
 	}
 
 	/**
