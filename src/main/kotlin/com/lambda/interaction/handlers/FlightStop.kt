@@ -58,6 +58,8 @@ object FlightStop : Loadable {
     private const val SPOT_RANGE = 3
     private const val WALK_AHEAD = 16
     private const val MAX_STUCK_WALKS = 5
+    /** How far piglins that see a shulker or ender chest opened get angry, like the game does. */
+    private const val PIGLIN_WATCH_RANGE = 16.0
 
     private var owner: Any? = null
     /** Why it last couldn't land, written to the log once each time it changes. */
@@ -144,12 +146,14 @@ object FlightStop : Loadable {
     }
 
     /**
-     * Another player, a warden or a wither in render distance, or a hostile mob within [mobRadius] that would attack or
-     * take a drop. Null for none.
+     * Another player, a warden or a wither in render distance, a calm piglin that sees you and gets angry once the
+     * container opens, or a hostile mob within [mobRadius] that would attack or take a drop. Null for none.
      */
     fun SafeContext.danger(mobRadius: Int): String? {
         world.players.firstOrNull { it !== player }?.let { return "${it.name.string} in render distance" }
         world.entities.firstOrNull { (it is WardenEntity || it is WitherEntity) && it.isAlive }?.let { return "${it.name.string} in render distance" }
+        world.getEntitiesByClass(PiglinEntity::class.java, player.boundingBox.expand(PIGLIN_WATCH_RANGE)) { it.isAlive && it.canSee(player) }
+            .firstOrNull()?.let { return "${it.name.string} sees you, opening a container angers it" }
         val mob = world.getEntitiesByClass(MobEntity::class.java, player.boundingBox.expand(mobRadius.toDouble())) { it.isAlive && it.isHostile }
             .minByOrNull { it.squaredDistanceTo(player) } ?: return null
         return "${mob.name.string} within $mobRadius blocks"
