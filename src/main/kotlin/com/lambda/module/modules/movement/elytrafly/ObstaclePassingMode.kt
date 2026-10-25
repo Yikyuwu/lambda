@@ -2022,7 +2022,8 @@ abstract class ObstaclePassingMode(
 		// The way over to it free, the box swinging out to either side.
 		fun reachable(plan: Plan): Boolean {
 			if (plan.touch.middle - progress < speed * (TOUCH_DIVE_TICKS + 1)) return false
-			val by = min(plan.touch.switchAt, plan.touch.range.start)
+			// Steering in from [Touch.switchAt] on, by then, else by the top.
+			val by = if (plan.touch.switchAt > Double.NEGATIVE_INFINITY) min(plan.touch.switchAt, plan.touch.range.start) else plan.touch.range.start
 			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
 			val held = plan.touch.y + TOUCH_ABOVE
 			val path = steerOffsets(off, plan.lane, speed, by - progress)
