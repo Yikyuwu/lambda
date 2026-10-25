@@ -217,7 +217,11 @@ abstract class ObstaclePassingMode(
 		 * edge the same tick may carry you on past it.
 		 */
 		private const val TOUCH_HELD_AROUND = 2.0
-		/** How far before a top to touch down on beside you it's steered over to it, see [touchTops]. */
+		/**
+		 * How many ticks, and at least how far, before a top to touch down on beside you it's steered over to it, see
+		 * [touchTops]. The flight turns only a bit each tick, getting across takes a while.
+		 */
+		private const val TOUCH_APPROACH_TICKS = 7
 		private const val TOUCH_APPROACH = 5.0
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
 		private const val TOUCH_GRACE_TICKS = 5
@@ -404,7 +408,7 @@ abstract class ObstaclePassingMode(
 			dive: Boolean = diving(along, speed, touched),
 		) = when {
 			// Just above the top to touch down on until over it, then down onto it.
-			touch != null && !touched -> if (dive) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
+			touch != null && !touched && along <= touch.range.endInclusive -> if (dive) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
 			hole && topped -> min(targetY, max(y, needFrom(along) + HOP_MARGIN))
 			else -> targetY
 		}
@@ -593,7 +597,8 @@ abstract class ObstaclePassingMode(
 		// Diving onto the top only once the box is over it next tick, steered over to it or not: along the line alone it
 		// may still be beside it, diving there runs into its side.
 		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
-			player.pos.add(player.velocity.x, 0.0, player.velocity.z).let { Vec3d(it.x, touch.y, it.z) }.boxHasFloor()
+			val next = player.pos.add(player.velocity.x, 0.0, player.velocity.z)
+			abs(next.x - (touch.block.x + 0.5)) < 0.5 + GLIDE_SIZE / 2 && abs(next.z - (touch.block.z + 0.5)) < 0.5 + GLIDE_SIZE / 2
 		} == true
 		if (dive && !hop.overTop) {
 			hop.overTop = true
@@ -1822,7 +1827,7 @@ abstract class ObstaclePassingMode(
 	/**
 	 * The blocks along [hop] to touch down on, through their middle: one or two above the floor of [line], no farther
 	 * across the way than a dodge goes, with [TOUCH_ROOM] above them and room for the box swinging out on the way there
-	 * for the last [TOUCH_APPROACH], steered over to it there. Closest to [line] across the way first.
+	 * from where you are across the way over to it, steered there from [touchApproach] before it. Closest to [line] across the way first.
 	 */
 	private fun SafeContext.touchTops(hop: Hop, line: Vec3d, dir: Vec3d): List<Touch> {
 		val across = across(dir)
@@ -1832,6 +1837,7 @@ abstract class ObstaclePassingMode(
 		// From its middle to where the box is over it no more, along the line.
 		val reach = (0.5 + GLIDE_SIZE / 2) * (abs(forward.x) + abs(forward.z))
 		val swing = sweep(dir)
+		val approach = touchApproach()
 		val progress = progress(player.pos)
 		val seen = HashSet<Long>()
 		val tops = mutableListOf<Pair<Double, Touch>>()
@@ -1851,9 +1857,12 @@ abstract class ObstaclePassingMode(
 						at.x + GLIDE_SIZE / 2, y + tall, at.z + GLIDE_SIZE / 2))
 					if (!room(middle, top, TOUCH_ROOM)) continue
 					val at = middle.subtract(startPos).dotProduct(forward)
-					val laneLine = startPos.add(lane).add(0.0, top - startPos.y, 0.0)
-					val clear = generateSequence(max(progress, at - reach - TOUCH_APPROACH)) { it + HOP_SCAN_STEP }.takeWhile { it < at - reach }.all {
-						val spot = laneLine.add(forward.multiply(it))
+					val to = lane.dotProduct(across)
+					// From where you are across the way over to its lane, the way steered there.
+					val from = at - reach - approach
+					val clear = generateSequence(max(progress, from)) { it + HOP_SCAN_STEP }.takeWhile { it < at - reach }.all {
+						val sideways = here + (to - here) * ((it - from) / approach).coerceIn(0.0, 1.0)
+						val spot = startPos.add(forward.multiply(it)).add(across.multiply(sideways))
 						spaceEmpty(Box(spot.x - GLIDE_SIZE / 2, top + TOUCH_ABOVE, spot.z - GLIDE_SIZE / 2,
 							spot.x + GLIDE_SIZE / 2, top + TOUCH_ABOVE + GLIDE_SIZE, spot.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
 					}
@@ -1865,6 +1874,9 @@ abstract class ObstaclePassingMode(
 		}
 		return tops.sortedBy { it.first }.map { it.second }
 	}
+
+	/** How far before a top to touch down on beside you it's steered over to it, see [TOUCH_APPROACH_TICKS]. */
+	private fun SafeContext.touchApproach() = max(TOUCH_APPROACH, player.velocity.horizontalLength() * TOUCH_APPROACH_TICKS)
 
 	/**
 	 * The top being touched down on while over it, until the jump off it, else null: bounced off like the floor, the
@@ -2755,7 +2767,8 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
 		// Over to the lane with the top to touch down on from shortly before it until bounced off it, see [touchTops].
-		hop.touch != null && !hop.touched && progress >= hop.touch.range.start - TOUCH_APPROACH -> steerYaw(linePoint, hop.touch.lane, dir)
+		hop.touch != null && !hop.touched && progress >= hop.touch.range.start - touchApproach() && progress <= hop.touch.range.endInclusive ->
+			steerYaw(linePoint, hop.touch.lane, dir)
 		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
 		else -> steerYaw(linePoint, hop.lane, dir)
 	}
