@@ -370,6 +370,8 @@ abstract class ObstaclePassingMode(
 		var topped = false
 		/** Rising while held, see [topped]. */
 		var rose = false
+		/** Over [touch] once, logged once. */
+		var overTop = false
 		/** The tick it touched down on [touch], -1 before. */
 		var touchedAt = -1
 		val touched get() = touchedAt >= 0
@@ -553,6 +555,10 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
+		hop.touch?.takeIf { !hop.touched && progress(player.pos) in it.range && !hop.overTop }?.let {
+			hop.overTop = true
+			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, diving onto it at y %.2f".format(player.y, player.velocity.y, it.y) }
+		}
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
 		// Switched to gliding over it higher just now, see [holdingFor].
@@ -1403,6 +1409,9 @@ abstract class ObstaclePassingMode(
 							return true
 						}
 					}
+					// Still passing what's dodged, something farther on the lane is looked at once past it. Over to another
+					// lane now would cross the line right where what's dodged is.
+					if (!onLine && progress < dodgeEnd && progress + distance > dodgeEnd + DODGE_STEER_AHEAD) return@let
 					val next = when {
 						distance < MIN_DODGE_DISTANCE -> null
 						// Over to another only with fewer of them on it.
@@ -1582,10 +1591,16 @@ abstract class ObstaclePassingMode(
 		}
 		// Farther, or in it: glided over from the line, bouncing on up to it faster than on a lane, and steered over to a
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
-		val nextLane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
+		// In it, glided over or touched down on with the hole, a lane only for one that can't be, see below.
+		val nextLane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: if (it < end) null else return false }
 		// High enough for the blocks in it that can be glided over. Dodging, on the lane flown along, not where you are
-		// steering over to it, from there what's dodged looks in the way.
-		val glideLine = if (dodging && dodge != null) dodgeLanePoint(linePoint, dir) else from
+		// steering over to it, from there what's dodged looks in the way. Steering over to one past what's after it, on
+		// that lane, e.g. touching down on a block on the way over there.
+		val glideLine = when {
+			dodging && dodge != null -> dodgeLanePoint(linePoint, dir)
+			nextLane != null -> linePoint.add(nextLane.target)
+			else -> from
+		}
 		val (hole, blocked) = holeHop(glideLine, dir, at + start..at + end)
 		// One in it that can't be, e.g. on the lane dodged to, only with a lane past it to steer over to meanwhile. Else
 		// it's in the way like a wall in the hole, waited for or landed before while there's room to. Right at its edge
@@ -1598,7 +1613,7 @@ abstract class ObstaclePassingMode(
 				return if (start > brakeDistance() + DODGE_STEER_AHEAD) noLaneYet(at + start, reason) else brake(at + start, reason)
 			}
 		val lane = nextLane ?: pastBlocked
-		val past = next ?: blocked
+		val past = if (nextLane != null) next else blocked
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
