@@ -211,10 +211,11 @@ abstract class ObstaclePassingMode(
 		/** How long after the last tick diving onto a top or touching down on it the landing is still held back, see [touchFloor]. */
 		private const val TOUCH_DIVE_HOLD_TICKS = 2
 		/**
-		 * How much of the box, in square blocks, has to be over the top to come down on it: a third. On its edge it slides
-		 * off in the same tick and gets set back.
+		 * How much of the box, in square blocks, has to be over the top to come down on it: a sixth, not a corner sliver.
+		 * Passing beside its middle, e.g. on a lane past a pillar at a hole's start, no more of it may come over it, it's
+		 * come down on in the middle of the way across it instead, see the dive in [passObstacle].
 		 */
-		private const val TOUCH_MIN_OVERLAP = GLIDE_SIZE * GLIDE_SIZE / 3
+		private const val TOUCH_MIN_OVERLAP = GLIDE_SIZE * GLIDE_SIZE / 6
 		/**
 		 * How far the box has to reach over the top each way to dive onto it, a sliver of its corner is enough to come
 		 * down on, see [topUnderSoon].
@@ -649,9 +650,10 @@ abstract class ObstaclePassingMode(
 		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
 			hop.diving(progress(player.pos), player.velocity.horizontalLength() * TOUCH_SKIM_TICKS / TOUCH_DIVE_TICKS) && topUnderSoon(touch.y)
 		} == true
-		// Down onto it with the box well over it, as near its middle as it gets: on the tick it's over it the most, unless
-		// the next is more. On its edge it'd slide off it in the same tick, a move goes down first, then across. Once down,
-		// it doesn't stop halfway.
+		// Down onto it as near its middle as it gets: on the tick the box is over it the most, unless the next is more. Off
+		// to the side of its middle that's halfway across it along the way, as far from where it came onto it as from where
+		// it'd leave it. On its edge it'd slide off it in the same tick, a move goes down first, then across. Once down, it
+		// doesn't stop halfway.
 		val overTop = hop.touch?.let { touch ->
 			val now = topOverlap(player.pos, touch.y)
 			now >= TOUCH_MIN_OVERLAP && (hop.overTop || now >= topOverlap(player.pos.add(player.velocity.x, 0.0, player.velocity.z), touch.y))
