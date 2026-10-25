@@ -204,6 +204,13 @@ abstract class ObstaclePassingMode(
 		/** How fast it may sink holding the height, smoothly, and down onto a top to touch down on, see [holdPitch]. */
 		private const val HOLD_SINK = 0.1
 		private const val TOUCH_SINK = 0.6
+		/** How high above the top to touch down on it skims, diving, until the box is over it, see [Hop.holdY]. */
+		private const val TOUCH_SKIM = 0.02
+		/**
+		 * How far the box has to reach over the top each way to dive onto it, a sliver of its corner is enough to come
+		 * down on, see [topUnderSoon].
+		 */
+		private const val TOUCH_OVERLAP = 0.05
 		/**
 		 * Room above a top to touch down on and bounce off. Held back with the jump, the server doesn't see the landing
 		 * and you glide on to it, low like in a tunnel two high. Should it end the glide after all, crouching fits.
@@ -417,10 +424,11 @@ abstract class ObstaclePassingMode(
 		 */
 		fun holdY(
 			y: Double, along: Double, speed: Double, topped: Boolean = this.topped, touched: Boolean = this.touched,
-			dive: Boolean = diving(along, speed, touched),
+			dive: Boolean = diving(along, speed, touched), overTop: Boolean = true,
 		) = when {
-			// Just above the top to touch down on until a tick before its middle, then down onto it.
-			touch != null && !touched -> if (dive) touch.y - TOUCH_DIVE else touch.y + TOUCH_ABOVE
+			// Just above the top to touch down on until a tick before its middle, then down onto it. Below its height only
+			// with the box over it already: a move goes down first, then across, beside it that runs into its side.
+			touch != null && !touched -> if (!dive) touch.y + TOUCH_ABOVE else if (overTop) touch.y - TOUCH_DIVE else touch.y + TOUCH_SKIM
 			hole && topped -> min(targetY, max(y, needFrom(along) + HOP_MARGIN))
 			else -> targetY
 		}
@@ -636,21 +644,24 @@ abstract class ObstaclePassingMode(
 		if (climb > 0) held.rose = true
 		val progress = progress(player.pos)
 		val speed = player.velocity.horizontalLength()
-		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed, dive = dive), player.finalGravity, held.sinkAt(progress, speed, dive = dive))
+		val overTop = hop.touch?.let { topUnder(player.pos, it.y, 0.0) } ?: true
+		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed, dive = dive, overTop = overTop), player.finalGravity, held.sinkAt(progress, speed, dive = dive && overTop))
 	}
 
 	/**
 	 * Whether the box is over a top at [y], or comes over it the next tick or the one after: a block there ending at [y]
-	 * with air above it, not a block reaching higher. The middle part of the box, a sliver of a corner isn't enough to
-	 * come down on. Over it now counts too, the dive takes a couple of ticks and mustn't stop halfway.
+	 * with air above it, not a block reaching higher. Over it now counts too, the dive takes a couple of ticks and mustn't
+	 * stop halfway. Below its height it only goes once over it, see [Hop.holdY].
 	 */
 	private fun SafeContext.topUnderSoon(y: Double) = (0..2).any { ticks ->
-		val at = player.pos.add(player.velocity.x * ticks, 0.0, player.velocity.z * ticks)
-		listOf(-1, 1).any { dx -> listOf(-1, 1).any { dz ->
-			val x = at.x + dx * GLIDE_SIZE / 4
-			val z = at.z + dz * GLIDE_SIZE / 4
-			shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && shapeAt(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
-		} }
+		topUnder(player.pos.add(player.velocity.x * ticks, 0.0, player.velocity.z * ticks), y, TOUCH_OVERLAP)
+	}
+
+	/** Whether the box at [at] is over a top at [y] by [overlap] at least each way, see [topUnderSoon]. */
+	private fun SafeContext.topUnder(at: Vec3d, y: Double, overlap: Double): Boolean {
+		val half = GLIDE_SIZE / 2 - overlap
+		return BlockPos.iterate(BlockPos.ofFloored(at.x - half, y - 0.5, at.z - half), BlockPos.ofFloored(at.x + half - 1e-6, y - 0.5, at.z + half - 1e-6))
+			.any { topAt(it.x + 0.5, it.z + 0.5, y) }
 	}
 
 	/** How long obstacle passing took this tick so far. */
