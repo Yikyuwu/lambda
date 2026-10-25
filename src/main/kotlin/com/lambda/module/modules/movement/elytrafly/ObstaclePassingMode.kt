@@ -837,20 +837,20 @@ abstract class ObstaclePassingMode(
 		if (mob) return passCube(from, linePoint, dir, distance, at, block)
 		hopRejection = "it got too close to get over before"
 		hopTooSlow = false
-		if (skipHopAt?.let { abs(it - at) < 1.5 } != true && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
+		if (!skipHopAt.near(at) && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
 			if (dodgePastNext(from, linePoint, dir, distance, block, it)) return true
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, gliding up onto it at y %.2f".format(distance, it.feetY) }
 			hop = it
 			return true
 		}
-		if (skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { planned ->
+		if (!skipHopAt.near(at)) planHop(linePoint, dir, distance)?.let { planned ->
 			val over = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: planned
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it${if (over.hole) " and the hole after it" else ""} at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = over
 			return true
 		}
-		if (distance < MIN_DODGE_DISTANCE || skipAt?.let { abs(it - at) < 1.5 } == true) return false
+		if (distance < MIN_DODGE_DISTANCE || skipAt.near(at)) return false
 		// Slow still, e.g. right after taking off. Faster a few bounces on it may get over after all, a lane is
 		// left for close enough to still steer over to it.
 		if (hopTooSlow && distance > brakeDistance() + HOP_RETRY_MARGIN)
@@ -884,7 +884,7 @@ abstract class ObstaclePassingMode(
 	 * bumping into it in the air hurts a little at worst.
 	 */
 	private fun SafeContext.passCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
-		if (skipHopAt?.let { abs(it - at) < 1.5 } == true) return false
+		if (skipHopAt.near(at)) return false
 		hopTooSlow = false
 		fun plan(anyway: Boolean = false) = planHop(linePoint, dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH), anyway = anyway)
 		if (pastMobAndNext(from, linePoint, dir, distance, block)) return true
@@ -978,7 +978,7 @@ abstract class ObstaclePassingMode(
 		if (!carpetsCount) return false
 		val at = progress(from) + carpet.distance
 		// No gaps and nothing on top for a while, bounced on like a layer of blocks.
-		if (skipHopAt?.let { abs(it - at) < 1.5 } != true && isCarpetLayer(from, dir, carpet.distance))
+		if (!skipHopAt.near(at) && isCarpetLayer(from, dir, carpet.distance))
 			planHop(linePoint, dir, carpet.distance, true, carpets = true)?.let { up ->
 				ElytraFly.debug { "Low ${carpet.what} %.1f ahead, a layer of them to bounce on, gliding up onto it at y %.2f".format(carpet.distance, up.feetY) }
 				// More of them right after its end, the lane past them picked now. Up onto it and on it there's room to
@@ -1318,7 +1318,7 @@ abstract class ObstaclePassingMode(
 					val block = hit.what
 					// Only carpets on the lane, glided over right there instead of landing.
 					val carpetsOnly = dodgeCarpets && (other == null || other.distance > hit.distance + 1) &&
-						skipHopAt?.let { abs(it - (progress + distance)) < 1.5 } != true
+						!skipHopAt.near(progress + distance)
 					// A layer of them on the lane, bounced onto from there like from the line.
 					if (carpetsOnly && !onLine && distance >= MIN_DODGE_DISTANCE && isCarpetLayer(onLane, dir, distance))
 						planHop(onLane, dir, distance, true, carpets = true, lean = tilt)?.let { up ->
@@ -1329,8 +1329,8 @@ abstract class ObstaclePassingMode(
 						}
 					// A layer of blocks on the lane, bounced onto from there like from the line, e.g. right after a hole glided
 					// over high. Close too, the glide sees whether it gets up there. Not with a hole before it, gliding over that.
-					if (!dodgeCarpets && !onLine && skipHopAt?.let { abs(it - (progress + distance)) < 1.5 } != true &&
-						holesAhead(onLane, dir).none { it.start < progress + distance && it.endInclusive > progress } && isStepUp(onLane, dir, distance))
+					if (!dodgeCarpets && !onLine && !skipHopAt.near(progress + distance) &&
+						!holeBefore(onLane, dir, progress, distance) && isStepUp(onLane, dir, distance))
 						planHop(from, dir, distance, true, lean = tilt)?.let { up ->
 							ElytraFly.debug { "Obstacle %.1f ahead on the lane ($block), a layer to bounce on, gliding up onto it at y %.2f".format(distance, up.feetY) }
 							hop = up.with(lane = lane)
@@ -1371,7 +1371,7 @@ abstract class ObstaclePassingMode(
 						// No other lane, something low enough to glide over on this one, glided over right there like on the line.
 						// In a hole the glide over the hole goes over it too, see [glideOverHole].
 						!carpetsOnly && !onLine && distance >= MIN_DODGE_DISTANCE &&
-							holesAhead(onLane, dir).none { it.start < progress + distance && it.endInclusive > progress } &&
+							!holeBefore(onLane, dir, progress, distance) &&
 							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }?.let { glideOver(it.with(lane = lane)) } != null -> {}
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
@@ -1394,6 +1394,10 @@ abstract class ObstaclePassingMode(
 		}
 		return true
 	}
+
+	/** Whether a hole on [lane] starts before what's [distance] ahead, at [progress] along the line, and isn't behind you yet. */
+	private fun SafeContext.holeBefore(lane: Vec3d, dir: Vec3d, progress: Double, distance: Double) =
+		holesAhead(lane, dir).any { it.start < progress + distance && it.endInclusive > progress }
 
 	/**
 	 * The holes in the floor ahead of [lane] as far as [PasserSettings.dodgeLookAhead], from where to where along the line,
@@ -1485,7 +1489,7 @@ abstract class ObstaclePassingMode(
 		if (within != null && start > within) return false
 		val at = progress(from)
 		if (lookedLately(at + start, start)) return false
-		if (skipHopAt?.let { abs(it - (at + start)) < 1.5 } == true) return false
+		if (skipHopAt.near(at + start)) return false
 		// Long ones too, holding the height as long as it gets over them. Longer, e.g. a step down to a lower floor, it's
 		// left as before.
 		fun floorFrom(at: Double) = generateSequence(at) { it + HOP_SCAN_STEP }.takeWhile { it <= start + MAX_HOLE_LENGTH }
@@ -1525,7 +1529,7 @@ abstract class ObstaclePassingMode(
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
 		}
-		if (lane == null || next == null) {
+		if (lane == null) {
 			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it".format(start, end - start) }
 			hop = hole
 			return true
@@ -1697,7 +1701,7 @@ abstract class ObstaclePassingMode(
 			return false
 		}
 		val at = progress(linePoint) + edge
-		if (noGapAt?.let { abs(it - at) < 1.5 } == true || skipHopAt?.let { abs(it - at) < 1.5 } == true) return false
+		if (noGapAt.near(at) || skipHopAt.near(at)) return false
 		noGapAt = at
 		// Deeper than the floor you started on, that's for walking around.
 		if (!linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0).boxHasFloor()) return false
@@ -1778,6 +1782,9 @@ abstract class ObstaclePassingMode(
 			.all { up.add(dir.multiply(it)).boxHasFloor() } &&
 			up.obstacleDistance(dir, distance + CARPET_LAYER_MIN, carpets = true) == null
 	}
+
+	/** Whether this spot along the line, e.g. [skipHopAt], is about at [at], the same obstacle seen again. */
+	private fun Double?.near(at: Double) = this != null && abs(this - at) < 1.5
 
 	/**
 	 * Whether the obstacle [distance] ahead of [from] is a layer of blocks [STEP_HEIGHT] high to bounce on, with room
