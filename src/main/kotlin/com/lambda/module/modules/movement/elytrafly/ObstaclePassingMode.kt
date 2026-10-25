@@ -2024,9 +2024,17 @@ abstract class ObstaclePassingMode(
 			if (plan.touch.middle - progress < speed * (TOUCH_DIVE_TICKS + 1)) return false
 			val by = min(plan.touch.switchAt, plan.touch.range.start)
 			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
+			val held = plan.touch.y + TOUCH_ABOVE
 			val path = steerOffsets(off, plan.lane, speed, by - progress)
-			return abs(path.last().second - plan.lane) <= TOUCH_LANE_OFF &&
-				pathClear(progress, path.take(path.indexOfFirst { abs(it.second - plan.lane) <= TOUCH_LANE_OFF / 2 }.coerceAtLeast(1) + 1), by, plan.touch.y + TOUCH_ABOVE)
+			if (abs(path.last().second - plan.lane) <= TOUCH_LANE_OFF)
+				return pathClear(progress, path.take(path.indexOfFirst { abs(it.second - plan.lane) <= TOUCH_LANE_OFF / 2 }.coerceAtLeast(1) + 1), by, held)
+			// Not quite over on it by then, still steering over to it: with the box over the top all the same when it gets
+			// there, e.g. coming from the line over a hole, the middle part of the box like [lanes] needs.
+			if (plan.touch.switchAt > Double.NEGATIVE_INFINITY) return false
+			val toTop = steerOffsets(off, plan.lane, speed, plan.touch.middle - progress)
+			val there = point(plan.touch.middle, toTop.last().second)
+			return listOf(-1, 1).any { dx -> listOf(-1, 1).any { dz -> topAt(there.x + dx * GLIDE_SIZE / 4, there.z + dz * GLIDE_SIZE / 4, plan.touch.y) } } &&
+				pathClear(progress, toTop, plan.touch.middle, held)
 		}
 		val free = plans.size
 		plans.removeAll { plan -> !reachable(plan).also { if (!it) tried += "${plan.text} (${plan.covered}/25) can't be steered over to in time" } }
