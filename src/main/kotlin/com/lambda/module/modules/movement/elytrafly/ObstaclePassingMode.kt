@@ -358,8 +358,10 @@ abstract class ObstaclePassingMode(
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
 		/** Changed so, how far it is glided over it kept, e.g. steering over to a lane mid-glide. */
-		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight, touch: Touch? = this.touch) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim, raised, touch).also {
+		fun with(
+			down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight, touch: Touch? = this.touch,
+			topY: Double = this.topY,
+		) = Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim, raised, touch).also {
 				it.waiting = waiting
 				it.held = held
 				it.heldCheckedAt = heldCheckedAt
@@ -1776,7 +1778,8 @@ abstract class ObstaclePassingMode(
 		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), max(line.y + MAX_BOUNCE_RISE, player.y)))
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
 			low = true, hole = true, aim = aim, raised = raised)
-		return (if (raised.isEmpty()) over.also { touchMiss = "" } else withTouch(over, line, dir)) to blocked
+		// Also with none in it on this lane, beside it there may be one.
+		return withTouch(over, line, dir) to blocked
 	}
 
 	/**
@@ -1786,7 +1789,8 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
 		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
-		val touching = hop.with(touch = touch)
+		// Up to just above the top on the way to it, above what the glide would rather keep under.
+		val touching = hop.with(touch = touch, topY = min(maxHopY(), max(hop.topY, touch.y + TOUCH_ABOVE + HOP_MARGIN)))
 		if (canGetOver(touching, progress(player.pos))) return touching.also { touchMiss = "" }
 		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(touch.y, touch.range.start - progress(player.pos))
 		return hop
@@ -1832,7 +1836,8 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.laneTouch(hop: Hop, line: Vec3d, dir: Vec3d): Touch? {
 		val across = across(dir)
-		val step = laneStep(dir) / 4
+		// Half a lane apart, a top a block wide isn't missed between them, and it's looked for every few ticks.
+		val step = laneStep(dir) / 2
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val progress = progress(player.pos)
 		val at = progress(line)
