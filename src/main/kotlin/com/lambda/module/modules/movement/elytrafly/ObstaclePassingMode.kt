@@ -658,9 +658,14 @@ abstract class ObstaclePassingMode(
 			// Planned slow, right after taking off, the box swings out farther now at speed, into blocks beside the line.
 			// Not the obstacle itself: its edge runs askew diagonally, the swing reaches its corner up to that much sooner.
 			val before = hop.obstacle - progress - halfWidth(snappedDir) - sweep(snappedDir) - HOP_SCAN_STEP
-			// Tilted past what's dodged, the box swings out only that side, like the dodge looks at it.
-			val tilt = if (dodge != null && hop.lane == dodge && leaning(progress)) dodgeLean else 0
-			val inTheWay = if (before > 0) Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).obstacleHit(snappedDir, before, lean = tilt) else null
+			// On the lane dodged to, looked at like the dodge does: from the lane itself, past what's dodged, tilted past it
+			// the box swings out only that side. From where you are, on a narrow lane its edges would be in the way.
+			val onDodgeLane = dodge.let { it != null && it != Vec3d.ZERO && hop.lane == it }
+			val tilt = if (onDodgeLane && leaning(progress)) dodgeLean else 0
+			val lookFrom = if (onDodgeLane) closestLinePoint.add(Vec3d(-snappedDir.z, 0.0, snappedDir.x).normalize().multiply(dodgeOffset))
+				else Vec3d(playerPos.x, closestLinePoint.y, playerPos.z)
+			val skip = if (onDodgeLane) (dodgeEnd + DODGE_MARGIN - progress).coerceAtLeast(0.0) else 0.0
+			val inTheWay = if (before > skip) lookFrom.add(snappedDir.multiply(skip)).obstacleHit(snappedDir, before - skip, lean = tilt) else null
 			// A simulation of the glide, once a tick is enough.
 			// No floor in sight, it glides on as far as it can anyway.
 			// Over a magma cube once held it climbs on anyway, missing it by a bit it bumps into it higher up at worst.
@@ -668,7 +673,7 @@ abstract class ObstaclePassingMode(
 			when {
 				!player.isGliding -> this@ObstaclePassingMode.hop = null
 				inTheWay != null -> {
-					ElytraFly.debug { "In the way %.1f ahead before the obstacle at this speed (${inTheWay.what}), not gliding over it".format(inTheWay.distance) }
+					ElytraFly.debug { "In the way %.1f ahead before the obstacle at this speed (${inTheWay.what}), not gliding over it".format(inTheWay.distance + skip) }
 					this@ObstaclePassingMode.hop = null
 				}
 				progress > hop.end -> {
