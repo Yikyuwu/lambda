@@ -188,6 +188,8 @@ abstract class ObstaclePassingMode(
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
+		/** How close below its height over a hole counts as up there, see [Hop.topped]. */
+		private const val TOPPED_MARGIN = 0.1
 		/** How often the holes ahead are looked at, see [planSpeed]. */
 		private const val AHEAD_SCAN_TICKS = 4
 		/** The fastest looked at for what a hole needs, a tick, for the debug log. Bouncing doesn't get you much faster. */
@@ -322,6 +324,13 @@ abstract class ObstaclePassingMode(
 		var held = false
 		/** The tick [held] was last looked at, it takes a few simulations of the glide. */
 		var heldCheckedAt = -1
+		/** Over a hole, up at [targetY] once. From then on it keeps the height it has, sinking as it slows, see [holdY]. */
+		var topped = false
+		/**
+		 * The height to hold from [y]: [targetY], over a hole once [topped] only as high as it is. Pulling back up there
+		 * costs the speed that carries it to the floor after the hole, it sinks all the more after.
+		 */
+		fun holdY(y: Double, topped: Boolean = this.topped) = if (hole && topped) min(targetY, max(y, feetY + HOP_MARGIN)) else targetY
 	}
 
 	abstract val passerConfig: PasserSettings
@@ -453,8 +462,9 @@ abstract class ObstaclePassingMode(
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
 		// Switched to gliding over it higher just now, see [holdingFor].
-		val target = (this@ObstaclePassingMode.hop ?: hop).targetY
-		holdPitch(player.y, climb, player.velocity.horizontalLength(), target, player.finalGravity)
+		val held = this@ObstaclePassingMode.hop ?: hop
+		if (held.hole && player.y >= held.targetY - TOPPED_MARGIN) held.topped = true
+		holdPitch(player.y, climb, player.velocity.horizontalLength(), held.holdY(player.y), player.finalGravity)
 	}
 
 	/** How long obstacle passing took this tick so far. */
@@ -635,7 +645,9 @@ abstract class ObstaclePassingMode(
 			// Planned slow, right after taking off, the box swings out farther now at speed, into blocks beside the line.
 			// Not the obstacle itself: its edge runs askew diagonally, the swing reaches its corner up to that much sooner.
 			val before = hop.obstacle - progress - halfWidth(snappedDir) - sweep(snappedDir) - HOP_SCAN_STEP
-			val inTheWay = if (before > 0) Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).obstacleHit(snappedDir, before) else null
+			// Tilted past what's dodged, the box swings out only that side, like the dodge looks at it.
+			val tilt = if (dodge != null && hop.lane == dodge && leaning(progress)) dodgeLean else 0
+			val inTheWay = if (before > 0) Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).obstacleHit(snappedDir, before, lean = tilt) else null
 			// A simulation of the glide, once a tick is enough.
 			// No floor in sight, it glides on as far as it can anyway.
 			// Over a magma cube once held it climbs on anyway, missing it by a bit it bumps into it higher up at worst.
@@ -1617,7 +1629,7 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.canHop(hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = player.velocity.horizontalLength()): Boolean {
 		val floor = startPos.y
 		val gravity = player.finalGravity
-		val target = hop.targetY
+		var topped = hop.topped
 		val bounce = bouncePitch()
 		var y = player.y
 		var climb = player.velocity.y
@@ -1633,7 +1645,8 @@ abstract class ObstaclePassingMode(
 			}
 			// Bouncing on until then.
 			holding = holding || if (holdFrom != null) tick >= holdFrom else hop.start - along <= speed * leadTicks(hop)
-			val pitch = if (holding) holdPitch(y, climb, speed, target, gravity) else bounce(y, climb)
+			if (holding && hop.hole && y >= hop.targetY - TOPPED_MARGIN) topped = true
+			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, topped), gravity) else bounce(y, climb)
 			glide(climb, speed, pitch, gravity).let { (c, s) ->
 				climb = c
 				speed = s
