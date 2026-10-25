@@ -409,6 +409,8 @@ object HighwayTools : Module(
 
     /** Whether a mob is being fought, so others wait instead of rotating and swapping against it. */
     val isFighting get() = aura.isFighting
+    /** Whether the build should leave calm endermen in the way to [HighwayAura] instead of spleefing them. */
+    val killsCalmEndermen get() = isEnabled && aura.killsCalmEndermen
 
     /** Whether a shulker is out to restock tools. */
     val isRestockingTools get() = toolRestock.isRestocking
