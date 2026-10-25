@@ -1797,7 +1797,9 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
-		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
+		// On the lane flown along only with the middle of the box over it, else beside it, through its middle.
+		val touch = touchSpot(line, dir, hop.start, hop.end)?.takeIf { centered(line, dir, it) } ?: laneTouch(hop, line, dir)
+			?: return hop.also { touchMiss = "no top to touch down on" }
 		// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
 		// may take you higher than the top, sinking to just above it after.
 		val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
@@ -1847,22 +1849,32 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.laneTouch(hop: Hop, line: Vec3d, dir: Vec3d): Touch? {
 		val across = across(dir)
+		// Lanes across the line itself, no farther out than a dodge goes, closest to the one flown along first.
+		val here = line.subtract(startPos).dotProduct(across)
+		val middle = line.subtract(across.multiply(here))
 		// Half a lane apart, a top a block wide isn't missed between them, and it's looked for every few ticks.
 		val step = laneStep(dir) / 2
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val progress = progress(player.pos)
 		val at = progress(line)
-		return (-sides..sides).filter { it != 0 }.sortedBy { abs(it) }.firstNotNullOfOrNull { side ->
-			val lane = line.add(across.multiply(side * step))
+		val swing = sweep(dir)
+		return (-sides..sides).map { it * step }.filter { abs(it - here) > step / 2 }.sortedBy { abs(it - here) }.firstNotNullOfOrNull { offset ->
+			val lane = middle.add(across.multiply(offset))
 			touchSpot(lane, dir, hop.start, hop.end)?.takeIf { touch ->
-				generateSequence(max(progress, touch.range.start - TOUCH_APPROACH)) { it + HOP_SCAN_STEP }.takeWhile { it < touch.range.start }.all { along ->
-					val point = lane.add(dir.multiply(along - at))
-					spaceEmpty(Box(point.x - GLIDE_SIZE / 2, touch.y + TOUCH_ABOVE, point.z - GLIDE_SIZE / 2,
-						point.x + GLIDE_SIZE / 2, touch.y + TOUCH_ABOVE + GLIDE_SIZE, point.z + GLIDE_SIZE / 2))
-				}
+				centered(lane, dir, touch) &&
+					// Room for the box swinging out on the way there, steering over to a lane by a wall it'd swing into it.
+					generateSequence(max(progress, touch.range.start - TOUCH_APPROACH)) { it + HOP_SCAN_STEP }.takeWhile { it < touch.range.start }.all { along ->
+						val point = lane.add(dir.multiply(along - at))
+						spaceEmpty(Box(point.x - GLIDE_SIZE / 2, touch.y + TOUCH_ABOVE, point.z - GLIDE_SIZE / 2,
+							point.x + GLIDE_SIZE / 2, touch.y + TOUCH_ABOVE + GLIDE_SIZE, point.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
+					}
 			}
 		}
 	}
+
+	/** Whether the middle of the box is over [touch] halfway along it on [line], coming down on its middle, not an edge. */
+	private fun SafeContext.centered(line: Vec3d, dir: Vec3d, touch: Touch) =
+		line.add(dir.multiply(touch.middle - progress(line))).let { Vec3d(it.x, touch.y, it.z) }.hasFloor()
 
 	/**
 	 * The top being touched down on while over it, until the jump off it, else null: bounced off like the floor, the
