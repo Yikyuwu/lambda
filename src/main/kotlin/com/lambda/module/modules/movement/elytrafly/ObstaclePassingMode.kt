@@ -199,6 +199,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_ABOVE = 0.2
 		/** How far below a top to touch down on the hold aims once over it, down onto it. */
 		private const val TOUCH_DIVE = 1.0
+		/** How many ticks before the middle of a top to touch down on the dive onto it starts, sinking takes the glide that long. */
+		private const val TOUCH_DIVE_TICKS = 2
 		/** How fast it may sink holding the height, smoothly, and down onto a top to touch down on, see [holdPitch]. */
 		private const val HOLD_SINK = 0.1
 		private const val TOUCH_SINK = 0.6
@@ -396,11 +398,11 @@ abstract class ObstaclePassingMode(
 		/** How fast it may sink at [along] the line: over the top to touch down on fast, down onto it while over it. */
 		fun sinkAt(along: Double, speed: Double, touched: Boolean = this.touched) = if (diving(along, speed, touched)) TOUCH_SINK else HOLD_SINK
 		/**
-		 * Diving onto the top to touch down on, from a tick before its middle at [speed]: it comes down on the middle, on
-		 * its edge it may slide off it in the same tick.
+		 * Diving onto the top to touch down on, from [TOUCH_DIVE_TICKS] before its middle at [speed]: the glide takes that
+		 * long to sink, and it comes down on the middle. On its edge it may slide off it in the same tick.
 		 */
 		fun diving(along: Double, speed: Double, touched: Boolean = this.touched) =
-			touch != null && !touched && along >= touch.middle - speed && along <= touch.range.endInclusive
+			touch != null && !touched && along >= touch.middle - speed * TOUCH_DIVE_TICKS && along <= touch.range.endInclusive
 		/** How high the feet have to be at [along] the line. Over the top to touch down on, down on it. */
 		fun feetAt(along: Double) = if (touch != null && along in touch.range) touch.y
 			else raised.filter { along in it.first }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
@@ -1642,11 +1644,19 @@ abstract class ObstaclePassingMode(
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
 		}
 		if (lane == null || past == null) {
-			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it".format(start, end - start) }
+			ElytraFly.debug {
+				val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
+					?: if (touchMiss.isEmpty()) "" else " ($touchMiss)"
+				"Hole %.1f ahead, %.1f long, gliding over it$touching".format(start, end - start)
+			}
 			hop = hole
 			return true
 		}
-		ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it and over to ${lane.target.describe(dir)}${lane.leanText()} past what's %.1f ahead".format(start, end - start, past) }
+		ElytraFly.debug {
+			val touching = hole.touch?.let { ", touching down on the top at y %.2f %.1f ahead".format(it.y, it.range.start - at) }
+				?: if (touchMiss.isEmpty()) "" else " ($touchMiss)"
+			"Hole %.1f ahead, %.1f long, gliding over it$touching and over to ${lane.target.describe(dir)}${lane.leanText()} past what's %.1f ahead".format(start, end - start, past)
+		}
 		dodgeTo(lane, at + past)
 		hop = hole.with(lane = lane.target)
 		return true
