@@ -191,6 +191,8 @@ abstract class ObstaclePassingMode(
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
 		/** How fast a lane past an obstacle is looked for once none fits at the speed you have, see [slowingToFit]. */
 		private const val FIT_SPEED = 0.85
+		/** How far above what blocks in a hole need a glide over it is held, when they need more than it'd rather go, see [clearInside]. */
+		private const val RAISED_HOLD = 0.5
 		/** How far ahead, in ticks at the speed you have, floor beside a hole is looked for to land on, see [landBeside]. */
 		private const val LAND_AHEAD_TICKS = 12
 		/** How often an obstacle still far with no way past yet is looked at again, see [lookedLately]. */
@@ -1410,9 +1412,11 @@ abstract class ObstaclePassingMode(
 		// Only the lane you're on or dodging to, beside it it may look shorter, e.g. what's dodged stands in it on the line.
 		val lane = if (dodge.let { it != null && it != Vec3d.ZERO }) dodgeLanePoint(linePoint, dir) else linePoint
 		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
-		// Like [glideOverHole] glides over it.
-		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight,
-			min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE), hole.start, false, low = true, hole = true)
+		// Like [glideOverHole] glides over it, over the blocks in it too.
+		val laneAt = progress(lane)
+		val (feetY, topY, aim) = clearInside(lane, dir, hole.start - laneAt, hole.endInclusive - laneAt,
+			lane.y + passerConfig.minObstacleHeight, min(maxFlightY(), lane.y + MAX_BOUNCE_RISE))
+		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, feetY, max(topY, feetY), hole.start, false, low = true, hole = true, aim = aim)
 		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
 		val speed = player.velocity.horizontalLength()
 		val wants = !makesIt(speed)
@@ -1489,9 +1493,9 @@ abstract class ObstaclePassingMode(
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
 		val lane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
 		// High enough for the blocks in it that can be glided over.
-		val (feetY, topY) = clearInside(from, dir, start, end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
+		val (feetY, topY, aim) = clearInside(from, dir, start, end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
 		// Partly over its edge the box stands, the rays found where it doesn't.
-		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, feetY, max(topY, feetY), at + start, false, low = true, hole = true)
+		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, feetY, max(topY, feetY), at + start, false, low = true, hole = true, aim = aim)
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
@@ -1551,32 +1555,37 @@ abstract class ObstaclePassingMode(
 		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
 		val hole = holesAhead(linePoint, dir).firstOrNull { it.endInclusive > over.end && it.start <= over.end + bounceRoom } ?: return null
 		val at = progress(linePoint)
-		val (feetY, topY) = clearInside(linePoint, dir, over.end - at, hole.endInclusive - at, over.feetY,
+		val (feetY, topY, aim) = clearInside(linePoint, dir, over.end - at, hole.endInclusive - at, over.feetY,
 			min(over.topY, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE)))
 		if (topY - feetY < HOP_MARGIN) return null
-		val both = Hop(over.start, hole.endInclusive, feetY, topY, over.obstacle, false, low = true, hole = true)
+		val both = Hop(over.start, hole.endInclusive, feetY, topY, over.obstacle, false, low = true, hole = true, aim = aim)
 		return both.takeIf { canGetOver(it, at) }
 	}
 
 	/**
-	 * From [feetY] to [topY], how high a glide along [linePoint] from [from] to [to] ahead has to be to clear the blocks
-	 * there that can be glided over, e.g. in a hole. One that can't be ends the look, it's steered past meanwhile, see
-	 * [laneFromGlide].
+	 * From [feetY] up, how high a glide along [linePoint] from [from] to [to] ahead has to be to clear the blocks there
+	 * that can be glided over, e.g. in a hole: the lowest and highest the feet may go, and where to hold them. [topY] is
+	 * only how high it'd rather go, for blocks needing more it goes as high as there's room over them, held a bit above
+	 * what they need. Null where to hold them with none. One that can't be glided over ends the look, it's steered past
+	 * meanwhile, see [laneFromGlide].
 	 */
-	private fun SafeContext.clearInside(linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, feetY: Double, topY: Double): Pair<Double, Double> {
+	private fun SafeContext.clearInside(
+		linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, feetY: Double, topY: Double,
+	): Triple<Double, Double, Double?> {
 		val at = progress(linePoint)
 		var feet = feetY
-		var top = topY
+		var room = maxHopY()
 		var along = from
 		while (along < to) {
 			val hit = linePoint.add(dir.multiply(along)).obstacleHit(dir, to - along, mobs = false) ?: break
 			// Only how high, whether it gets up there in time is up to the glide over all of it.
 			val inner = planHop(linePoint, dir, along + hit.distance, anyway = true) ?: break
 			feet = max(feet, inner.feetY)
-			top = min(top, inner.topY)
+			room = min(room, inner.topY)
 			along = max(inner.end - at, along + hit.distance + HOP_SCAN_STEP)
 		}
-		return feet to top
+		if (feet + HOP_MARGIN <= min(topY, room)) return Triple(feet, min(topY, room), null)
+		return Triple(feet, room, min(room - HOP_MARGIN, feet + RAISED_HOLD))
 	}
 
 	/**
