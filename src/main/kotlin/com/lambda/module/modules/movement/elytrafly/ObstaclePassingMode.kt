@@ -188,7 +188,7 @@ abstract class ObstaclePassingMode(
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
-		/** How often the lanes ahead are scanned, see [scanAhead]. */
+		/** How often the holes ahead are looked at, see [planSpeed]. */
 		private const val AHEAD_SCAN_TICKS = 4
 		/** The fastest looked at for what a hole needs, a tick, for the debug log. Bouncing doesn't get you much faster. */
 		private const val MAX_PLAN_SPEED = 2.2
@@ -413,16 +413,15 @@ abstract class ObstaclePassingMode(
 	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane && !speedingUp
 	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
 	private var onLane = false
-	/** The lanes ahead as last scanned, see [scanAhead]. */
-	private var ahead = emptyList<LaneAhead>()
-	private var aheadTicks = 0
+	/** Ticks since what's ahead was last looked at, see [planSpeed]. */
+	private var scanTicks = 0
 	/** Too slow to glide over the next hole on the way, see [planSpeed]. */
 	private var wantsSpeed = false
 	/** Where that hole starts, for logging each once. */
 	private var speedNeedAt = Double.NaN
 	/** Bouncing on while swinging over to a lane too, too slow for the hole ahead, see [planSpeed]. */
 	private var speedingUp = false
-	/** Dodging what's right after a mob glided over, the lane doesn't keep clear of the mob, see [dodgeAfterCube]. */
+	/** Dodging what's right after a mob glided over, the lane doesn't keep clear of the mob, see [pastMobAndNext]. */
 	private var dodgeAfterMob = false
 	/** Landing before an obstacle no lane gets past, to walk around it. */
 	protected val isBraking get() = brakeAt != null
@@ -484,7 +483,7 @@ abstract class ObstaclePassingMode(
 			landedTicks = 0
 			lastGoal = null
 			sameGoals = 0
-			ahead = emptyList()
+			scanTicks = 0
 			forgetSpeedNeed()
 		}
 		onDisable {
@@ -671,7 +670,7 @@ abstract class ObstaclePassingMode(
 				!makesIt && hop.cube && hop.start - progress > player.velocity.horizontalLength() * HOP_LEAD_TICKS -> {
 					noLaneYet(hop.obstacle, "Can't get over the mob at %.1f from here ($hopMiss), bouncing on to look again".format(hop.start - progress))
 					this@ObstaclePassingMode.hop = null
-					// The lane past what's after it doesn't keep clear of it, see [dodgeAfterCube].
+					// The lane past what's after it doesn't keep clear of it, see [pastMobAndNext].
 					if (dodgeAfterMob) stopDodge()
 				}
 				!makesIt -> {
@@ -706,6 +705,10 @@ abstract class ObstaclePassingMode(
 			ahead?.let { distance ->
 				if (startDodge(here, closestLinePoint, snappedDir, distance, block.mob)) return false
 			}
+			// A hole right ahead was left to dodging what's after it, which didn't happen, e.g. no lane yet: over the
+			// hole anyway rather than into it, what's after it is looked at again from there.
+			if (!onLayer && dodge == null && hop == null && brakeAt == null &&
+				glideOverHole(here, closestLinePoint, snappedDir, low?.distance, within = brakeDistance() + DODGE_STEER_AHEAD)) return false
 			if (ahead == null && low != null && dodgeCarpets(here, closestLinePoint, snappedDir, low)) return false
 			// Holding the yaw alone drifts off the line, half a block over a couple hundred, into blocks beside it.
 			dodgeYaw = steerYaw(closestLinePoint, Vec3d.ZERO, snappedDir)
@@ -793,7 +796,6 @@ abstract class ObstaclePassingMode(
 					.format(distance, over.targetY, over.end - over.start)
 			}
 			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, highAim = highAim)
-			dodgeAfterCube(from, linePoint, dir, block)
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
@@ -812,9 +814,10 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * A block in the way right after the mob [distance] ahead, glided over with it it'd be one obstacle too high to get
-	 * over. Past both on a lane that keeps out of the mob's reach, else over the mob on a lane past the block, gliding
-	 * over it there where the block isn't in the way. Whether it's on its way past them.
+	 * A block in the way right after the mob [distance] ahead, once over the mob too close to steer past, e.g. at the end
+	 * of a hole there's no landing in. Glided over with the mob it'd be one obstacle too high to get over. Past both on a
+	 * lane that keeps out of the mob's reach, else over the mob on a lane past the block, gliding over it there where the
+	 * block isn't in the way, or on the line while steering over. Whether it's on its way past them.
 	 */
 	private fun SafeContext.pastMobAndNext(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String): Boolean {
 		val next = from.add(dir.multiply(distance)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return false
@@ -824,32 +827,18 @@ abstract class ObstaclePassingMode(
 			ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, dodging past both ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
 			return dodgeTo(lane, at + end)
 		}
-		val lane = freeLane(from, linePoint, dir, end, Vec3d.ZERO, mobs = false) ?: return false
+		val lane = freeLane(from, linePoint, dir, end, Vec3d.ZERO, mobs = false) ?: run {
+			ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, no free lane past it ($laneMiss)".format(distance, next.distance) }
+			return false
+		}
+		val avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH)
 		val across = Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(lane.offset)
-		val over = planHop(linePoint.add(across), dir, distance, avoid = cubeBoxes(from, distance + MAX_HOLE_LENGTH)) ?: return false
+		val over = planHop(linePoint.add(across), dir, distance, avoid = avoid) ?: planHop(linePoint, dir, distance, avoid = avoid) ?: return false
 		ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, over to ${lane.target.describe(dir)}${lane.leanText()} gliding over the mob there at y %.2f".format(distance, next.distance, over.targetY) }
 		dodgeTo(lane, at + end)
 		dodgeAfterMob = true
 		hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, lane = lane.target, under = over.under, cube = true)
 		return true
-	}
-
-	/**
-	 * Something in the way right after the mob the [hop] glides over, past it too close to steer over to a lane, e.g. a
-	 * block at the end of a hole there's no landing in. Steers over to a lane past it meanwhile, gliding over the mob.
-	 */
-	private fun SafeContext.dodgeAfterCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, block: String) {
-		val over = hop ?: return
-		val after = over.end - progress(from)
-		val next = from.add(dir.multiply(after)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return
-		val lane = freeLane(from, linePoint, dir, after + next.distance, Vec3d.ZERO, mobs = false) ?: run {
-			ElytraFly.debug { "Another obstacle %.1f after the mob (${next.what}), no free lane past it yet ($laneMiss)".format(next.distance) }
-			return
-		}
-		ElytraFly.debug { "Another obstacle %.1f after the mob ($block, ${next.what}), steering ${lane.target.describe(dir)}${lane.leanText()} gliding over the mob".format(next.distance) }
-		dodgeTo(lane, progress(from) + after + next.distance)
-		dodgeAfterMob = true
-		hop = over.with(lane = lane.target)
 	}
 
 	/**
@@ -1272,43 +1261,31 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * One lane [offset] across the line, as [scanAhead] saw it: where along the line the first block is in the way, and
-	 * the holes in the floor, from where to where along it. The last open when there's no floor in sight after it.
-	 */
-	private class LaneAhead(val offset: Double, val blocked: Double?, val holes: List<ClosedFloatingPointRange<Double>>)
-
-	/**
-	 * Every lane ahead of [linePoint] as far as [PasserSettings.dodgeLookAhead], each a lane step across like [freeLane]
-	 * looks at, up to [PasserSettings.maxDodge] to each side. Holes with too little floor between them to bounce on are
+	 * The holes in the floor ahead of [lane] as far as [PasserSettings.dodgeLookAhead], from where to where along the line,
+	 * the last open when there's no floor in sight after it. Holes with too little floor between them to bounce on are
 	 * one, like [glideOverHole] glides over them.
 	 */
-	private fun SafeContext.scanAhead(linePoint: Vec3d, dir: Vec3d): List<LaneAhead> {
-		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
-		val step = laneStep(dir)
-		val at = progress(linePoint)
+	private fun SafeContext.holesAhead(lane: Vec3d, dir: Vec3d): List<ClosedFloatingPointRange<Double>> {
+		val at = progress(lane)
 		val reach = passerConfig.dodgeLookAhead.toDouble()
 		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
-		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
-		return (-sides..sides).map { side ->
-			val lane = linePoint.add(across.multiply(side * step))
-			val holes = mutableListOf<ClosedFloatingPointRange<Double>>()
-			var holeStart: Double? = null
-			var along = HOLE_SCAN_STEP
-			while (along <= reach) {
-				val spot = lane.add(dir.multiply(along))
-				if (!spot.isLoaded) break
-				val floor = spot.boxHasFloor()
-				if (!floor && holeStart == null) holeStart = holes.lastOrNull()?.takeIf { along - (it.endInclusive - at) < bounceRoom }
-					?.let { holes.removeAt(holes.lastIndex).start - at } ?: along
-				if (floor && holeStart != null) {
-					holes += at + holeStart..at + along
-					holeStart = null
-				}
-				along += HOLE_SCAN_STEP
+		val holes = mutableListOf<ClosedFloatingPointRange<Double>>()
+		var holeStart: Double? = null
+		var along = HOLE_SCAN_STEP
+		while (along <= reach) {
+			val spot = lane.add(dir.multiply(along))
+			if (!spot.isLoaded) break
+			val floor = spot.boxHasFloor()
+			if (!floor && holeStart == null) holeStart = holes.lastOrNull()?.takeIf { along - (it.endInclusive - at) < bounceRoom }
+				?.let { holes.removeAt(holes.lastIndex).start - at } ?: along
+			if (floor && holeStart != null) {
+				holes += at + holeStart..at + along
+				holeStart = null
 			}
-			holeStart?.let { holes += at + it..at + along }
-			LaneAhead(side * step, lane.obstacleHit(dir, reach, mobs = false)?.let { at + it.distance }, holes)
+			along += HOLE_SCAN_STEP
 		}
+		holeStart?.let { holes += at + it..at + along }
+		return holes
 	}
 
 	/**
@@ -1318,13 +1295,11 @@ abstract class ObstaclePassingMode(
 	 * each scan, the glide over it is simulated.
 	 */
 	private fun SafeContext.planSpeed(linePoint: Vec3d, dir: Vec3d) {
-		if (ahead.isNotEmpty() && ++aheadTicks < AHEAD_SCAN_TICKS) return
-		ahead = scanAhead(linePoint, dir)
-		aheadTicks = 0
+		if (++scanTicks < AHEAD_SCAN_TICKS) return
+		scanTicks = 0
 		val progress = progress(player.pos)
-		val laneOffset = if (dodge != null) dodgeOffset else 0.0
-		val lanes = listOfNotNull(ahead.minByOrNull { abs(it.offset - laneOffset) }, ahead.minByOrNull { abs(it.offset) }).distinct()
-		val hole = lanes.flatMap { it.holes }.filter { it.start > progress }.minByOrNull { it.start }
+		val lanes = listOfNotNull(linePoint, dodge?.let { linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset)) })
+		val hole = lanes.flatMap { holesAhead(it, dir) }.filter { it.start > progress }.minByOrNull { it.start }
 			?: return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it.
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight,
@@ -1360,14 +1335,17 @@ abstract class ObstaclePassingMode(
 	/**
 	 * Glides over a hole in the floor ahead of [from], up to [MAX_HOLE_LENGTH] long and before [before] where something's
 	 * in the way, like over a block: bouncing on unless you'd come down in it. Lands before it to walk when it can't get
-	 * over in time. Whether it's past it in the air.
+	 * over in time. Whether it's past it in the air. With [within] only one starting that close, whatever's after it.
 	 */
-	private fun SafeContext.glideOverHole(from: Vec3d, linePoint: Vec3d, dir: Vec3d, before: Double?, dodging: Boolean = false): Boolean {
+	private fun SafeContext.glideOverHole(
+		from: Vec3d, linePoint: Vec3d, dir: Vec3d, before: Double?, dodging: Boolean = false, within: Double? = null,
+	): Boolean {
 		val along = generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }
 			.takeWhile { it <= (before ?: passerConfig.dodgeLookAhead.toDouble()) }
 			.map { it to from.add(dir.multiply(it)) }
 			.takeWhile { (_, point) -> point.isLoaded }
 		val start = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
+		if (within != null && start > within) return false
 		val at = progress(from)
 		if (skipHopAt?.let { abs(it - (at + start)) < 1.5 } == true) return false
 		// Long ones too, holding the height as long as it gets over them. Longer, e.g. a step down to a lower floor, it's
@@ -1386,7 +1364,7 @@ abstract class ObstaclePassingMode(
 		// Something soon after it, once over the hole too close to steer past. Right after it both are glided over as one,
 		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
 		// Dodging, what's dodged is right beside the lane: the hole's glided over, the dodge goes on past the rest.
-		if (!dodging) from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
+		if (!dodging && within == null) from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
 			if (next.distance > HOP_GAP) return false
 			// Under it would mean coming down low over the hole, it's dodged instead.
 			val over = planHop(linePoint, dir, end + next.distance)?.takeUnless { it.under }
