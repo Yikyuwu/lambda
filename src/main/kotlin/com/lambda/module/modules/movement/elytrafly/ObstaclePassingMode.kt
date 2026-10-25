@@ -1815,6 +1815,8 @@ abstract class ObstaclePassingMode(
 		hop.heldCheckedAt = player.age
 		val speed = player.velocity.horizontalLength()
 		hop.held = when {
+			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later.
+			hop.hole && lastBounceBefore(hop, progress) && canHop(hop, progress, 0) -> true
 			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			hop.anyway -> true
@@ -1827,6 +1829,31 @@ abstract class ObstaclePassingMode(
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
+	}
+
+	/**
+	 * Whether you're rising from the last bounce before the hole [hop] glides over: bouncing on, you'd come down at its
+	 * edge or past it, too close to bounce once more.
+	 */
+	private fun SafeContext.lastBounceBefore(hop: Hop, progress: Double): Boolean {
+		if (player.velocity.y <= 0 || player.isOnGround) return false
+		val floor = startPos.y
+		val gravity = player.finalGravity
+		val bounce = bouncePitch()
+		var y = player.y
+		var climb = player.velocity.y
+		var speed = player.velocity.horizontalLength()
+		var along = progress
+		repeat(CAN_HOP_SIM_TICKS) {
+			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
+				climb = c
+				speed = s
+			}
+			y += climb
+			along += speed
+			if (y <= floor) return along >= hop.start - HOLE_TOUCHDOWN_MARGIN
+		}
+		return true
 	}
 
 	/**
