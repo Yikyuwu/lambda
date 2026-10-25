@@ -781,8 +781,9 @@ abstract class ObstaclePassingMode(
 		}
 		// Up onto a layer or off it just now, the line is at its new height.
 		closestLinePoint = playerPos.findClosestPointOnLine(snappedDir)
-		// Dodging up on a layer of carpets, its end on the lane is glided off like on the line.
-		dodge?.let { lane -> if (onCarpets && planGap(closestLinePoint, snappedDir, lane)) return false }
+		// Dodging up on a layer, its end on the lane is glided off like on the line, or landed before for a hole after it
+		// that's too long.
+		dodge?.let { lane -> if (onLayer && planGap(closestLinePoint, snappedDir, lane)) return false }
 		if (dodge != null && steerDodge(closestLinePoint, snappedDir)) return false
 		if (isBraking) return false
 		// Far ahead while gliding, for time to steer. Close by on the ground below, for walking around it.
@@ -1747,8 +1748,10 @@ abstract class ObstaclePassingMode(
 			.map { it to linePoint.add(dir.multiply(it)) }
 			.takeWhile { (_, point) -> point.isLoaded }
 		val edge = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
-		// Off its end already, e.g. a glide off it that got cut short.
+		// Off its end already, e.g. a glide off it that got cut short. A lane beside a layer of blocks is off it from the
+		// start, you're still up there.
 		if (edge <= HOP_SCAN_STEP) {
+			if (lane != Vec3d.ZERO && !onCarpets) return false
 			offTheLayer()
 			return false
 		}
