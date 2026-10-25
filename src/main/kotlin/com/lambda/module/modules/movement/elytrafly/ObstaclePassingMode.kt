@@ -649,14 +649,12 @@ abstract class ObstaclePassingMode(
 		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
 			hop.diving(progress(player.pos), player.velocity.horizontalLength() * TOUCH_SKIM_TICKS / TOUCH_DIVE_TICKS) && topUnderSoon(touch.y)
 		} == true
-		// Down onto it with the box well over it, and still over it after the tick's move across: a move goes down first,
-		// then across, off its edge in the same tick it'd be on ground where there's nothing below and get set back. On the
-		// tick it's over it the most, unless the next is as good and more over it. Once down, it doesn't stop halfway.
+		// Down onto it with the box well over it, as near its middle as it gets: on the tick it's over it the most, unless
+		// the next is more. On its edge it'd slide off it in the same tick, a move goes down first, then across. Once down,
+		// it doesn't stop halfway.
 		val overTop = hop.touch?.let { touch ->
-			val step = Vec3d(player.velocity.x, 0.0, player.velocity.z)
-			fun lands(at: Vec3d) = topOverlap(at, touch.y) >= TOUCH_MIN_OVERLAP && topUnder(at.add(step), touch.y, TOUCH_OVERLAP)
-			val next = player.pos.add(step)
-			lands(player.pos) && (hop.overTop || !(lands(next) && topOverlap(next, touch.y) > topOverlap(player.pos, touch.y)))
+			val now = topOverlap(player.pos, touch.y)
+			now >= TOUCH_MIN_OVERLAP && (hop.overTop || now >= topOverlap(player.pos.add(player.velocity.x, 0.0, player.velocity.z), touch.y))
 		} ?: true
 		if (dive && overTop) diveTop = hop.touch.y to player.age
 		if (dive && overTop && !hop.overTop) {
