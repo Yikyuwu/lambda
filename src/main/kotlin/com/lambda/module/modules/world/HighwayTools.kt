@@ -149,6 +149,7 @@ object HighwayTools : Module(
     @Group(ENDER_CHEST_GROUP) private val restockRetryDelay by setting("Restock Retry Delay", 60, 10..600, 10, "Wait after a trip to the ender chest before the next one", " s") { inventoryConfig.accessEnderChest }
     @Group(TOOL_RESTOCK_GROUP) private val toolRestock by configBlock(HighwayToolRestock(this))
     @Group(AURA_GROUP) private val aura by configBlock(HighwayAura(this))
+    private val safetyWarning by setting("Safety Warning", true, "Warns on enable when AutoArmor, AutoDisconnect or AutoTotem is off")
     private val debugLog by setting("Debug Log", false, "Writes the build's progress and what it waits on to the game log every few seconds")
 
     private var octant = EightWayDirection.NORTH
@@ -279,9 +280,9 @@ object HighwayTools : Module(
             if (inventoryConfig.accessEnderChest && restockPickaxes && !toolRestock.enabled)
                 warn("Restock Tools is off, so no pickaxe shulkers get taken from the ender chest")
             // Digging AFK, these keep you alive or log you out before you die.
-            listOf(AutoArmor, AutoDisconnect, AutoTotem).filter { !it.isEnabled }.takeIf { it.isNotEmpty() }?.let { off ->
+            val off = listOf(AutoArmor, AutoDisconnect, AutoTotem).filterNot { it.isEnabled }
+            if (safetyWarning && off.isNotEmpty())
                 warn("${off.joinToString { it.name }} ${if (off.size == 1) "is" else "are"} off, turn ${if (off.size == 1) "it" else "them"} on to stay safe while digging AFK")
-            }
             // In the queue the inventory isn't there yet, so restocks would think everything is missing.
             waitingForServer = player.isSpectator
             // Already in the world, so the inventory is there.
