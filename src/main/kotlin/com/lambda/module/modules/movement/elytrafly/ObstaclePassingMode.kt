@@ -1332,7 +1332,7 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * How fast to be for what's ahead: too slow to glide over the next hole on the lane you're on or dodging to, or on the
+	 * How fast to be for what's ahead: too slow to glide over the next hole on the lane you're dodging to, else on the
 	 * line, like [glideOverHole] would, it bounces on to speed up instead of flying level, also swinging over to a lane
 	 * while what's dodged is still far, so it gets over the hole after it instead of landing before it. Looked at with
 	 * each scan, the glide over it is simulated.
@@ -1341,9 +1341,9 @@ abstract class ObstaclePassingMode(
 		if (++scanTicks < AHEAD_SCAN_TICKS) return
 		scanTicks = 0
 		val progress = progress(player.pos)
-		val lanes = listOfNotNull(linePoint, dodge?.let { linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset)) })
-		val hole = lanes.flatMap { holesAhead(it, dir) }.filter { it.start > progress }.minByOrNull { it.start }
-			?: return forgetSpeedNeed()
+		// Only the lane you're on or dodging to, beside it it may look shorter, e.g. what's dodged stands in it on the line.
+		val lane = if (dodge.let { it != null && it != Vec3d.ZERO }) linePoint.add(Vec3d(-dir.z, 0.0, dir.x).normalize().multiply(dodgeOffset)) else linePoint
+		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it.
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight,
 			min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE), hole.start, false, low = true, hole = true)
