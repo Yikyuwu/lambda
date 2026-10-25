@@ -164,6 +164,10 @@ abstract class ObstaclePassingMode(
 		private const val CAN_HOP_SIM_TICKS = 200
 		/** How many ticks after the next bounce starts holding from it is looked at, see [holdingFor]. */
 		private const val NEXT_BOUNCE_MARGIN = 2
+		/** How much higher than needed holding from the next bounce has to get you, see [fromNextBounce]. */
+		private const val NEXT_BOUNCE_HEIGHT_MARGIN = 0.2
+		/** Missing by at most this little, too close to stop it's gone for anyway, the flight often beats the simulation. */
+		private const val ANYWAY_SHORT = 0.15
 		/** Steeper up the wings brake hard. Down to 90, like without wings, to top out a bounce in time. */
 		private const val MAX_HOP_PITCH_UP = 30
 		/** How many degrees apart [holdPitch] looks first. */
@@ -433,6 +437,8 @@ abstract class ObstaclePassingMode(
 	private var hopTooSlow = false
 	/** Where [canHop] found the glide falls short, for the debug log. */
 	private var hopMiss = ""
+	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
+	private var hopShort = Double.POSITIVE_INFINITY
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
 	private var hopExitSpeed = 0.0
 	/** How long you've been down after braking, waiting for the server to end the glide. */
@@ -757,10 +763,11 @@ abstract class ObstaclePassingMode(
 					// The lane past what's after it doesn't keep clear of it, see [pastMobAndNext].
 					if (dodgeAfterMob) stopDodge()
 				}
-				// A hole this close there's no landing before, and dropping the glide leaves you lost over it. As high as it
-				// goes, the simulation misses by a little at times where the flight doesn't.
-				!makesIt && hop.hole -> {
-					if (!hop.held) ElytraFly.debug { "Can't quite get over the hole at %.1f ($hopMiss), holding as high as it goes anyway".format(hop.start - progress) }
+				// A hole this close there's no landing before, and dropping the glide leaves you lost over it. Missing a
+				// block by a hair, braking this close runs into it all the same. As high as it goes, the simulation misses
+				// by a little at times where the flight doesn't.
+				!makesIt && (hop.hole || !hop.under && !hop.low && hopShort <= ANYWAY_SHORT) -> {
+					if (!hop.held) ElytraFly.debug { "Can't quite get over it at %.1f ($hopMiss), holding as high as it goes anyway".format(hop.start - progress) }
 					hop.held = true
 					hop.heldCheckedAt = player.age
 					dodgeYaw = hopYaw(closestLinePoint, laneFromGlide(hop, closestLinePoint, snappedDir, progress) ?: hop, snappedDir, progress)
@@ -1951,7 +1958,8 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.canGetOver(hop: Hop, progress: Double) = when {
 		hop.held -> canHop(hop, progress)
 		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
-		else -> canHop(hop, progress) || !hop.hole && !hop.under && fromNextBounce(hop, progress)
+		// The one from close by last, its miss is the one told and gone by, see [hopShort].
+		else -> !hop.hole && !hop.under && fromNextBounce(hop, progress) || canHop(hop, progress)
 	}
 
 	/**
@@ -1959,8 +1967,10 @@ abstract class ObstaclePassingMode(
 	 * on the way if need be. From [holdFrom] ticks on, by default once close enough like [holdingFor]. Simulates the glide
 	 * tick by tick, at [from] a tick for now.
 	 */
-	private fun SafeContext.canHop(hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = player.velocity.horizontalLength()): Boolean {
-		val floor = startPos.y
+	private fun SafeContext.canHop(
+		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = player.velocity.horizontalLength(), margin: Double = 0.0,
+	): Boolean {
+		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		var topped = hop.topped
 		var rose = hop.rose
@@ -1973,10 +1983,18 @@ abstract class ObstaclePassingMode(
 		var holding = hop.held
 		// From now on, not only once holding: slow right after taking off, it's held from close by with no time to rise.
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
-			// No floor to bounce off in the hole, coming down in it misses.
-			if (y <= floor && climb <= 0 && !(hop.hole && along >= hop.start)) {
-				y = floor
-				climb = JUMP_VELOCITY
+			// Only off floor that's there, e.g. not in a hole on the way.
+			if (y <= startPos.y && climb <= 0) {
+				val floor = floorAt(dir, along, hop.lane) ?: run {
+					hopMiss = "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead with no floor to bounce off"
+						.format(player.y, player.velocity.y, player.velocity.horizontalLength(), along - progress)
+					hopShort = Double.POSITIVE_INFINITY
+					return false
+				}
+				if (y <= floor) {
+					y = floor
+					climb = JUMP_VELOCITY
+				}
 			}
 			// Bouncing on until then.
 			holding = holding || if (holdFrom != null) tick >= holdFrom else hop.start - along <= speed * leadTicks(hop)
@@ -1989,9 +2007,10 @@ abstract class ObstaclePassingMode(
 			}
 			y += climb
 			along += speed
-			if (along >= hop.start && (y < hop.feetAt(along) || y > hop.topY)) {
+			if (along >= hop.start && (y < hop.feetAt(along) + margin || y > hop.topY)) {
 				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
 					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.feetAt(along), hop.topY)
+				hopShort = if (y > hop.topY) Double.POSITIVE_INFINITY else hop.feetAt(along) - y
 				return false
 			}
 			if (along > hop.end) {
@@ -2000,7 +2019,21 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		hopMiss = "not over it within $CAN_HOP_SIM_TICKS ticks"
+		hopShort = Double.POSITIVE_INFINITY
 		return false
+	}
+
+	/**
+	 * Where along the line, [along] it on [lane], there's floor to bounce off: the one bounced on, else the one below up
+	 * on a layer. Null over a hole.
+	 */
+	private fun SafeContext.floorAt(dir: Vec3d, along: Double, lane: Vec3d): Double? {
+		val spot = startPos.add(dir.multiply(along)).add(lane)
+		return when {
+			spot.boxHasFloor() -> startPos.y
+			onLayer && spot.add(0.0, baseY - startPos.y, 0.0).boxHasFloor() -> baseY
+			else -> null
+		}
 	}
 
 	/**
@@ -2104,26 +2137,33 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Whether holding the height for [hop] from the next bounce on still gets over it, a bit later than that bounce
-	 * rises: a near miss in the simulation doesn't let that one and this one both slip by.
+	 * rises and with a bit to spare: a bounce ahead the simulation is off by a little, a near miss would let that one and
+	 * this one both slip by.
 	 */
 	private fun SafeContext.fromNextBounce(hop: Hop, progress: Double) =
-		nextRise()?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) } == true
+		nextRise(progress, hop.lane)?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, margin = NEXT_BOUNCE_HEIGHT_MARGIN) } == true
 
-	/** In how many ticks the next bounce off the floor rises, bouncing on from here. Null when not within the simulation. */
-	private fun SafeContext.nextRise(): Int? {
-		val floor = startPos.y
+	/**
+	 * In how many ticks the next bounce off the floor rises, bouncing on from here at [progress] along the line on [lane].
+	 * Null when it'd come down where there's no floor, or not within the simulation.
+	 */
+	private fun SafeContext.nextRise(progress: Double, lane: Vec3d): Int? {
+		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
 		var y = player.y
 		var climb = player.velocity.y
 		var speed = player.velocity.horizontalLength()
+		var along = progress
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
 			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			y += climb
-			if (y <= floor) return tick + 1
+			along += speed
+			// Coming down where there's no floor there's no next bounce.
+			if (y <= startPos.y) floorAt(dir, along, lane)?.let { if (y <= it) return tick + 1 } ?: return null
 		}
 		return null
 	}
@@ -2134,7 +2174,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.lastBounceBefore(hop: Hop, progress: Double): Boolean {
 		if (player.velocity.y <= 0 || player.isOnGround) return false
-		val floor = startPos.y
+		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
 		var y = player.y
@@ -2148,7 +2188,11 @@ abstract class ObstaclePassingMode(
 			}
 			y += climb
 			along += speed
-			if (y <= floor) return along >= hop.start - HOLE_TOUCHDOWN_MARGIN
+			if (y <= startPos.y) {
+				// Down in it, or on its edge or past it, too close to bounce once more.
+				val floor = floorAt(dir, along, hop.lane) ?: return true
+				if (y <= floor) return along >= hop.start - HOLE_TOUCHDOWN_MARGIN
+			}
 		}
 		return true
 	}
