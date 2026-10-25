@@ -59,6 +59,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import kotlin.math.sign
 import kotlin.math.sin
 
@@ -318,8 +319,15 @@ abstract class ObstaclePassingMode(
 			hole -> topY - min(HOP_MARGIN, (topY - feetY) / 2)
 			else -> feetY + min(HOP_MARGIN, (topY - feetY) / 2)
 		}
+		/** Changed so, how far it is glided over it kept, e.g. steering over to a lane mid-glide. */
 		fun with(down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight) =
-			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim)
+			Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim).also {
+				it.waiting = waiting
+				it.held = held
+				it.heldCheckedAt = heldCheckedAt
+				it.topped = topped
+				it.rose = rose
+			}
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -415,8 +423,8 @@ abstract class ObstaclePassingMode(
 	private var landedTicks = 0
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
 	private var noLaneAt: Double? = null
-	/** The [passTicks] it was last looked at, see [lookedLately]. */
-	private var noLaneTick = 0
+	/** Where along the line obstacles and holes with no way past yet are, and the [passTicks] each was looked at. */
+	private val noWayYet = HashMap<Long, Int>()
 	/** Ticks obstacles were passed in, a clock for [lookedLately]. */
 	private var passTicks = 0
 	/** Where along the line an obstacle is that got too close to get over, which is dodged instead. */
@@ -710,7 +718,8 @@ abstract class ObstaclePassingMode(
 					if (dodgeAfterMob) stopDodge()
 				}
 				else -> {
-					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
+					val gliding = laneFromGlide(hop, closestLinePoint, snappedDir, progress) ?: hop
+					dodgeYaw = hopYaw(closestLinePoint, gliding, snappedDir, progress)
 					return false
 				}
 			}
@@ -1436,6 +1445,21 @@ abstract class ObstaclePassingMode(
 	 * on the line up to the hole is faster than on a lane, more speed to get over the hole with, and over it there's
 	 * room to steer past, see [glideOverHole]. Only with a lane past it free from where the hole starts.
 	 */
+	/**
+	 * Gliding over a hole on the line, something in it or right after it: over to a lane past it once there's one,
+	 * still gliding, looked for every [RELOOK_TICKS]. Seen from farther than a lane past it was free, or past the look
+	 * ahead before. The glide steered over to it, null while none.
+	 */
+	private fun SafeContext.laneFromGlide(hop: Hop, linePoint: Vec3d, dir: Vec3d, progress: Double): Hop? {
+		if (!hop.hole || hop.lane != Vec3d.ZERO || dodge != null || passTicks % RELOOK_TICKS != 0) return null
+		val here = Vec3d(player.x, linePoint.y, player.z)
+		val next = here.obstacleHit(dir, hop.end - progress + brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return null
+		val lane = freeLane(here, linePoint, dir, next.distance, Vec3d.ZERO) ?: return null
+		ElytraFly.debug { "Gliding over the hole, ${next.what} %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(next.distance) }
+		dodgeTo(lane, progress + next.distance)
+		return hop.with(lane = lane.target).also { this@ObstaclePassingMode.hop = it }
+	}
+
 	private fun SafeContext.dodgeOverHole(linePoint: Vec3d, dir: Vec3d, distance: Double): Boolean {
 		val start = generateSequence(HOLE_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance - MIN_DODGE_DISTANCE }
 			.firstOrNull { linePoint.add(dir.multiply(it)).let { spot -> spot.isLoaded && !spot.boxHasFloor() } } ?: return false
@@ -1901,7 +1925,7 @@ abstract class ObstaclePassingMode(
 	private fun noLaneYet(at: Double, reason: String): Boolean {
 		if (noLaneAt?.let { abs(it - at) < 1.5 } != true) ElytraFly.debug { reason }
 		noLaneAt = at
-		noLaneTick = passTicks
+		noWayYet[at.roundToLong()] = passTicks
 		return false
 	}
 
@@ -1910,8 +1934,10 @@ abstract class ObstaclePassingMode(
 	 * far. Looking again only every [RELOOK_TICKS] then, every lane and glide over it is simulated each time. Close by
 	 * each tick.
 	 */
-	private fun SafeContext.lookedLately(at: Double, distance: Double) =
-		noLaneAt?.let { abs(it - at) < 1.5 } == true && passTicks - noLaneTick < RELOOK_TICKS && distance > brakeDistance() + DODGE_STEER_AHEAD
+	private fun SafeContext.lookedLately(at: Double, distance: Double): Boolean {
+		noWayYet.values.removeIf { passTicks - it >= RELOOK_TICKS }
+		return distance > brakeDistance() + DODGE_STEER_AHEAD && (-1..1).any { at.roundToLong() + it in noWayYet }
+	}
 
 	/** Stops dodging and lands, to walk around the obstacle at [at] along the line, or past the [carpets]. Always false. */
 	private fun brake(at: Double, reason: String, carpets: Boolean = false): Boolean {
