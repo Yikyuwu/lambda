@@ -754,6 +754,8 @@ abstract class ObstaclePassingMode(
 		if (passerConfig.dodge && player.isGliding && !onLayer) planSpeed(closestLinePoint, snappedDir) else forgetSpeedNeed()
 
 		// Over the floor beside the hole now, down onto it.
+		// Gliding over it after all, e.g. once off the layer a tick later, it's not landed beside.
+		if (hop != null) landing = false
 		if (landing && player.isGliding && !player.isOnGround && floorBelowYou()) {
 			landing = false
 			brake(progress(playerPos) + 1, "Over the floor beside the hole")
@@ -1770,7 +1772,8 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.holeHop(line: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): Pair<Hop, Double?> {
 		val at = progress(line)
-		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), line.y + MAX_BOUNCE_RISE))
+		// Not lower than you already are, e.g. right off a layer above it.
+		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), max(line.y + MAX_BOUNCE_RISE, player.y)))
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
 			low = true, hole = true, aim = aim, raised = raised)
 		return (if (raised.isEmpty()) over.also { touchMiss = "" } else withTouch(over, line, dir)) to blocked
