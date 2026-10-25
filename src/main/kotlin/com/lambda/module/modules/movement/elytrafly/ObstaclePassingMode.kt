@@ -2776,7 +2776,8 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.holdCube(hop: Hop, progress: Double): Boolean {
 		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, lane = hop.lane, cube = true, aim = it) }
 			?.takeIf { canHop(it, progress, 0) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
-			?: return !fromNextBounce(hop, progress)
+			// Holding now has to make it too: far off, from the next bounce it glides too long as well, that's not too late.
+			?: return canHop(hop, progress, 0) && !fromNextBounce(hop, progress)
 		if (fromNextBounce(high, progress)) return false
 		high.held = true
 		high.heldCheckedAt = player.age
