@@ -702,9 +702,10 @@ abstract class ObstaclePassingMode(
 	/** How much of the box at [at] is over tops at [y], in square blocks, see [topUnder]. */
 	private fun SafeContext.topOverlap(at: Vec3d, y: Double): Double {
 		val half = GLIDE_SIZE / 2
+		// Summed right away, the positions iterated are one and the same, moved along: kept in a list, all would be the last.
 		return BlockPos.iterate(BlockPos.ofFloored(at.x - half, y - 0.5, at.z - half), BlockPos.ofFloored(at.x + half - 1e-6, y - 0.5, at.z + half - 1e-6))
-			.filter { topAt(it.x + 0.5, it.z + 0.5, y) }
-			.sumOf { (min(at.x + half, it.x + 1.0) - max(at.x - half, it.x.toDouble())) * (min(at.z + half, it.z + 1.0) - max(at.z - half, it.z.toDouble())) }
+			.sumOf { if (!topAt(it.x + 0.5, it.z + 0.5, y)) 0.0
+				else (min(at.x + half, it.x + 1.0) - max(at.x - half, it.x.toDouble())) * (min(at.z + half, it.z + 1.0) - max(at.z - half, it.z.toDouble())) }
 	}
 
 	/** Whether the box at [at] is over a top at [y] by [overlap] at least each way, see [topUnderSoon]. */
