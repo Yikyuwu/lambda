@@ -180,17 +180,6 @@ abstract class ObstaclePassingMode(
 		/** Gliding in low under something only once starting this many ticks later wouldn't make it anymore. */
 		private const val UNDER_HOLD_DELAY = 3
 		/**
-		 * Over a magma cube the height is held only once starting this many ticks later wouldn't make it anymore. Gliding
-		 * over it late and short keeps the speed, and it has less time to notice you and jump.
-		 */
-		private const val CUBE_HOLD_DELAY = 3
-		/**
-		 * Slower than this a tick, every bounce more speeds you up a lot, so over a magma cube the height is held at the very
-		 * last tick, [SLOW_CUBE_HOLD_DELAY] later still wouldn't make it.
-		 */
-		private const val SLOW_CUBE_SPEED = 1.0
-		private const val SLOW_CUBE_HOLD_DELAY = 1
-		/**
 		 * The speed a tick gliding over a magma cube high in the room above it has to leave you with, else it's glided
 		 * over low. Gliding over it costs speed, too slow after it another cube right behind can't be got over.
 		 */
@@ -566,6 +555,7 @@ abstract class ObstaclePassingMode(
 			stopDodge()
 			brakeAt = null
 			hop = null
+			dropShapes()
 		}
 		listen<TickEvent.Pre>({ DODGE_PRIORITY }) {
 			if (passingNanos > SLOW_PASSING_NANOS) ElytraFly.debug { "Obstacle passing took %.1f ms last tick".format(passingNanos / 1e6) }
@@ -1457,10 +1447,7 @@ abstract class ObstaclePassingMode(
 		val lane = if (dodge.let { it != null && it != Vec3d.ZERO }) dodgeLanePoint(linePoint, dir) else linePoint
 		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it, over the blocks in it too.
-		val laneAt = progress(lane)
-		val (raised, topY, aim) = clearInside(lane, dir, hole.start - laneAt, hole.endInclusive - laneAt, min(maxFlightY(), lane.y + MAX_BOUNCE_RISE))
-		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, lane.y + passerConfig.minObstacleHeight, topY, hole.start, false,
-			low = true, hole = true, aim = aim, raised = raised)
+		val over = holeHop(lane, dir, hole).first
 		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
 		val speed = player.velocity.horizontalLength()
 		val wants = !makesIt(speed)
@@ -1537,7 +1524,7 @@ abstract class ObstaclePassingMode(
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
 		val nextLane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
 		// High enough for the blocks in it that can be glided over.
-		val (raised, topY, aim, blocked) = clearInside(from, dir, start, end, min(maxFlightY(), from.y + MAX_BOUNCE_RISE))
+		val (hole, blocked) = holeHop(from, dir, at + start..at + end)
 		// One in it that can't be, e.g. on the lane dodged to, only with a lane past it to steer over to meanwhile. Else
 		// it's in the way like a wall in the hole, waited for or landed before while there's room to. Right at its edge
 		// braking drops you in, it's glided over and steered past once there's a lane, see [laneFromGlide].
@@ -1549,9 +1536,6 @@ abstract class ObstaclePassingMode(
 			}
 		val lane = nextLane ?: pastBlocked
 		val past = next ?: blocked
-		// Partly over its edge the box stands, the rays found where it doesn't.
-		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, from.y + passerConfig.minObstacleHeight, topY, at + start, false,
-			low = true, hole = true, aim = aim, raised = raised)
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
@@ -1665,10 +1649,19 @@ abstract class ObstaclePassingMode(
 		val at = progress(linePoint)
 		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
 		val hole = holesAhead(floorLine, dir).firstOrNull { it.endInclusive > at + edge && it.start <= at + edge + bounceRoom } ?: return null
-		val (raised, topY, aim) = clearInside(floorLine, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), floorLine.y + MAX_BOUNCE_RISE))
-		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, floorLine.y + passerConfig.minObstacleHeight, topY, hole.start, false,
-			low = true, hole = true, aim = aim, raised = raised)
-		return if (canGetOver(over, at)) null else hopMiss
+		return if (canGetOver(holeHop(floorLine, dir, hole).first, at)) null else hopMiss
+	}
+
+	/**
+	 * The glide along [line] over [hole], from where to where along the line, just above the floor there and higher over
+	 * the blocks in it, see [clearInside]. Partly over its edge the box stands, the rays found where it doesn't. With
+	 * where a block in it is that can't be glided over.
+	 */
+	private fun SafeContext.holeHop(line: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): Pair<Hop, Double?> {
+		val at = progress(line)
+		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxFlightY(), line.y + MAX_BOUNCE_RISE))
+		return Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
+			low = true, hole = true, aim = aim, raised = raised) to blocked
 	}
 
 	/** What [clearInside] found: where how high, how high it may go, where to hold it, and a block that can't be glided over. */
@@ -1943,15 +1936,12 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Whether you get over [hop] from [progress] on. Over carpets bouncing on may well, else holding the height from now
-	 * on, at the last moment later. Over a magma cube slow, holding it from the next tick on may make it where held from
-	 * close by wouldn't, [holdingFor] holds it once any later wouldn't. This tick still bounces, it's held from the next
-	 * one. Else holding it once [holdingFor] does.
+	 * on, at the last moment later. Else holding it from close by, or from the next bounce like [holdingFor] may.
 	 */
 	private fun SafeContext.canGetOver(hop: Hop, progress: Double) = when {
 		hop.held -> canHop(hop, progress)
 		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
-		hop.cube -> canHop(hop, progress) || canHopLater(hop, progress, 1)
-		else -> canHop(hop, progress)
+		else -> canHop(hop, progress) || !hop.hole && !hop.under && fromNextBounce(hop, progress)
 	}
 
 	/**
@@ -2085,21 +2075,29 @@ abstract class ObstaclePassingMode(
 			// at a bit later than that one, a near miss in the simulation doesn't let both slip by. Held from much
 			// earlier it glides long and slows down a lot. At its edge there's no bouncing on, held anyway.
 			hop.hole -> progress >= hop.start - speed || (lastBounceBefore(hop, progress) || hop.raised.isNotEmpty() &&
-				player.velocity.y > 0 && !player.isOnGround && nextRise()?.let { !canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) } != false) &&
-				canHop(hop, progress, 0)
+				player.velocity.y > 0 && !player.isOnGround && !fromNextBounce(hop, progress)) && canHop(hop, progress, 0)
 			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			hop.anyway -> true
 			// Not only from close by: slow, e.g. right after taking off, it climbs up there from farther. Under one up on
 			// the railing too, gliding low loses speed fast.
-			hop.cube -> holdCube(hop, progress, if (speed < SLOW_CUBE_SPEED) SLOW_CUBE_HOLD_DELAY else CUBE_HOLD_DELAY)
+			hop.cube -> holdCube(hop, progress)
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
-			else -> hop.start - progress <= speed * leadTicks(hop)
+			// Over a block or a wall, or through an opening in one: one more bounce while from it it still gets over,
+			// taking off from the floor up there faster than pulling up gliding.
+			else -> hop.start - progress <= speed * leadTicks(hop) && !fromNextBounce(hop, progress)
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
 	}
+
+	/**
+	 * Whether holding the height for [hop] from the next bounce on still gets over it, a bit later than that bounce
+	 * rises: a near miss in the simulation doesn't let that one and this one both slip by.
+	 */
+	private fun SafeContext.fromNextBounce(hop: Hop, progress: Double) =
+		nextRise()?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) } == true
 
 	/** In how many ticks the next bounce off the floor rises, bouncing on from here. Null when not within the simulation. */
 	private fun SafeContext.nextRise(): Int? {
@@ -2146,29 +2144,21 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Whether to hold the height over the magma cube of [hop] now, once any later wouldn't make it. Fast enough to still
+	 * Whether to hold the height over the magma cube of [hop] now, once from the next bounce it wouldn't make it. Gliding
+	 * over it late and short keeps the speed, and it has less time to notice you and jump. Fast enough to still
 	 * be after it, see [HIGH_CUBE_EXIT_SPEED], at its [Hop.highAim] instead: farther off the cube, more time to see
 	 * what's next. That one's held a bit sooner, it's higher up. Decided now, not when planned far off and slower.
 	 */
-	private fun SafeContext.holdCube(hop: Hop, progress: Double, delay: Int): Boolean {
+	private fun SafeContext.holdCube(hop: Hop, progress: Double): Boolean {
 		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, lane = hop.lane, cube = true, aim = it) }
 			?.takeIf { canHop(it, progress, 0) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
-			?: return !canHopLater(hop, progress, delay)
-		if (canHopLater(high, progress, delay)) return false
+			?: return !fromNextBounce(hop, progress)
+		if (fromNextBounce(high, progress)) return false
 		high.held = true
 		high.heldCheckedAt = player.age
 		this@ObstaclePassingMode.hop = high
 		ElytraFly.debug { "Fast enough to glide over the mob high, at y %.2f, %.2f after it".format(high.targetY, hopExitSpeed) }
 		return true
-	}
-
-	/**
-	 * Whether holding the height for [hop] from [from] ticks on or any later, until you'd be there at this speed, gets
-	 * you over it. Rising off the floor holding from the next tick may miss where from the next bounce on it makes it.
-	 */
-	private fun SafeContext.canHopLater(hop: Hop, progress: Double, from: Int): Boolean {
-		val ticks = ((hop.start - progress) / player.velocity.horizontalLength().coerceAtLeast(0.1)).toInt().coerceAtMost(CAN_HOP_SIM_TICKS)
-		return (from..max(from, ticks)).any { canHop(hop, progress, it) }
 	}
 
 	/**
@@ -2401,16 +2391,26 @@ abstract class ObstaclePassingMode(
 	private var solidEntities: List<Box> = emptyList()
 	private var shapeContext: ShapeContext = ShapeContext.absent()
 	private var shapesAge = -1
-	private var shapesWorld: World? = null
+	/** Which world they're of, by identity only: holding on to it would keep a world left behind in memory. */
+	private var shapesWorld = 0
 
 	/** Starts the caches over each tick, blocks change between ticks. */
 	private fun SafeContext.freshShapes() {
-		if (shapesAge == player.age && shapesWorld === world) return
+		if (shapesAge == player.age && shapesWorld == System.identityHashCode(world)) return
 		shapesAge = player.age
-		shapesWorld = world
+		shapesWorld = System.identityHashCode(world)
 		shapes.clear()
 		shapeContext = ShapeContext.of(player)
 		solidEntities = world.getOtherEntities(player, player.boundingBox.expand(SOLID_ENTITY_RANGE)) { player.collidesWith(it) }.map { it.boundingBox }
+	}
+
+	/** Lets go of the caches, the shape context holds on to you and through you the world. */
+	private fun dropShapes() {
+		shapes.clear()
+		shapes.trim()
+		solidEntities = emptyList()
+		shapeContext = ShapeContext.absent()
+		shapesAge = -1
 	}
 
 	private fun SafeContext.shapeAt(pos: BlockPos): VoxelShape {
