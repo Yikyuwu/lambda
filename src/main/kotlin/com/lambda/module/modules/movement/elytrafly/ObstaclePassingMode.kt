@@ -1789,8 +1789,9 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
 		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
-		// Up to just above the top on the way to it, above what the glide would rather keep under.
-		val touching = hop.with(touch = touch, topY = min(maxHopY(), max(hop.topY, touch.y + TOUCH_ABOVE + HOP_MARGIN)))
+		// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
+		// may take you higher than the top, sinking to just above it after.
+		val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
 		if (canGetOver(touching, progress(player.pos))) return touching.also { touchMiss = "" }
 		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(touch.y, touch.range.start - progress(player.pos))
 		return hop
