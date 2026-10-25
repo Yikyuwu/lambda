@@ -2026,8 +2026,9 @@ abstract class ObstaclePassingMode(
 			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
 			val path = steerOffsets(off, plan.lane, speed, by - progress)
 			return abs(path.last().second - plan.lane) <= TOUCH_LANE_OFF &&
-				pathClear(progress, path.takeWhile { abs(it.second - plan.lane) > TOUCH_LANE_OFF / 2 } + path.take(1), by, plan.touch.y + TOUCH_ABOVE)
+				pathClear(progress, path.take(path.indexOfFirst { abs(it.second - plan.lane) <= TOUCH_LANE_OFF / 2 }.coerceAtLeast(1) + 1), by, plan.touch.y + TOUCH_ABOVE)
 		}
+		val free = plans.size
 		plans.removeAll { plan -> !reachable(plan).also { if (!it) tried += "${plan.text} (${plan.covered}/25) can't be steered over to in time" } }
 		val sorted = plans.sortedWith(compareByDescending<Plan> { it.covered }.thenBy { abs(it.lane - off) })
 		// Not making it yet, e.g. slow still: dodging before it stays on the side of the best way to touch down there,
@@ -2050,7 +2051,7 @@ abstract class ObstaclePassingMode(
 			if (miss == null) miss = "touching down on the top at y %.2f %.1f ahead ${plan.text} misses too, $hopMiss".format(plan.touch.y, plan.touch.range.start - progress)
 			if (tried.size >= TOUCH_PLANS_TRIED) break
 		}
-		touchMiss = miss ?: "no lane over a top free past the hole"
+		touchMiss = miss ?: "no lane over a top free past the hole (${lanes.size} lanes over one, $free free)${tried.take(TOUCH_PLANS_TRIED).joinToString("") { ", $it" }}"
 		return hop
 	}
 
