@@ -220,6 +220,10 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_APPROACH = 8.0
 		/** How far past a hole's end the lane to touch down on in it has to be free, e.g. past a pillar there. */
 		private const val TOUCH_PAST = 3.0
+		/** The speed steering over to the lane of a top in a hole is simulated at, at least, see [touchLane]. */
+		private const val TOUCH_STEER_SPEED = 1.6
+		/** How many ways to touch down on a top in a hole are simulated at most, best first, see [touchLane]. */
+		private const val TOUCH_PLANS_TRIED = 4
 		/** How much more room than the box a lane to touch down on in a hole needs on the way, see [touchLane]. */
 		private const val LANE_CLEAR_MARGIN = 0.05
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
@@ -428,6 +432,8 @@ abstract class ObstaclePassingMode(
 	 */
 	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d = Vec3d.ZERO) {
 		val middle = (range.start + range.endInclusive) / 2
+		/** Over a hole, steered toward [lane] only from here along the line on, past what's in the way on it before. */
+		var switchAt = Double.NEGATIVE_INFINITY
 	}
 
 	abstract val passerConfig: PasserSettings
@@ -1492,7 +1498,9 @@ abstract class ObstaclePassingMode(
 						// Over to another only with fewer of them on it.
 						carpetsOnly && !onLine -> if (!fewestCarpetsLane.allows(block)) null
 							else freeLane(here, linePoint, dir, distance, lane, past = CARPET_CLEAR, fewestCarpets = true)?.takeUnless { it.stays }
-						else -> freeLane(here, linePoint, dir, distance, lane, dodgeCarpets, if (dodgeCarpets) CARPET_CLEAR else DODGE_MARGIN)
+						// Toward the side of a top to touch down on in a hole after it, like [startDodge].
+						else -> freeLane(here, linePoint, dir, distance, lane, dodgeCarpets, if (dodgeCarpets) CARPET_CLEAR else DODGE_MARGIN,
+							toward = touchSide?.takeIf { (_, until) -> progress + distance < until }?.first)
 					}
 					val over = if (carpetsOnly && distance <= CARPET_HOP_AHEAD) planHop(from, dir, distance, carpets = true, lean = tilt)
 						?.with(lane = lane) else null
@@ -1697,7 +1705,7 @@ abstract class ObstaclePassingMode(
 		// Touching down on a top in it, on the lane picked for that through the hole, over to it while still bouncing.
 		hole.touch?.let { touch ->
 			val across = hole.lane.dotProduct(across(dir))
-			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it on the lane %+.2f across, touching down on the top at y %.2f %.1f ahead ($touchLaneText)".format(start, end - start, across, touch.y, touch.range.start - at) }
+			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it, touching down on the top at y %.2f %.1f ahead ($touchLaneText)".format(start, end - start, touch.y, touch.range.start - at) }
 			if (abs(across - (dodge?.dotProduct(across(dir)) ?: 0.0)) > 0.01) dodgeTo(Lane(hole.lane, 0, across), hole.end + TOUCH_PAST)
 			hop = hole
 			return true
@@ -1870,17 +1878,28 @@ abstract class ObstaclePassingMode(
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val progress = progress(player.pos)
 		val floor = line.y
-		// The box itself and a bit, staying on the lane it doesn't swing out across like steering over to one does.
-		fun clear(lane: Double, from: Double, to: Double, bottom: Double, top: Double) =
-			generateSequence(max(from, progress)) { it + HOP_SCAN_STEP }.takeWhile { it <= to }.all { along ->
-				val point = startPos.add(forward.multiply(along)).add(across.multiply(lane))
-				spaceEmpty(Box(point.x - GLIDE_SIZE / 2, bottom, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, top, point.z + GLIDE_SIZE / 2)
-					.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
-			}
+		// The box itself and a bit at [along], at bounce height before the hole, at the height held above the top in it.
+		fun clearAt(along: Double, lane: Double, held: Double): Boolean {
+			val point = startPos.add(forward.multiply(along)).add(across.multiply(lane))
+			val (bottom, top) = if (along < hop.obstacle) floor + passerConfig.minObstacleHeight to floor + MAX_BOUNCE_RISE else held to held + GLIDE_SIZE
+			return spaceEmpty(Box(point.x - GLIDE_SIZE / 2, bottom, point.z - GLIDE_SIZE / 2, point.x + GLIDE_SIZE / 2, top, point.z + GLIDE_SIZE / 2)
+				.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
+		}
+		// Staying on the lane it doesn't swing out across like steering over to one does. Looked at once per lane, from
+		// [DODGE_STEER_AHEAD] ahead on, before that it's on the lane it's bouncing on.
+		val ahead = progress + DODGE_STEER_AHEAD
+		val grid = generateSequence(ahead) { it + HOP_SCAN_STEP }.takeWhile { it <= hop.end + TOUCH_PAST + HOP_SCAN_STEP }.toList()
+		val blocked = HashMap<Pair<Double, Double>, BooleanArray>()
+		fun blockedOn(lane: Double, held: Double) = blocked.getOrPut(lane to held) { BooleanArray(grid.size) { !clearAt(grid[it], lane, held) } }
+		fun clear(lane: Double, from: Double, to: Double, held: Double): Boolean {
+			val on = blockedOn(lane, held)
+			return grid.indices.none { on[it] && grid[it] >= from && grid[it] <= to }
+		}
 		// How much of the box is over the top halfway along it, on a lane covering it better a bit of drift across
 		// doesn't take it off the edge.
 		fun coverage(middle: Vec3d, y: Double) = (-2..2).sumOf { dx -> (-2..2).count { dz -> topAt(middle.x + dx * GLIDE_SIZE / 5, middle.z + dz * GLIDE_SIZE / 5, y) } }
-		val lanes = (-sides..sides).map { it * step }.mapNotNull { lane ->
+		val all = (-sides..sides).map { it * step }
+		val lanes = all.mapNotNull { lane ->
 			val laneLine = startPos.add(across.multiply(lane)).add(0.0, floor - startPos.y, 0.0)
 			val touch = touchSpot(laneLine, dir, hop.start, hop.end) ?: return@mapNotNull null
 			// The middle part of the box over it halfway along it, like diving onto it needs, see [topUnderSoon]: on a corner
@@ -1889,27 +1908,60 @@ abstract class ObstaclePassingMode(
 			if (listOf(-1, 1).none { dx -> listOf(-1, 1).any { dz -> topAt(middle.x + dx * GLIDE_SIZE / 4, middle.z + dz * GLIDE_SIZE / 4, touch.y) } }) return@mapNotNull null
 			Triple(lane, touch, coverage(middle, touch.y))
 		}.sortedWith(compareByDescending<Triple<Double, Touch, Int>> { it.third }.thenBy { abs(it.first - here) })
-		var miss: String? = null
-		val tried = mutableListOf<String>()
+		// On a lane staying on it, or blocked on the way on the lanes over a top, e.g. by a pillar at the hole's start on
+		// the line beside the top: on a lane past that, then steered in toward a lane [aim] over the top. Gliding the
+		// steering is slow, aiming beyond it gets it far enough over it. After bouncing off it back out to the lane it
+		// came on, past what's at the hole's end. Simulated like dodging, at the speed it comes over the hole at most,
+		// faster it turns later.
+		class Plan(val touch: Touch, val lane: Double, val covered: Int, val text: String)
+		val plans = mutableListOf<Plan>()
 		for ((lane, touch, covered) in lanes) {
 			val held = touch.y + TOUCH_ABOVE
-			if (!clear(lane, progress + DODGE_STEER_AHEAD, hop.obstacle, floor + passerConfig.minObstacleHeight, floor + MAX_BOUNCE_RISE) ||
-				!clear(lane, hop.obstacle, touch.range.start, held, held + GLIDE_SIZE) ||
-				!clear(lane, touch.range.endInclusive, hop.end + TOUCH_PAST, held, held + GLIDE_SIZE)) {
-				tried += "%+.2f (%d/25 over it) blocked".format(lane, covered)
-				continue
+			if (clear(lane, ahead, hop.end + TOUCH_PAST, held)) plans += Plan(touch, lane, covered, "on the lane %+.2f".format(lane))
+		}
+		val steerSpeed = max(player.velocity.horizontalLength(), TOUCH_STEER_SPEED)
+		// Per height of top, aimed in at the stretch of the one covered best.
+		for (first in lanes.map { it.second }.distinctBy { it.y }) {
+			val held = first.y + TOUCH_ABOVE
+			for (aim in all) {
+				// From just past the last of what's in the way on the aimed at lane, before the top.
+				val on = blockedOn(aim, held)
+				val switchAt = grid.indices.lastOrNull { on[it] && grid[it] < first.range.start }?.let { grid[it] + GLIDE_SIZE } ?: continue
+				val entry = all.filter { it != aim }.sortedBy { abs(it - aim) }.firstOrNull { clear(it, ahead, switchAt, held) } ?: continue
+				val path = steerOffsets(entry, aim, steerSpeed, hop.end + TOUCH_PAST - switchAt)
+				// Where it gets across, the top as it is on that lane.
+				val reached = path.firstOrNull { it.first >= first.middle - switchAt }?.second ?: continue
+				val nearest = all.minBy { abs(it - reached) }
+				val (_, touch, covered) = lanes.firstOrNull { it.first == nearest } ?: continue
+				if (abs(touch.y - first.y) > 0.01 || plans.any { it.lane == entry && it.touch.lane == across.multiply(aim) }) continue
+				// To the top aimed in, then back out on the lane it came on.
+				val touchAlong = touch.middle - switchAt
+				if (!path.filter { it.first <= touchAlong }.all { (along, off) -> clearAt(switchAt + along, off, held) }) continue
+				val back = steerOffsets(reached, entry, steerSpeed, hop.end + TOUCH_PAST - touch.middle)
+				if (!back.all { (along, off) -> clearAt(touch.middle + along, off, held) }) continue
+				plans += Plan(Touch(touch.range, touch.y, across.multiply(aim)).also { it.switchAt = switchAt }, entry, covered,
+					"from the lane %+.2f, %.1f ahead steering in toward %+.2f, over it at %+.2f".format(entry, switchAt - progress, aim, reached))
 			}
+		}
+		var miss: String? = null
+		val tried = mutableListOf<String>()
+		val sorted = plans.sortedWith(compareByDescending<Plan> { it.covered }.thenBy { abs(it.lane - here) })
+		// Not making it yet, e.g. slow still: dodging before it stays on the side of the best way to touch down there,
+		// faster later it may.
+		sorted.firstOrNull()?.let { touchSide = across.multiply(it.lane) to hop.end }
+		for (plan in sorted) {
 			// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
 			// may take you higher than the top, sinking to just above it after.
-			val touching = hop.with(touch = touch, lane = across.multiply(lane), topY = max(hop.topY, maxHopY()))
+			val touching = hop.with(touch = plan.touch, lane = across.multiply(plan.lane), topY = max(hop.topY, maxHopY()))
 			if (canGetOver(touching, progress)) {
 				touchMiss = ""
 				touchSide = touching.lane to hop.end
-				touchLaneText = "%d/25 of the box over it%s".format(covered, tried.joinToString("") { ", tried before: $it" })
+				touchLaneText = "%s, %d/25 of the box over it%s".format(plan.text, plan.covered, tried.joinToString("") { ", tried before: $it" })
 				return touching
 			}
-			tried += "%+.2f (%d/25 over it) misses".format(lane, covered)
-			if (miss == null) miss = "touching down on the top at y %.2f %.1f ahead on the lane %+.2f across misses too, $hopMiss".format(touch.y, touch.range.start - progress, lane)
+			tried += "${plan.text} (${plan.covered}/25) misses"
+			if (miss == null) miss = "touching down on the top at y %.2f %.1f ahead ${plan.text} misses too, $hopMiss".format(plan.touch.y, plan.touch.range.start - progress)
+			if (tried.size >= TOUCH_PLANS_TRIED) break
 		}
 		touchMiss = miss ?: "no lane over a top free past the hole"
 		return hop
@@ -2383,6 +2435,25 @@ abstract class ObstaclePassingMode(
 			along += speed * cos(heading)
 			speed *= 0.99
 			path.add(SteerState(along, off, heading, speed))
+		}
+		return path
+	}
+
+	/**
+	 * Steering from flying along the line [from] across it over to [to] at [speed], like [steerPath]: how far along and
+	 * across each tick, for [distance] along the line.
+	 */
+	private fun steerOffsets(from: Double, to: Double, speed: Double, distance: Double): List<Pair<Double, Double>> {
+		var heading = 0.0
+		var off = from
+		var along = 0.0
+		val path = mutableListOf(along to off)
+		while (along < distance && path.size <= HOP_SIM_TICKS) {
+			val drift = speed * sin(heading) * STEER_DAMPING_TICKS
+			heading += (atan2(to - off - drift, DODGE_STEER_AHEAD) - heading) * 0.1
+			off += speed * sin(heading)
+			along += speed * cos(heading)
+			path.add(along to off)
 		}
 		return path
 	}
@@ -2866,7 +2937,8 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
 		// On the lane with the top to touch down on until bounced off it, see [touchLane]. Beside an obstacle only shortly
 		// before it, see [laneTouch].
-		hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) -> steerYaw(linePoint, hop.touch.lane, dir)
+		hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) ->
+			steerYaw(linePoint, if (progress < hop.touch.switchAt) hop.lane else hop.touch.lane, dir)
 		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
 		else -> steerYaw(linePoint, hop.lane, dir)
 	}
