@@ -409,6 +409,8 @@ abstract class ObstaclePassingMode(
 	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane
 	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
 	private var onLane = false
+	/** Dodging what's right after a mob glided over, the lane doesn't keep clear of the mob, see [dodgeAfterCube]. */
+	private var dodgeAfterMob = false
 	/** Landing before an obstacle no lane gets past, to walk around it. */
 	protected val isBraking get() = brakeAt != null
 	/** Found no way past, standing still a while before looking again. */
@@ -652,11 +654,14 @@ abstract class ObstaclePassingMode(
 				!makesIt && hop.cube && hop.start - progress > player.velocity.horizontalLength() * HOP_LEAD_TICKS -> {
 					noLaneYet(hop.obstacle, "Can't get over the mob at %.1f from here ($hopMiss), bouncing on to look again".format(hop.start - progress))
 					this@ObstaclePassingMode.hop = null
+					// The lane past what's after it doesn't keep clear of it, see [dodgeAfterCube].
+					if (dodgeAfterMob) stopDodge()
 				}
 				!makesIt -> {
 					ElytraFly.debug { "Can't get over the obstacle at %.1f in time ($hopMiss), dodging instead".format(hop.start - progress) }
 					skipHopAt = hop.start
 					this@ObstaclePassingMode.hop = null
+					if (dodgeAfterMob) stopDodge()
 				}
 				else -> {
 					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
@@ -770,6 +775,7 @@ abstract class ObstaclePassingMode(
 					.format(distance, over.targetY, over.end - over.start)
 			}
 			hop = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, highAim = highAim)
+			dodgeAfterCube(from, linePoint, dir, block)
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
@@ -785,6 +791,24 @@ abstract class ObstaclePassingMode(
 		}
 		ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
 		return false
+	}
+
+	/**
+	 * Something in the way right after the mob the [hop] glides over, past it too close to steer over to a lane, e.g. a
+	 * block at the end of a hole there's no landing in. Steers over to a lane past it meanwhile, gliding over the mob.
+	 */
+	private fun SafeContext.dodgeAfterCube(from: Vec3d, linePoint: Vec3d, dir: Vec3d, block: String) {
+		val over = hop ?: return
+		val after = over.end - progress(from)
+		val next = from.add(dir.multiply(after)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return
+		val lane = freeLane(from, linePoint, dir, after + next.distance, Vec3d.ZERO, mobs = false) ?: run {
+			ElytraFly.debug { "Another obstacle %.1f after the mob (${next.what}), no free lane past it yet ($laneMiss)".format(next.distance) }
+			return
+		}
+		ElytraFly.debug { "Another obstacle %.1f after the mob ($block, ${next.what}), steering ${lane.target.describe(dir)}${lane.leanText()} gliding over the mob".format(next.distance) }
+		dodgeTo(lane, progress(from) + after + next.distance)
+		dodgeAfterMob = true
+		hop = over.with(lane = lane.target)
 	}
 
 	/**
@@ -809,6 +833,7 @@ abstract class ObstaclePassingMode(
 		dodgeTicks = 0
 		dodgeCarpets = carpets
 		onLane = false
+		dodgeAfterMob = false
 		return true
 	}
 
@@ -863,11 +888,11 @@ abstract class ObstaclePassingMode(
 	 * with floor there, up on a layer or the floor below it, and with nothing in the way of gliding over to it. The line
 	 * itself first. With [carpets] free of them too, for [past] after it. Looked at from [lead] ahead on, with that much
 	 * more to steer over to it first. With [fewestCarpets] the one with the fewest of them ahead instead, the one you're on
-	 * and then the line on a tie.
+	 * and then the line on a tie. Without [mobs] magma cubes and hoglins aren't in the way, they're glided over.
 	 */
 	private fun SafeContext.freeLane(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
-		lead: Double = 0.0, fewestCarpets: Boolean = false,
+		lead: Double = 0.0, fewestCarpets: Boolean = false, mobs: Boolean = true,
 	): Lane? {
 		val across = Vec3d(-dir.z, 0.0, dir.x).normalize()
 		val step = laneStep(dir)
@@ -913,7 +938,7 @@ abstract class ObstaclePassingMode(
 					// Ahead, you're not there yet to glide over from.
 					lead == 0.0 && from.sidewaysObstructed(lane.subtract(from)) -> "in the way sideways"
 					// From where the swing gets onto it, before that you're between the lanes, see the lanes crossed below.
-					else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets)
+					else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets, mobs)
 						?.let { "${it.what} ahead" }
 						?: lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
 							// A hole there with floor again within reach is glided over on the lane.
@@ -927,7 +952,7 @@ abstract class ObstaclePassingMode(
 							?.let { "a hole %.1f ahead".format(it) }
 						// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
 						?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
-							linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD)
+							linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs)
 								?.let { hit -> "${hit.what} ahead crossing over" }
 						}
 				}
@@ -1613,7 +1638,7 @@ abstract class ObstaclePassingMode(
 	 * what's next. That one's held a bit sooner, it's higher up. Decided now, not when planned far off and slower.
 	 */
 	private fun SafeContext.holdCube(hop: Hop, progress: Double, delay: Int): Boolean {
-		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, cube = true, aim = it) }
+		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, lane = hop.lane, cube = true, aim = it) }
 			?.takeIf { canHop(it, progress, 0) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
 			?: return !canHopLater(hop, progress, delay)
 		if (canHopLater(high, progress, delay)) return false
@@ -1868,6 +1893,7 @@ abstract class ObstaclePassingMode(
 	private fun stopDodge(): Boolean {
 		dodge = null
 		onLane = false
+		dodgeAfterMob = false
 		dodgeLean = 0
 		dodgeOffset = 0.0
 		dodgeCarpets = false
