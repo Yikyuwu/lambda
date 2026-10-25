@@ -29,7 +29,9 @@ import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.module.modules.world.HighwayTools
 import com.lambda.task.RootTask
 import com.lambda.task.tasks.OpenContainerTask
+import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.BlockUtils.isPassable
+import com.lambda.util.math.MathUtils.floorToInt
 import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.player.MovementUtils.jumping
 import com.lambda.util.player.MovementUtils.sneaking
@@ -156,6 +158,19 @@ object SpleefGuard : Loadable {
         if (isPassable(pos) || pos.y !in player.blockPos.y - 1..player.blockPos.y) return false
         val box = player.boundingBox.expand(0.3, 0.0, 0.3)
         return box.intersects(Box(pos).withMinY(box.minY).withMaxY(box.maxY))
+    }
+
+    /** Whether [entity] can really be in the column of [pos]: no block there collides with the part of it in that column. */
+    fun SafeContext.canBeIn(entity: Entity, pos: BlockPos): Boolean {
+        val hitbox = entity.boundingBox
+        val part = Box(
+            maxOf(hitbox.minX, pos.x.toDouble()), hitbox.minY, maxOf(hitbox.minZ, pos.z.toDouble()),
+            minOf(hitbox.maxX, pos.x + 1.0), hitbox.maxY, minOf(hitbox.maxZ, pos.z + 1.0),
+        ).contract(SIZE_EPSILON)
+        return (part.minY.floorToInt()..part.maxY.floorToInt()).none { y ->
+            val at = BlockPos(pos.x, y, pos.z)
+            blockState(at).getCollisionShape(world, at).boundingBoxes.any { it.offset(at).intersects(part) }
+        }
     }
 
     /** How far [pos] may be dug from: further for a block under a spleefed mob, up to vanilla's reach. */
