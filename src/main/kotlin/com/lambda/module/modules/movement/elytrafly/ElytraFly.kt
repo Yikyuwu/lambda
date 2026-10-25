@@ -38,6 +38,9 @@ import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.interaction.managers.rotating.RotationRequest
 import com.lambda.module.Module
+import com.lambda.module.modules.combat.AutoArmor
+import com.lambda.module.modules.combat.AutoTotem
+import com.lambda.module.modules.combat.autodisconnect.AutoDisconnect
 import com.lambda.module.modules.movement.elytrafly.modes.BounceElytraFly
 import com.lambda.module.modules.movement.elytrafly.modes.GeneralElytraFly
 import com.lambda.module.modules.movement.elytrafly.modes.GrimControlElytraFly
@@ -152,6 +155,10 @@ object ElytraFly : Module(
         onEnable {
             foodRestock.reset()
             mode.elytraFly.onEnableListeners.forEach { it() }
+            // Flying AFK, these keep you alive or log you out before you die.
+            listOf(AutoArmor, AutoDisconnect, AutoTotem).filter { !it.isEnabled }.takeIf { it.isNotEmpty() }?.let { off ->
+                warn("${off.joinToString { it.name }} ${if (off.size == 1) "is" else "are"} off, turn ${if (off.size == 1) "it" else "them"} on to stay safe while flying AFK")
+            }
             synchronized(recentSetbacks) { recentSetbacks.clear() }
             stuckAt.clear()
             prevVelocity = Vec3d.ZERO
