@@ -35,6 +35,7 @@ interface BuildConfig {
     val spleefEntities: Boolean
     val spleefMaxWidth: Double
     val spleefMaxHeight: Double
+    val spleefEndermen: Boolean
     val spleefEdgeGuard: Int
     val cautionDoubleBlocks: Boolean
     val maxPendingActions: Int

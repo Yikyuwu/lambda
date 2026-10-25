@@ -29,6 +29,7 @@ import com.lambda.interaction.construction.simulation.result.results.GenericResu
 import com.lambda.interaction.construction.simulation.sim
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.ContainerHandler.findContainersWithMaterial
+import com.lambda.interaction.handlers.SpleefGuard.staresAtEnderman
 import com.lambda.interaction.managers.hotbar.HotbarManager
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.RotationManager
@@ -118,8 +119,10 @@ class BreakSim internal constructor(simInfo: SimInfo)
 		}
 
 		val validHits = scanShape(pov, shape, pos, Direction.entries.toSet(), null) ?: return
+		// Staring at a calm enderman would anger it, e.g. while digging out a hole under it.
+		val calmHits = validHits.filterTo(mutableSetOf()) { !staresAtEnderman(pov, it.rotation) }
 
-		val bestHit = buildConfig.pointSelection.select(validHits) ?: return
+		val bestHit = buildConfig.pointSelection.select(calmHits) ?: return
 		val rotationRequest = rotationRequest { rotation(bestHit.rotation) }
 
 		val breakContext = BreakContext(
