@@ -178,6 +178,11 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val SLOW_CUBE_SPEED = 1.0
 		private const val SLOW_CUBE_HOLD_DELAY = 1
+		/**
+		 * The speed a tick gliding over a magma cube high in the room above it has to leave you with, else it's glided
+		 * over low. Climbing up there costs speed, too slow after it another cube right behind can't be got over.
+		 */
+		private const val HIGH_CUBE_EXIT_SPEED = 1.0
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
@@ -380,6 +385,8 @@ abstract class ObstaclePassingMode(
 	private var hopTooSlow = false
 	/** Where [canHop] found the glide falls short, for the debug log. */
 	private var hopMiss = ""
+	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
+	private var hopExitSpeed = 0.0
 	/** How long you've been down after braking, waiting for the server to end the glide. */
 	private var landedTicks = 0
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
@@ -748,9 +755,9 @@ abstract class ObstaclePassingMode(
 		plan()?.let { over ->
 			val low = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true)
 			// With room above, e.g. a highway without pavement under its ceiling, held in the middle of it, further off a
-			// cube that jumps, as long as it still gets up there in time.
+			// cube that jumps, as long as it still gets up there in time and is fast enough after it.
 			val high = Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, cube = true, aim = (over.feetY + over.topY) / 2)
-				.takeIf { !over.under && it.targetY > low.targetY && canGetOver(it, progress(linePoint)) }
+				.takeIf { !over.under && it.targetY > low.targetY && canGetOver(it, progress(linePoint)) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
 			val chosen = high ?: low
 			ElytraFly.debug { "Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f (room y %.2f to %.2f), %.1f long".format(distance, chosen.targetY, over.feetY, over.topY, over.end - over.start) }
 			hop = chosen
@@ -1486,7 +1493,10 @@ abstract class ObstaclePassingMode(
 					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.feetY, hop.topY)
 				return false
 			}
-			if (along > hop.end) return true
+			if (along > hop.end) {
+				hopExitSpeed = speed
+				return true
+			}
 		}
 		hopMiss = "not over it within $CAN_HOP_SIM_TICKS ticks"
 		return false
