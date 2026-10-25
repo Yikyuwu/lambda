@@ -81,6 +81,8 @@ abstract class ObstaclePassingMode(
 		private const val DODGE_STEER_AHEAD = 12.0
 		/** Close enough to the line to fly straight on again. */
 		private const val DODGE_BACK_ON_LINE = 0.3
+		/** Close enough to the lane dodged to, to bounce on along it. */
+		private const val ON_LANE = 0.3
 		private const val MAX_DODGE_TICKS = 200
 		/** How far past the obstacle the lane has to be free, and the line before swinging back. */
 		private const val DODGE_MARGIN = 3.0
@@ -397,10 +399,14 @@ abstract class ObstaclePassingMode(
 	private var noGapAt: Double? = null
 
 	/**
-	 * Steering past a blocked spot, flying level meanwhile so it doesn't speed into it. Not past carpets, there's nothing
-	 * to speed into and it's planned for bouncing on.
+	 * Steering past a blocked spot, flying level meanwhile so it doesn't speed into it. Not once over on the lane, it
+	 * bounces on there to get back the speed the swing over cost, e.g. for a hole right after, the lane is looked at
+	 * again every tick at the speed you have. Not past carpets, there's nothing to speed into and it's planned for
+	 * bouncing on.
 	 */
-	protected val isDodging get() = dodge != null && !dodgeCarpets
+	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane
+	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
+	private var onLane = false
 	/** Landing before an obstacle no lane gets past, to walk around it. */
 	protected val isBraking get() = brakeAt != null
 	/** Found no way past, standing still a while before looking again. */
@@ -799,6 +805,7 @@ abstract class ObstaclePassingMode(
 		dodgeEnd = at
 		dodgeTicks = 0
 		dodgeCarpets = carpets
+		onLane = false
 		return true
 	}
 
@@ -1182,6 +1189,10 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		val leaning = leaning(progress)
+		val wasOnLane = onLane
+		onLane = dodge.let { it != null && it != Vec3d.ZERO } && !leaning &&
+			abs(offset.dotProduct(Vec3d(-dir.z, 0.0, dir.x).normalize()) - dodgeOffset) < ON_LANE
+		if (onLane && !wasOnLane) ElytraFly.debug { "Over on the lane, bouncing on at %.2f".format(player.velocity.horizontalLength()) }
 		dodgeYaw = if (leaning) dodgeLeanYaw(linePoint, dir) else steerYaw(linePoint, dodge ?: Vec3d.ZERO, dir)
 		ElytraFly.debug {
 			val v = player.velocity
@@ -1828,6 +1839,7 @@ abstract class ObstaclePassingMode(
 	/** Back onto the line, still dodging until on it. */
 	private fun swingBack() {
 		dodge = Vec3d.ZERO
+		onLane = false
 		dodgeLean = 0
 		dodgeOffset = 0.0
 	}
@@ -1835,6 +1847,7 @@ abstract class ObstaclePassingMode(
 	/** Always false, for returning it from [steerDodge]. */
 	private fun stopDodge(): Boolean {
 		dodge = null
+		onLane = false
 		dodgeLean = 0
 		dodgeOffset = 0.0
 		dodgeCarpets = false
