@@ -206,6 +206,15 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_SINK = 0.6
 		/** How high above the top to touch down on it skims, diving, until the box is over it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM = 0.02
+		/** How many ticks before the box comes over the top it skims down to just above it, see [Hop.holdY]. */
+		private const val TOUCH_SKIM_TICKS = 4
+		/** How long after the last tick diving onto a top or touching down on it the landing is still held back, see [touchFloor]. */
+		private const val TOUCH_DIVE_HOLD_TICKS = 2
+		/**
+		 * How much of the box, in square blocks, has to be over the top to come down on it: a third. On its edge it slides
+		 * off in the same tick and gets set back.
+		 */
+		private const val TOUCH_MIN_OVERLAP = GLIDE_SIZE * GLIDE_SIZE / 3
 		/**
 		 * How far the box has to reach over the top each way to dive onto it, a sliver of its corner is enough to come
 		 * down on, see [topUnderSoon].
@@ -534,6 +543,12 @@ abstract class ObstaclePassingMode(
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
 	private var touchMiss = ""
 
+	/**
+	 * The top being dived onto and since when, held back with the jump off it, see [touchFloor]. Until a couple of ticks
+	 * after touching down, or [TOUCH_DIVE_HOLD_TICKS] at most.
+	 */
+	private var diveTop: Pair<Double, Int>? = null
+
 	/** How the lane to touch down on in a hole was picked, for the log. */
 	private var touchLaneText = ""
 	/** The lane of a top to touch down on in a hole ahead, and until where along the line, see [startDodge]. */
@@ -622,6 +637,7 @@ abstract class ObstaclePassingMode(
 			if (player.isOnGround && abs(player.y - touch.y) < 0.01) {
 				if (!hop.touched) ElytraFly.debug { "Touched down on it at y %.2f, bouncing off it".format(touch.y) }
 				hop.touchedAt = player.age
+				diveTop = touch.y to player.age
 				hop.topped = true
 				return@timed null
 			}
@@ -629,12 +645,24 @@ abstract class ObstaclePassingMode(
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
 		// Along the line it's time to dive, only with a top really under the box now or soon: off the middle of it, or not
 		// steered over quite far enough, diving along the line alone runs into its side.
+		// Skimming down to just above it a few ticks early, see [Hop.holdY], down onto it only once over its middle.
 		val dive = hop.touch?.takeIf { !hop.touched }?.let { touch ->
-			hop.diving(progress(player.pos), player.velocity.horizontalLength()) && topUnderSoon(touch.y)
+			hop.diving(progress(player.pos), player.velocity.horizontalLength() * TOUCH_SKIM_TICKS / TOUCH_DIVE_TICKS) && topUnderSoon(touch.y)
 		} == true
-		if (dive && !hop.overTop) {
+		// Down onto it with the box well over it, and still over it after the tick's move across: a move goes down first,
+		// then across, off its edge in the same tick it'd be on ground where there's nothing below and get set back. On the
+		// tick it's over it the most, unless the next is as good and more over it. Once down, it doesn't stop halfway.
+		val overTop = hop.touch?.let { touch ->
+			val step = Vec3d(player.velocity.x, 0.0, player.velocity.z)
+			fun lands(at: Vec3d) = topOverlap(at, touch.y) >= TOUCH_MIN_OVERLAP && topUnder(at.add(step), touch.y, TOUCH_OVERLAP)
+			val next = player.pos.add(step)
+			lands(player.pos) && (hop.overTop || !(lands(next) && topOverlap(next, touch.y) > topOverlap(player.pos, touch.y)))
+		} ?: true
+		if (dive && overTop) diveTop = hop.touch.y to player.age
+		if (dive && overTop && !hop.overTop) {
 			hop.overTop = true
-			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, diving onto it at y %.2f".format(player.y, player.velocity.y, hop.touch.y) }
+			ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, %.0f%% of the box over it, diving onto it at y %.2f"
+				.format(player.y, player.velocity.y, topOverlap(player.pos, hop.touch.y) / (GLIDE_SIZE * GLIDE_SIZE) * 100, hop.touch.y) }
 		}
 		// Down on the floor the bounce jumps this tick too. Pulling up on top of that throws you up into the roof.
 		val climb = if (player.isOnGround) JUMP_VELOCITY else player.velocity.y
@@ -644,7 +672,6 @@ abstract class ObstaclePassingMode(
 		if (climb > 0) held.rose = true
 		val progress = progress(player.pos)
 		val speed = player.velocity.horizontalLength()
-		val overTop = hop.touch?.let { topUnder(player.pos, it.y, 0.0) } ?: true
 		holdPitch(player.y, climb, speed, held.holdY(player.y, progress, speed, dive = dive, overTop = overTop), player.finalGravity, held.sinkAt(progress, speed, dive = dive && overTop))
 	}
 
@@ -653,8 +680,16 @@ abstract class ObstaclePassingMode(
 	 * with air above it, not a block reaching higher. Over it now counts too, the dive takes a couple of ticks and mustn't
 	 * stop halfway. Below its height it only goes once over it, see [Hop.holdY].
 	 */
-	private fun SafeContext.topUnderSoon(y: Double) = (0..2).any { ticks ->
+	private fun SafeContext.topUnderSoon(y: Double) = (0..TOUCH_SKIM_TICKS).any { ticks ->
 		topUnder(player.pos.add(player.velocity.x * ticks, 0.0, player.velocity.z * ticks), y, TOUCH_OVERLAP)
+	}
+
+	/** How much of the box at [at] is over tops at [y], in square blocks, see [topUnder]. */
+	private fun SafeContext.topOverlap(at: Vec3d, y: Double): Double {
+		val half = GLIDE_SIZE / 2
+		return BlockPos.iterate(BlockPos.ofFloored(at.x - half, y - 0.5, at.z - half), BlockPos.ofFloored(at.x + half - 1e-6, y - 0.5, at.z + half - 1e-6))
+			.filter { topAt(it.x + 0.5, it.z + 0.5, y) }
+			.sumOf { (min(at.x + half, it.x + 1.0) - max(at.x - half, it.x.toDouble())) * (min(at.z + half, it.z + 1.0) - max(at.z - half, it.z.toDouble())) }
 	}
 
 	/** Whether the box at [at] is over a top at [y] by [overlap] at least each way, see [topUnderSoon]. */
@@ -693,6 +728,7 @@ abstract class ObstaclePassingMode(
 			scanTicks = 0
 			noWayYet.clear()
 			touchSide = null
+			diveTop = null
 			slowFor = null
 			forgetSpeedNeed()
 		}
@@ -2131,6 +2167,11 @@ abstract class ObstaclePassingMode(
 	 * a roof, e.g. a pillar two high, takes you into it standing.
 	 */
 	protected fun SafeContext.touchFloor(): Double? {
+		// Diving onto it, held whatever the hop does meanwhile, e.g. ended or planned again the tick before touching down.
+		diveTop?.let { (y, since) ->
+			if (player.isGliding && player.age - since <= TOUCH_DIVE_HOLD_TICKS) return y
+			diveTop = null
+		}
 		val hop = hop ?: return null
 		val touch = hop.touch ?: return null
 		val progress = progress(player.pos)
