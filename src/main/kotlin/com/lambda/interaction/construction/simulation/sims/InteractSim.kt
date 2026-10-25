@@ -32,6 +32,7 @@ import com.lambda.interaction.handlers.SpleefGuard.canSpleef
 import com.lambda.interaction.handlers.SpleefGuard.isUnderPlayer
 import com.lambda.interaction.handlers.SpleefGuard.onSpleef
 import com.lambda.interaction.handlers.SpleefGuard.reportUnspleefable
+import com.lambda.interaction.handlers.SpleefGuard.staresAtEnderman
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.interaction.managers.rotating.Rotation.Companion.rotation
@@ -122,8 +123,10 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 		val pov = fakePlayer.eyePos
 
 		val validHits = scanShape(pov, shape, pos, setOf(side), preProcessing) ?: return
+		// Staring at a calm enderman would anger it, e.g. while closing the floor over one spleefed into a hole.
+		val calmHits = validHits.filter { !staresAtEnderman(pov, it.rotation) }
 
-		selectHitPos(validHits, fakePlayer, supervisorScope)
+		selectHitPos(calmHits, fakePlayer, supervisorScope)
 	}
 
 	private suspend fun AutomatedSafeContext.selectHitPos(
