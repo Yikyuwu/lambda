@@ -101,6 +101,7 @@ object ElytraFly : Module(
     private val safetyMargin by setting("Safety Margin", 0.2, 0.0..2.0, 0.01, "The time (in seconds) to shorten the firework use delay to account for ping variation", "s")
     private val mute by setting("Mute Elytra", false, "Mutes the elytra sound when gliding")
     @JvmStatic val fakeFly by setting("Fake Fly", false, "Rapidly swaps the chestplate and elytra to give the appearance the player is flying without an elytra. May also reduce durability loss")
+    private val safetyWarning by setting("Safety Warning", true, "Warns on enable when AutoArmor, AutoDisconnect or AutoTotem is off")
     private val debugLog by setting("Debug Log", false, "Writes setbacks and why the obstacle passer walks to the game log, to find out why flying stops")
 
     private const val BOUNCE_TAB = "Bounce"
@@ -151,9 +152,9 @@ object ElytraFly : Module(
         onEnable {
             mode.elytraFly.onEnableListeners.forEach { it() }
             // Flying AFK, these keep you alive or log you out before you die.
-            listOf(AutoArmor, AutoDisconnect, AutoTotem).filter { !it.isEnabled }.takeIf { it.isNotEmpty() }?.let { off ->
+            val off = listOf(AutoArmor, AutoDisconnect, AutoTotem).filterNot { it.isEnabled }
+            if (safetyWarning && off.isNotEmpty())
                 warn("${off.joinToString { it.name }} ${if (off.size == 1) "is" else "are"} off, turn ${if (off.size == 1) "it" else "them"} on to stay safe while flying AFK")
-            }
             synchronized(recentSetbacks) { recentSetbacks.clear() }
             stuckAt.clear()
             prevVelocity = Vec3d.ZERO
