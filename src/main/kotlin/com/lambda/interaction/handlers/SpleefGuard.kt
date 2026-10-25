@@ -25,13 +25,13 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
-import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.module.modules.world.HighwayTools
 import com.lambda.task.RootTask
 import com.lambda.task.tasks.OpenContainerTask
 import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.math.MathUtils.floorToInt
+import com.lambda.util.player.CheckedHit
 import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.player.MovementUtils.jumping
 import com.lambda.util.player.MovementUtils.sneaking
@@ -92,7 +92,8 @@ object SpleefGuard : Loadable {
             // In water or lava crouching would keep the player from swimming up.
             guarding = (now < guardUntil || holeNearby) && !player.isTouchingWater && !player.isInLava
 
-            calmEnderEyes = world.entities
+            // Only looked for while a task runs, nothing digs or places otherwise.
+            calmEnderEyes = if (!RootTask.isBusy) emptyList() else world.entities
                 .filter { it is EndermanEntity && it.isAlive && !it.isAngry && isNear(it.blockPos, FORGET_RANGE) && player.canSee(it) }
                 .map { it.eyePos }
 
@@ -132,7 +133,7 @@ object SpleefGuard : Loadable {
 
     /**
      * A mob small enough to fall through a hole that can't hop, fly or climb back out. A calm enderman gets a hole
-     * 3 deep, which crouching reaches, and the digging never looks at it, see [staresAtEnderman].
+     * 3 deep, which crouching reaches, and the digging never looks at it, see [withoutStares].
      * An angry one would teleport out. HighwayTools can be set to kill calm ones instead.
      */
     fun BuildConfig.canSpleef(entity: Entity) =
@@ -141,12 +142,16 @@ object SpleefGuard : Loadable {
             entity !is Flutterer && entity !is BatEntity && !entity.hasNoGravity() &&
             entity.width <= spleefMaxWidth + SIZE_EPSILON && entity.height <= spleefMaxHeight + SIZE_EPSILON
 
-    /** Whether looking along [rotation] from [eye] would stare at a calm enderman in sight and anger it. */
-    fun staresAtEnderman(eye: Vec3d, rotation: Rotation): Boolean {
-        val look = rotation.vector.normalize()
-        return calmEnderEyes.any { enderEye ->
-            val diff = enderEye.subtract(eye)
-            look.dotProduct(diff.normalize()) > 1.0 - STARE_CONE / diff.length()
+    /** The [hits] that don't stare at a calm enderman in sight from [eye], which would anger it. All of them with none around. */
+    fun withoutStares(eye: Vec3d, hits: Collection<CheckedHit>): Collection<CheckedHit> {
+        val eyes = calmEnderEyes
+        if (eyes.isEmpty()) return hits
+        return hits.filter { hit ->
+            val look = hit.rotation.vector.normalize()
+            eyes.none { enderEye ->
+                val diff = enderEye.subtract(eye)
+                look.dotProduct(diff.normalize()) > 1.0 - STARE_CONE / diff.length()
+            }
         }
     }
 
