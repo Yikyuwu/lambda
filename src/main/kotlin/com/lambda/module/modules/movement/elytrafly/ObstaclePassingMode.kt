@@ -1540,12 +1540,15 @@ abstract class ObstaclePassingMode(
 		// Farther, or in it: glided over from the line, bouncing on up to it faster than on a lane, and steered over to a
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
 		val nextLane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
-		// High enough for the blocks in it that can be glided over.
-		val (hole, blocked) = holeHop(from, dir, at + start..at + end)
+		// High enough for the blocks in it that can be glided over. Dodging, on the lane flown along, not where you are
+		// steering over to it, from there what's dodged looks in the way.
+		val glideLine = if (dodging && dodge != null) dodgeLanePoint(linePoint, dir) else from
+		val (hole, blocked) = holeHop(glideLine, dir, at + start..at + end)
 		// One in it that can't be, e.g. on the lane dodged to, only with a lane past it to steer over to meanwhile. Else
 		// it's in the way like a wall in the hole, waited for or landed before while there's room to. Right at its edge
-		// braking drops you in, it's glided over and steered past once there's a lane, see [laneFromGlide].
-		val pastBlocked = if (nextLane != null || blocked == null || start <= brakeDistance()) null
+		// braking drops you in, it's glided over and steered past once there's a lane, see [laneFromGlide]. What's
+		// dodged the lane already gets past.
+		val pastBlocked = if (nextLane != null || blocked == null || start <= brakeDistance() || dodging && at + blocked <= dodgeEnd + DODGE_MARGIN) null
 			else freeLane(from, linePoint, dir, blocked, dodge ?: Vec3d.ZERO)?.takeIf { it.target != (dodge ?: Vec3d.ZERO) } ?: run {
 				val reason = "Hole %.1f ahead, %.1f long, ${from.obstacleBlock(dir, blocked + 1)} %.1f ahead in it can't be glided over, no lane past it ($laneMiss)"
 					.format(start, end - start, blocked)
