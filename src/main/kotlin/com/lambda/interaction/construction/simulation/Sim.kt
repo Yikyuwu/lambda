@@ -87,18 +87,19 @@ abstract class Sim<T : BuildResult> : Results<T> {
     protected abstract suspend fun AutomatedSafeContext.sim()
 
     /**
-     * Scans a [voxelShape] on the given [sides] at the [pos] from the [pov].
+     * Scans a [voxelShape] on the given [sides] at the [pos] from the [pov], within [reach].
      */
     suspend fun SimInfo.scanShape(
         pov: Vec3d,
         voxelShape: VoxelShape,
         pos: BlockPos,
         sides: Set<Direction>,
-        preProcessing: PreProcessingData?
+        preProcessing: PreProcessingData?,
+        reach: Double = buildConfig.blockReach
     ): Set<CheckedHit>? {
         val boxes = voxelShape.boundingBoxes.map { it.offset(pos) }
 
-        val reachSq = buildConfig.blockReach.pow(2)
+        val reachSq = reach.pow(2)
 
         val validHits = ConcurrentSet<CheckedHit>()
         val misses = ConcurrentSet<Pair<Vec3d, Direction>>()
@@ -126,7 +127,7 @@ abstract class Sim<T : BuildResult> : Results<T> {
                         }
 
                         val newRotation = pov.rotationTo(vec)
-                        val hit = newRotation.blockRayCast(buildConfig.blockReach, pov)?.blockResult ?: return@scanSurfaces
+                        val hit = newRotation.blockRayCast(reach, pov)?.blockResult ?: return@scanSurfaces
 
                         if (hit.blockPos != pos || hit.side != side) return@scanSurfaces
                         val checked = CheckedHit(hit, newRotation)
