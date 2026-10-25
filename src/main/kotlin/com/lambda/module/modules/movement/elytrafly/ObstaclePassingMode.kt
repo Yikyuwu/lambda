@@ -665,7 +665,7 @@ abstract class ObstaclePassingMode(
 			// A hole before anything in the way, carpets too. Up on a layer its end is looked for instead.
 			if (!onLayer && glideOverHole(here, closestLinePoint, snappedDir, low?.distance)) return false
 			ahead?.let { distance ->
-				if (startDodge(here, closestLinePoint, snappedDir, distance, block?.mob == true)) return false
+				if (startDodge(here, closestLinePoint, snappedDir, distance, block.mob)) return false
 			}
 			if (ahead == null && low != null && dodgeCarpets(here, closestLinePoint, snappedDir, low)) return false
 			// Holding the yaw alone drifts off the line, half a block over a couple hundred, into blocks beside it.
@@ -1545,7 +1545,6 @@ abstract class ObstaclePassingMode(
 		return Box(body.minX, body.minY, body.minZ, body.maxX, body.minY + max(CUBE_HEIGHT, body.lengthY), body.maxZ)
 			.expand(CUBE_REACH + MAGMA_CUBE_MARGIN, 0.0, CUBE_REACH + MAGMA_CUBE_MARGIN)
 	}
-
 
 	/** Where [entity] in the air comes down, on the top of the first block below it, else on the line's floor. */
 	private fun SafeContext.landingY(entity: Entity): Double {

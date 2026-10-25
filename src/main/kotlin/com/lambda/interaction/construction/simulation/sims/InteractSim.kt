@@ -33,7 +33,7 @@ import com.lambda.interaction.handlers.SpleefGuard.canSpleef
 import com.lambda.interaction.handlers.SpleefGuard.isUnderPlayer
 import com.lambda.interaction.handlers.SpleefGuard.onSpleef
 import com.lambda.interaction.handlers.SpleefGuard.reportUnspleefable
-import com.lambda.interaction.handlers.SpleefGuard.staresAtEnderman
+import com.lambda.interaction.handlers.SpleefGuard.withoutStares
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.Rotation
 import com.lambda.interaction.managers.rotating.Rotation.Companion.rotation
@@ -125,7 +125,7 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 
 		val validHits = scanShape(pov, shape, pos, setOf(side), preProcessing) ?: return
 		// Staring at a calm enderman would anger it, e.g. while closing the floor over one spleefed into a hole.
-		val calmHits = validHits.filter { !staresAtEnderman(pov, it.rotation) }
+		val calmHits = withoutStares(pov, validHits)
 
 		selectHitPos(calmHits, fakePlayer, supervisorScope)
 	}
@@ -317,10 +317,11 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 						val hitbox = entity.boundingBox
 						// Only the columns it really stands in. Drawn between two server positions it can seem to
 						// stick into a solid block next to its hole, which was dug out and placed back over and over.
+						val columns = HashMap<Pair<Int, Int>, Boolean>()
 						val supports = entity.getPositionsWithinHitboxXZ(
 							(pos.y - (hitbox.maxY - hitbox.minY)).floorToInt(),
 							pos.y
-						).filter { canBeIn(entity, it) }
+						).filter { columns.getOrPut(it.x to it.z) { canBeIn(entity, it) } }
 						// Never dig out the player's footing, wait for the entity to move instead.
 						if (supports.any { isUnderPlayer(it) }) {
 							reportUnspleefable(entity)
