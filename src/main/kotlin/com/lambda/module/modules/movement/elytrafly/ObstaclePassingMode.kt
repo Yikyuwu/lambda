@@ -189,6 +189,8 @@ abstract class ObstaclePassingMode(
 		/** How many ticks after gliding over a hole it comes down on the floor, and how much floor more it needs to bounce. */
 		private const val HOLE_TOUCHDOWN_TICKS = 3
 		private const val HOLE_TOUCHDOWN_MARGIN = 1.0
+		/** How fast a lane past an obstacle is looked for once none fits at the speed you have, see [slowingToFit]. */
+		private const val FIT_SPEED = 0.85
 		/** How often an obstacle still far with no way past yet is looked at again, see [lookedLately]. */
 		private const val RELOOK_TICKS = 4
 		/** How close below its height over a hole counts as up there, see [Hop.topped]. */
@@ -421,6 +423,17 @@ abstract class ObstaclePassingMode(
 	private var hopExitSpeed = 0.0
 	/** How long you've been down after braking, waiting for the server to end the glide. */
 	private var landedTicks = 0
+	/** Where along the line an obstacle is that a lane gets past only slower, see [slowingToFit]. */
+	private var slowFor: Double? = null
+	/**
+	 * Slowing down to [FIT_SPEED] for a lane past an obstacle ahead: diagonally the box swings out across the way the
+	 * farther the faster, at speed it may not fit between it and the wall beside it.
+	 */
+	protected val slowingToFit get() = slowFor != null
+	/** Dodging on a lane that only fits slower, see [slowingToFit], until past what's dodged. */
+	private var fitDodge = false
+	/** On it at [FIT_SPEED] already, flying level so it doesn't get faster, slower it bounces on. */
+	private var atFitSpeed = false
 	/** Why [throughOpening] found no opening, for the log. */
 	private var openingMiss = ""
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
@@ -440,7 +453,7 @@ abstract class ObstaclePassingMode(
 	 * again every tick at the speed you have. Not past carpets, there's nothing to speed into and it's planned for
 	 * bouncing on. Not on the way to gliding over something, it's planned for bouncing on up to it.
 	 */
-	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane && !speedingUp && hop == null
+	protected val isDodging get() = dodge != null && !dodgeCarpets && hop == null && (atFitSpeed || !onLane && !speedingUp)
 	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
 	private var onLane = false
 	/** Ticks since what's ahead was last looked at, see [planSpeed]. */
@@ -517,6 +530,7 @@ abstract class ObstaclePassingMode(
 			sameGoals = 0
 			scanTicks = 0
 			noWayYet.clear()
+			slowFor = null
 			forgetSpeedNeed()
 		}
 		onDisable {
@@ -568,6 +582,7 @@ abstract class ObstaclePassingMode(
 		passTicks++
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
+		if (slowFor?.let { progress(player.pos) > it } == true || !player.isGliding) slowFor = null
 		// Past it, or on a lane or landing for it.
 		if (noLaneAt?.let { progress(player.pos) > it } == true || dodge != null || brakeAt != null || !player.isGliding) noLaneAt = null
 		if (!BaritoneHandler.baritoneAvailable) {
@@ -822,7 +837,14 @@ abstract class ObstaclePassingMode(
 				// Looking for an opening glides over it on each lane, that'd replace why not on the line.
 				val notOver = hopRejection
 				val noLane = laneMiss
-				return throughOpening(from, linePoint, dir, distance, block) || if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane to dodge to yet ($noLane), no opening in it ($openingMiss)".format(distance))
+				if (throughOpening(from, linePoint, dir, distance, block)) return true
+				// One fits slower, it slows down first.
+				if (distance > brakeDistance() + DODGE_STEER_AHEAD && player.velocity.horizontalLength() > FIT_SPEED &&
+					freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null) {
+					slowFor = at
+					return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane at this speed ($noLane), slowing down to %.2f to fit one".format(distance, FIT_SPEED))
+				}
+				return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane to dodge to yet ($noLane), no opening in it ($openingMiss)".format(distance))
 				else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), %.2f off the line, no free lane to dodge to ($noLane), no opening in it ($openingMiss)".format(distance, from.distanceTo(linePoint)))
 			}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
@@ -916,6 +938,8 @@ abstract class ObstaclePassingMode(
 		dodgeCarpets = carpets
 		onLane = false
 		dodgeAfterMob = false
+		fitDodge = slowFor != null
+		slowFor = null
 		return true
 	}
 
@@ -970,25 +994,26 @@ abstract class ObstaclePassingMode(
 	 * with floor there, up on a layer or the floor below it, and with nothing in the way of gliding over to it. The line
 	 * itself first. With [carpets] free of them too, for [past] after it. Looked at from [lead] ahead on, with that much
 	 * more to steer over to it first. With [fewestCarpets] the one with the fewest of them ahead instead, the one you're on
-	 * and then the line on a tie. Without [mobs] magma cubes and hoglins aren't in the way, they're glided over.
+	 * and then the line on a tie. Without [mobs] magma cubes and hoglins aren't in the way, they're glided over. At
+	 * [speed] a tick, the box swings out farther the faster.
 	 */
 	private fun SafeContext.freeLane(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
-		lead: Double = 0.0, fewestCarpets: Boolean = false, mobs: Boolean = true,
+		lead: Double = 0.0, fewestCarpets: Boolean = false, mobs: Boolean = true, speed: Double = player.velocity.horizontalLength(),
 	): Lane? {
 		val across = across(dir)
 		val step = laneStep(dir)
 		val here = from.subtract(linePoint).dotProduct(across)
-		val leans = sweep(dir) > 0.01
+		val leans = sweep(dir, speed) > 0.01
 		// The room past an obstacle can be narrower than a lane: diagonally, or straight with the line off the middle of the
 		// blocks, a lane a block over grazes the ones on both sides. A quarter of one finds it.
 		val laneStep = step / 4
 		// The lane dodged to, not its target, that's short of it by the tilt and would round to the one next to it.
 		val currentOffset = ((if (dodge != null && current == dodge) dodgeOffset else current.dotProduct(across)) / laneStep).roundToInt()
 		val maxOffset = (passerConfig.maxDodge / laneStep + 1e-6).toInt()
-		val leanDistance = player.velocity.horizontalLength() * LEAN_TICKS
+		val leanDistance = speed * LEAN_TICKS
 		// The path slows down a little each tick, bouncing speeds you up meanwhile. The box swings out that much farther.
-		val laneSpeed = player.velocity.horizontalLength() + LANE_SPEED_MARGIN
+		val laneSpeed = speed + LANE_SPEED_MARGIN
 		val misses = mutableListOf<Pair<Double, String>>()
 		val taken = mutableListOf<Pair<Double, Int>>()
 		val lanes = (-maxOffset..maxOffset)
@@ -1318,6 +1343,7 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		val leaning = leaning(progress)
+		atFitSpeed = fitDodge && player.velocity.horizontalLength() >= FIT_SPEED
 		val wasOnLane = onLane
 		onLane = dodge.let { it != null && it != Vec3d.ZERO } && !leaning &&
 			abs(offset.dotProduct(across(dir)) - dodgeOffset) < ON_LANE
@@ -2228,6 +2254,8 @@ abstract class ObstaclePassingMode(
 	private fun swingBack() {
 		dodge = Vec3d.ZERO
 		onLane = false
+		fitDodge = false
+		atFitSpeed = false
 		dodgeLean = 0
 		dodgeOffset = 0.0
 	}
@@ -2237,6 +2265,9 @@ abstract class ObstaclePassingMode(
 		dodge = null
 		onLane = false
 		dodgeAfterMob = false
+		slowFor = null
+		fitDodge = false
+		atFitSpeed = false
 		dodgeLean = 0
 		dodgeOffset = 0.0
 		dodgeCarpets = false

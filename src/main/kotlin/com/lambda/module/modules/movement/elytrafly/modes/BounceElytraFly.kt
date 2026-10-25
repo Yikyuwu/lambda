@@ -224,11 +224,12 @@ class BounceElytraFly(
 					player.velocity.y > 0 && player.y - groundY < MIN_TAKEOFF_HEIGHT -> 90.0
 					// Under a low roof there's no room to climb far, and each bounce speeds it up again. Looking up it
 					// brakes and glides long without touching the floor, as high as flying level goes.
-					slowingForChunks && pacer.lowRoof -> eased(holdHeightPitch(SLOW_PITCH, maxFlightY()))
+					(slowingForChunks || slowingToFit) && pacer.lowRoof -> eased(holdHeightPitch(SLOW_PITCH, maxFlightY()))
 					coasting && pacer.lowRoof -> eased(holdHeightPitch(COAST_PITCH_UP, maxFlightY()))
 					// Looking up turns speed into climbing, and up there no bounce pushes you on.
 					// Turned to bit by bit, the server sets you back for a sudden turn up while climbing.
-					slowingForChunks -> eased(holdHeightPitch(SLOW_PITCH))
+					// Also to fit a lane past an obstacle ahead, see [slowingToFit].
+					slowingForChunks || slowingToFit -> eased(holdHeightPitch(SLOW_PITCH))
 					// Just enough up to keep the height, gliding long without bounces pushing you on.
 					coasting -> eased(holdHeightPitch(COAST_PITCH_UP))
 					// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
@@ -433,7 +434,7 @@ class BounceElytraFly(
 			val level = coastPitch(ceiling - y, climb)
 			when {
 				// Slowing down climbs at first, flying level is the lower one to plan with.
-				slowingForChunks || coasting || isDodging -> level
+				slowingForChunks || slowingToFit || coasting || isDodging -> level
 				!smartPitch -> pacer.throttled(pitch, level)
 				climb > -0.2 -> pacer.throttled(90.0, level)
 				else -> 4.0
