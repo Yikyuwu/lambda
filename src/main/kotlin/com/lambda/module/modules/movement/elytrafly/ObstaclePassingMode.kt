@@ -799,9 +799,10 @@ abstract class ObstaclePassingMode(
 			hop = it
 			return true
 		}
-		if (skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { over ->
+		if (skipHopAt?.let { abs(it - at) < 1.5 } != true) planHop(linePoint, dir, distance)?.let { planned ->
+			val over = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: planned
 			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
-			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it${if (over.hole) " and the hole after it" else ""} at y %.2f, %.1f long".format(distance, over.targetY, over.end - over.start) }
 			hop = over
 			return true
 		}
@@ -1451,6 +1452,32 @@ abstract class ObstaclePassingMode(
 		dodgeTo(lane, at + next)
 		hop = hole.with(lane = lane.target)
 		return true
+	}
+
+	/**
+	 * [over], a glide over a block, with a hole starting right after it, too close to bounce in between: both glided over
+	 * as one, as high as over a hole from the start, not low over the block and pulling up over the hole after, and over
+	 * the blocks in it. Null when there's none or that doesn't get over it.
+	 */
+	private fun SafeContext.withHoleAfter(over: Hop, linePoint: Vec3d, dir: Vec3d): Hop? {
+		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
+		val hole = holesAhead(linePoint, dir).firstOrNull { it.endInclusive > over.end && it.start <= over.end + bounceRoom } ?: return null
+		val at = progress(linePoint)
+		// Blocks in the hole too, as high as the highest of them needs. One that can't be glided over is steered past
+		// meanwhile, see [laneFromGlide].
+		var feetY = over.feetY
+		var topY = min(over.topY, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE))
+		var from = over.end - at
+		while (from < hole.endInclusive - at) {
+			val hit = linePoint.add(dir.multiply(from)).obstacleHit(dir, hole.endInclusive - at - from, mobs = false) ?: break
+			val inner = planHop(linePoint, dir, from + hit.distance) ?: break
+			feetY = max(feetY, inner.feetY)
+			topY = min(topY, inner.topY)
+			from = max(inner.end - at, from + hit.distance + HOP_SCAN_STEP)
+		}
+		if (topY - feetY < HOP_MARGIN) return null
+		val both = Hop(over.start, hole.endInclusive, feetY, topY, over.obstacle, false, low = true, hole = true)
+		return both.takeIf { canGetOver(it, at) }
 	}
 
 	/**
