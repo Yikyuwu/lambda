@@ -428,9 +428,9 @@ abstract class ObstaclePassingMode(
 	 * Steering past a blocked spot, flying level meanwhile so it doesn't speed into it. Not once over on the lane, it
 	 * bounces on there to get back the speed the swing over cost, e.g. for a hole right after, the lane is looked at
 	 * again every tick at the speed you have. Not past carpets, there's nothing to speed into and it's planned for
-	 * bouncing on.
+	 * bouncing on. Not on the way to gliding over something, it's planned for bouncing on up to it.
 	 */
-	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane && !speedingUp
+	protected val isDodging get() = dodge != null && !dodgeCarpets && !onLane && !speedingUp && hop == null
 	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
 	private var onLane = false
 	/** Ticks since what's ahead was last looked at, see [planSpeed]. */
@@ -801,6 +801,9 @@ abstract class ObstaclePassingMode(
 		// left for close enough to still steer over to it.
 		if (hopTooSlow && distance > brakeDistance() + HOP_RETRY_MARGIN)
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), can't get over it yet ($hopMiss), bouncing on to look again".format(distance))
+		// Steered past over a hole before it, from the line.
+		if (!onLayer && distance > brakeDistance() + DODGE_STEER_AHEAD && dodgeOverHole(linePoint, dir, distance))
+			return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), steering past it over the hole before it".format(distance))
 		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
 			?: return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), no free lane to dodge to yet ($laneMiss)".format(distance))
 			else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), %.2f off the line, no free lane to dodge to ($laneMiss)".format(distance, from.distanceTo(linePoint)))
@@ -1393,19 +1396,23 @@ abstract class ObstaclePassingMode(
 		if (floorEnd == null) return glideOverOpenHole(from, dir, at, start)
 		var end: Double = floorEnd
 		while (true) end = holeFrom(end)?.let(::floorFrom) ?: break
-		// Something soon after it, once over the hole too close to steer past. Right after it both are glided over as one,
-		// from before the hole on at its height. Farther, that's what's dodged or glided over, no lane past it has a hole.
-		// Dodging, what's dodged is right beside the lane: the hole's glided over, the dodge goes on past the rest.
-		if (!dodging && within == null) from.add(dir.multiply(end)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)?.let { next ->
-			if (next.distance > HOP_GAP) return false
+		// Something in it or soon after it, once over the hole too close to steer past. Dodging, what's dodged is right
+		// beside the lane: the hole's glided over, the dodge goes on past the rest.
+		val next = if (dodging || within != null) null
+			else from.add(dir.multiply(start)).obstacleHit(dir, end - start + brakeDistance() + DODGE_STEER_AHEAD)?.let { it.distance + start }
+		// Right after it both are glided over as one, from before the hole on at its height.
+		if (next != null && next >= end && next - end <= HOP_GAP) {
 			// Under it would mean coming down low over the hole, it's dodged instead.
-			val over = planHop(linePoint, dir, end + next.distance)?.takeUnless { it.under }
+			val over = planHop(linePoint, dir, next)?.takeUnless { it.under }
 				?.let { Hop(min(it.start, at + start - HOP_SCAN_STEP), it.end, it.feetY, it.topY, at + start, false) }
 				?.takeIf { canGetOver(it, at) } ?: return false
-			ElytraFly.debug { "Hole %.1f ahead, %.1f long, ${next.what} right after it, gliding over both at y %.2f".format(start, end - start, over.feetY) }
+			ElytraFly.debug { "Hole %.1f ahead, %.1f long, something right after it, gliding over both at y %.2f".format(start, end - start, over.feetY) }
 			hop = over
 			return true
 		}
+		// Farther, or in it: glided over from the line, bouncing on up to it faster than on a lane, and steered over to a
+		// lane past it meanwhile. With none, that's what's dodged or glided over first.
+		val lane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: return false }
 		// Partly over its edge the box stands, the rays found where it doesn't.
 		val hole = Hop(at + start - HOP_SCAN_STEP, at + end, from.y + passerConfig.minObstacleHeight, min(maxFlightY(), from.y + MAX_BOUNCE_RISE),
 			at + start, false, low = true, hole = true)
@@ -1413,9 +1420,27 @@ abstract class ObstaclePassingMode(
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss)".format(start, end - start)
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
 		}
-		ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it".format(start, end - start) }
-		hop = hole
+		if (lane == null || next == null) {
+			ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it".format(start, end - start) }
+			hop = hole
+			return true
+		}
+		ElytraFly.debug { "Hole %.1f ahead, %.1f long, gliding over it and over to ${lane.target.describe(dir)}${lane.leanText()} past what's %.1f ahead".format(start, end - start, next) }
+		dodgeTo(lane, at + next)
+		hop = hole.with(lane = lane.target)
 		return true
+	}
+
+	/**
+	 * Whether the obstacle [distance] ahead of [linePoint] is better dodged over a hole on the line before it: bouncing
+	 * on the line up to the hole is faster than on a lane, more speed to get over the hole with, and over it there's
+	 * room to steer past, see [glideOverHole]. Only with a lane past it free from where the hole starts.
+	 */
+	private fun SafeContext.dodgeOverHole(linePoint: Vec3d, dir: Vec3d, distance: Double): Boolean {
+		val start = generateSequence(HOLE_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance - MIN_DODGE_DISTANCE }
+			.firstOrNull { linePoint.add(dir.multiply(it)).let { spot -> spot.isLoaded && !spot.boxHasFloor() } } ?: return false
+		val holeStart = linePoint.add(dir.multiply(start))
+		return freeLane(holeStart, holeStart, dir, distance - start, Vec3d.ZERO) != null
 	}
 
 	/**
