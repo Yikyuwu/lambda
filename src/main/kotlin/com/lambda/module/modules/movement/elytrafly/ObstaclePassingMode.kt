@@ -499,6 +499,8 @@ abstract class ObstaclePassingMode(
 	private var hopMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
 	private var touchMiss = ""
+	/** The lane of a top to touch down on in a hole ahead, and until where along the line, see [startDodge]. */
+	private var touchSide: Pair<Vec3d, Double>? = null
 	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
 	private var hopShort = Double.POSITIVE_INFINITY
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
@@ -648,6 +650,7 @@ abstract class ObstaclePassingMode(
 			sameGoals = 0
 			scanTicks = 0
 			noWayYet.clear()
+			touchSide = null
 			slowFor = null
 			forgetSpeedNeed()
 		}
@@ -980,7 +983,10 @@ abstract class ObstaclePassingMode(
 		// Steered past over a hole before it, from the line.
 		if (!onLayer && distance > brakeDistance() + DODGE_STEER_AHEAD && dodgeOverHole(linePoint, dir, distance))
 			return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), steering past it over the hole before it".format(distance))
-		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO)
+		// Toward the side of a top to touch down on in the hole after it: gliding over the hole, there's hardly any
+		// steering over to it.
+		val toward = touchSide?.takeIf { (_, until) -> at < until }?.first
+		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, toward = toward)
 			?: run {
 				// Looking for an opening glides over it on each lane, that'd replace why not on the line.
 				val notOver = hopRejection
@@ -1143,11 +1149,13 @@ abstract class ObstaclePassingMode(
 	 * itself first. With [carpets] free of them too, for [past] after it. Looked at from [lead] ahead on, with that much
 	 * more to steer over to it first. With [fewestCarpets] the one with the fewest of them ahead instead, the one you're on
 	 * and then the line on a tie. Without [mobs] magma cubes and hoglins aren't in the way, they're glided over. At
-	 * [speed] a tick, the box swings out farther the faster.
+	 * [speed] a tick, the box swings out farther the faster. Closest to [toward] first when given, e.g. the side of a top
+	 * to touch down on in a hole after it.
 	 */
 	private fun SafeContext.freeLane(
 		from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, current: Vec3d, carpets: Boolean = false, past: Double = DODGE_MARGIN,
 		lead: Double = 0.0, fewestCarpets: Boolean = false, mobs: Boolean = true, speed: Double = player.velocity.horizontalLength(),
+		toward: Vec3d? = null,
 	): Lane? {
 		val across = across(dir)
 		val step = laneStep(dir)
@@ -1166,7 +1174,8 @@ abstract class ObstaclePassingMode(
 		val taken = mutableListOf<Pair<Double, Int>>()
 		val lanes = (-maxOffset..maxOffset)
 			.filter { fewestCarpets || it != currentOffset }
-			.sortedWith(compareBy({ it != currentOffset }, { it != 0 }, { abs(it - currentOffset) }, { -it }))
+			.sortedWith(compareBy({ toward?.let { lane -> abs(it * laneStep - lane.dotProduct(across)) } ?: 0.0 }, { it != currentOffset }, { it != 0 },
+				{ abs(it - currentOffset) }, { -it }))
 		// Up on a layer, one staying on it first. Off it you drop down beside it, where the layer is in the way.
 		return (if (onLayer) listOf(true, false) else listOf(true)).firstNotNullOfOrNull { sameFloor -> misses.clear(); taken.clear(); lanes.asSequence().mapNotNull { offset ->
 				val laneOffset = offset * laneStep
@@ -1814,6 +1823,8 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
 		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
+		// Its side remembered for dodging what's before it, see [startDodge].
+		if (hop.hole) touchSide = touch.lane to hop.end
 		// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
 		// may take you higher than the top, sinking to just above it after.
 		val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
