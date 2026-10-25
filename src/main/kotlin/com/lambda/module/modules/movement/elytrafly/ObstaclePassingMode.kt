@@ -1913,7 +1913,8 @@ abstract class ObstaclePassingMode(
 		var holding = hop.held
 		// From now on, not only once holding: slow right after taking off, it's held from close by with no time to rise.
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
-			if (y <= floor && climb <= 0) {
+			// No floor to bounce off in the hole, coming down in it misses.
+			if (y <= floor && climb <= 0 && !(hop.hole && along >= hop.start)) {
 				y = floor
 				climb = JUMP_VELOCITY
 			}
@@ -2019,8 +2020,11 @@ abstract class ObstaclePassingMode(
 		hop.heldCheckedAt = player.age
 		val speed = player.velocity.horizontalLength()
 		hop.held = when {
-			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later.
-			hop.hole && lastBounceBefore(hop, progress) && canHop(hop, progress, 0) -> true
+			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later. With blocks
+			// in it to get up over, from an earlier one when only that one still makes it. At its edge there's no bouncing
+			// on, held anyway.
+			hop.hole -> progress >= hop.start - speed || canHop(hop, progress, 0) &&
+				(lastBounceBefore(hop, progress) || hop.raised.isNotEmpty() && !canHopLater(hop, progress, 1))
 			hop.low -> hop.start - progress <= speed * MAX_CARPET_HOLD_TICKS &&
 				!canHop(hop, progress, NO_HOLD) && !canHop(hop, progress, CARPET_HOLD_DELAY) && canHop(hop, progress, 0)
 			hop.anyway -> true
