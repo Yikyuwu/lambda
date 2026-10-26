@@ -301,7 +301,9 @@ class BounceElytraFly(
 			if (minimizePackets && player.getFlag(Entity.GLIDING_FLAG_INDEX) && !fakeFly && !yMotion) return@listen
 			if (player.isOnGround) return@listen
 
-			flyOrFakeFly()
+			// Started again in the air, e.g. the server ended the glide on a bounce. Jumping with it like vanilla does,
+			// Grim sets back a start without the jump right after it (ElytraB).
+			if (flyOrFakeFly()) wantJump = true
 		}
 
 		listen<TickEvent.Post>({ -100 }) {
