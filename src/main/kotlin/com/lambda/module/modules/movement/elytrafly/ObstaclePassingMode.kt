@@ -1339,12 +1339,17 @@ abstract class ObstaclePassingMode(
 		return true
 	}
 
-	/** Whether what's [distance] ahead of [from] along [dir] is in the way of the gliding box even as high as it may hop. */
+	/**
+	 * Whether what's [distance] ahead of [from] along [dir] is in the way of the gliding box even as high as it may hop,
+	 * as far as it swings out across the way at your speed: what's hit beside a lane is in the way of the swing there.
+	 */
 	private fun SafeContext.tooHighToGlideOver(from: Vec3d, dir: Vec3d, distance: Double): Boolean {
 		val feetY = maxHopY().takeIf { it.isFinite() } ?: return false
+		val swing = sweep(dir)
 		return generateSequence(distance + HOP_SCAN_STEP / 2) { it + HOP_SCAN_STEP }.takeWhile { it < distance + TALL_SCAN }.any { along ->
 			val at = from.add(dir.multiply(along))
-			!spaceEmpty(Box(at.x - GLIDE_SIZE / 2, feetY, at.z - GLIDE_SIZE / 2, at.x + GLIDE_SIZE / 2, feetY + GLIDE_SIZE, at.z + GLIDE_SIZE / 2))
+			!spaceEmpty(Box(at.x - GLIDE_SIZE / 2, feetY, at.z - GLIDE_SIZE / 2, at.x + GLIDE_SIZE / 2, feetY + GLIDE_SIZE, at.z + GLIDE_SIZE / 2)
+				.expand(swing, 0.0, swing))
 		}
 	}
 
