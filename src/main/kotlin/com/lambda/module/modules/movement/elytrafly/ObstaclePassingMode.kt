@@ -1030,7 +1030,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.knockedBack(pushed: Vec3d) {
 		if (!passerConfig.passObstacles || !player.isGliding) return
-		knockedBackAt = player.age
+		knockedBackAt = flightTicks
 		ElytraFly.debug { "Knocked back %.2f %.2f %.2f, planning again".format(pushed.x, pushed.y, pushed.z) }
 		commitHop("knockedBack", null)
 		if (dodge != null) commitNoLane("knockedBack")
@@ -1205,7 +1205,7 @@ abstract class ObstaclePassingMode(
 		// Not a carpet's edge coming down onto the floor right before it, it's bounced on like the floor.
 		// Knocked back into it, the plan's made again from where it threw you, unless it stopped you.
 		if (passerConfig.dodge && player.isGliding && player.horizontalCollision && !bumpedLowEdge(snappedDir)) {
-			if (player.age - knockedBackAt in 0..KNOCKBACK_GRACE_TICKS && player.velocity.horizontalLength() > STOPPED_SPEED)
+			if (flightTicks - knockedBackAt in 0..KNOCKBACK_GRACE_TICKS && player.velocity.horizontalLength() > STOPPED_SPEED)
 				ElytraFly.debug { "Bumped into a wall right after a knockback, flying on" }
 			else return brake(progress(playerPos) + 1, "Hit a wall")
 		}
