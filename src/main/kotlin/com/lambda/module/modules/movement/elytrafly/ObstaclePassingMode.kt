@@ -2717,7 +2717,7 @@ abstract class ObstaclePassingMode(
 		}
 		// Through an opening in it on the line, see [throughOpening].
 		if (lineHop == null) planHop(linePoint, dir, distance, swings = false, anyway = true)?.let { over ->
-			threadPlan(linePoint, dir, 0.0, over, off)?.let { thread ->
+			threadPlan(linePoint, dir, 0.0, over, off)?.takeIf { exitBlocked(linePoint.add(across.multiply(it.centre)), dir, over) == null }?.let { thread ->
 				ways += HoleWay("thread", over.with(lane = across.multiply(thread.centre)), null, "%+.2f across".format(thread.centre), thread)
 			}
 		}
@@ -3756,8 +3756,16 @@ abstract class ObstaclePassingMode(
 				?: return@mapNotNull null.also { if (closest == null) closest = "%+.2f across: $hopRejection".format(offset) }
 			if (looked.any { (at, y) -> abs(at - offset) < THREAD_WINDOW / 2 && abs(y - over.targetY) < 1e-6 }) return@mapNotNull null
 			looked += offset to over.targetY
-			threadPlan(linePoint, dir, offset, over, here)?.let { it to over }
-				?: null.also { if (closestThrough == null) closestThrough = "%+.2f across: $threadMiss".format(offset) }
+			val thread = threadPlan(linePoint, dir, offset, over, here)
+				?: return@mapNotNull null.also { if (closestThrough == null) closestThrough = "%+.2f across: $threadMiss".format(offset) }
+			// Through it into something right after it on that lane, too close to steer past or brake for, and nothing to
+			// glide over it from there: not that way.
+			val exit = lanePoint.add(across.multiply(thread.centre - offset))
+			exitBlocked(exit, dir, over)?.let { what ->
+				if (closestThrough == null) closestThrough = "%+.2f across: $what".format(thread.centre)
+				return@mapNotNull null
+			}
+			thread to over
 		}.firstOrNull() ?: run {
 			openingMiss = closestThrough ?: closest ?: "none"
 			return false
@@ -3773,6 +3781,18 @@ abstract class ObstaclePassingMode(
 		commitHop("throughOpening", over.with(lane = lane))
 		commitThread("throughOpening", thread)
 		return true
+	}
+
+	/**
+	 * What's right past the end of [over] along [lanePoint]'s lane, within [brakeDistance] and [DODGE_STEER_AHEAD] more,
+	 * that can't be glided over from there either, null when there's none: past an opening there's no lane to dodge to,
+	 * e.g. a block on the floor right behind a gap in a field of floating ones was run into at full speed.
+	 */
+	private fun SafeContext.exitBlocked(lanePoint: Vec3d, dir: Vec3d, over: Hop): String? {
+		val past = over.end - progress(lanePoint)
+		val next = lanePoint.add(dir.multiply(past)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return null
+		if (planHop(lanePoint, dir, past + next.distance, anyway = true) != null) return null
+		return "${next.what} %.1f past it, nothing to glide over it from there".format(next.distance)
 	}
 
 	/**
