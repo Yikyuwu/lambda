@@ -117,7 +117,7 @@ abstract class ObstaclePassingMode(
 		/** How many ticks before the wall the heading is held to one side of the diagonal, see [threadYaw]. */
 		private const val THREAD_TICKS = 30
 		/** How far across short of where it goes through it steers before that, coming in from the side it leans from. */
-		private const val THREAD_PRE = 0.1
+		private const val THREAD_PRE = 0.04
 		/** How many degrees at least the heading leans off the diagonal then, enough for which axis goes first, hardly drifting. */
 		private const val THREAD_TILT = 0.05
 		/**
