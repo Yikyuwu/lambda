@@ -270,6 +270,8 @@ abstract class ObstaclePassingMode(
 		private const val FIT_SPEED = 0.85
 		/** How far above what blocks in a hole need a glide over it is held, when they need more than it'd rather go, see [clearInside]. */
 		private const val RAISED_HOLD = 0.5
+		/** How far on past a block in a hole that can't be glided over the rest of it is looked at from, about a block, see [clearInside]. */
+		private const val PAST_BLOCKED = 1.0
 		/** How far above a top to touch down on the feet are held until over it, see [Touch]. */
 		private const val TOUCH_ABOVE = 0.2
 		/** How far below a top to touch down on the hold aims once over it, down onto it. */
@@ -536,6 +538,7 @@ abstract class ObstaclePassingMode(
 				it.rose = rose
 				it.touchedAt = touchedAt
 				it.intoDip = intoDip
+				it.fromLayer = fromLayer
 			}
 		/** Not making it yet, logged once. */
 		var waiting = false
@@ -554,6 +557,8 @@ abstract class ObstaclePassingMode(
 		var overTop = false
 		/** Gliding [down] into a dip a block deep to bounce on down there, see [dipLane]. */
 		var intoDip = false
+		/** Over the hole right after the end of a layer, planned from up on it and kept to the hole's end, see [layerHole]. */
+		var fromLayer = false
 		/** The tick it touched down on [touch], -1 before. */
 		var touchedAt = -1
 		val touched get() = touchedAt >= 0
@@ -741,9 +746,10 @@ abstract class ObstaclePassingMode(
 	 * Steering past a blocked spot, flying level meanwhile so it doesn't speed into it. Not once over on the lane, it
 	 * bounces on there to get back the speed the swing over cost, e.g. for a hole right after, the lane is looked at
 	 * again every tick at the speed you have. Not past carpets, there's nothing to speed into and it's planned for
-	 * bouncing on. Not on the way to gliding over something, it's planned for bouncing on up to it.
+	 * bouncing on. Not on the way to gliding over something, it's planned for bouncing on up to it. Nor up on a layer
+	 * ending in a hole not gotten over yet, see [layerSpeedUp].
 	 */
-	protected val isDodging get() = dodge != null && !dodgeCarpets && hop == null && (atFitSpeed || !onLane && !speedingUp)
+	protected val isDodging get() = dodge != null && !dodgeCarpets && hop == null && (atFitSpeed || !onLane && !speedingUp && !layerSpeedUp)
 	/**
 	 * Up over a layer of blocks just now and not down on it yet: down onto it to bounce on from its start, see
 	 * [BounceElytraFly]. Flying level, e.g. dodging right after, it glided half across it first.
@@ -760,6 +766,11 @@ abstract class ObstaclePassingMode(
 	private var speedNeedAt = Double.NaN
 	/** Bouncing on while swinging over to a lane too, too slow for the hole ahead, see [planSpeed]. */
 	private var speedingUp = false
+	/**
+	 * Up on a layer ending in a hole not gotten over from bouncing on yet, bouncing on while tilting past what's dodged
+	 * too, see [layerHole]: flying level it came off the layer's end slower still, e.g. past a column in the hole.
+	 */
+	private var layerSpeedUp = false
 	/** Dodging what's right after a mob glided over, the lane doesn't keep clear of the mob, see [pastMobAndNext]. */
 	private var dodgeAfterMob = false
 	/** Landing before an obstacle no lane gets past, to walk around it. */
@@ -895,6 +906,7 @@ abstract class ObstaclePassingMode(
 			touchSide = null
 			diveTop = null
 			stepLanding = false
+			layerSpeedUp = false
 			slowFor = null
 			forgetSpeedNeed()
 		}
@@ -950,6 +962,7 @@ abstract class ObstaclePassingMode(
 
 	private fun SafeContext.passObstacles(): Boolean {
 		if (player.isOnGround || !player.isGliding) stepLanding = false
+		if (!onLayer || !player.isGliding) layerSpeedUp = false
 		passTicks++
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
@@ -1074,6 +1087,9 @@ abstract class ObstaclePassingMode(
 			return brake(progress(playerPos) + 1, "Hit a wall")
 		hop?.let { hop ->
 			val progress = progress(playerPos)
+			// Off the end of the layer the hole after it was planned from, the line goes down like gliding off it, see
+			// [planGap]: over the hole it's glided over like one planned from the floor.
+			if (hop.fromLayer && onLayer && progress > hop.obstacle && !Vec3d(playerPos.x, startPos.y, playerPos.z).boxHasFloor()) offTheLayer()
 			// Gliding up onto a layer, what's past its start up there comes into sight on the way: onto a lane past it now,
 			// the way up onto the layer is planned again on it, see [dodgePastOnLayer].
 			if (hop.step && !onLayer && dodge == null && passerConfig.dodge && player.age % LAYER_LOOK_TICKS == 0 &&
@@ -1126,6 +1142,14 @@ abstract class ObstaclePassingMode(
 						else -> ElytraFly.debug { "Over it" }
 					}
 					this@ObstaclePassingMode.hop = null
+				}
+				// The hole after the layer, planned from up on it, not made any more before it's held, e.g. slower than
+				// planned: planned again from up here, another lane or top may, see [layerHole]. Held from up here, as high
+				// as it goes before the hole even starts, it'd glide all the way.
+				hop.fromLayer && onLayer && !makesIt && !holdingFor(hop, progress) -> {
+					ElytraFly.debug { "Not getting over the hole after the blocks that way any more ($hopMiss), looking again" }
+					this@ObstaclePassingMode.hop = null
+					noGapAt = null
 				}
 				// Still far, not holding yet: a few bounces on, faster, it may make it after all, e.g. right after taking off.
 				!holdingFor(hop, progress) && hop.start - progress > brakeDistance() && !makesIt -> {
@@ -1946,7 +1970,7 @@ abstract class ObstaclePassingMode(
 		// A dip bounced on down into isn't glided over, see [dipLane].
 		if (dipAt.let { it != null && hole.start >= it.start - DIP_AGAIN && hole.start <= it.endInclusive }) return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it, over the blocks in it too.
-		val over = holeHop(lane, dir, hole, layerRightAfter(lane, dir, hole.endInclusive - progress)).first
+		val over = holeHop(lane, dir, hole, layerStart(lane, dir, hole)).first
 		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
 		val speed = player.velocity.horizontalLength()
 		val wants = !makesIt(speed)
@@ -2055,7 +2079,7 @@ abstract class ObstaclePassingMode(
 			nextLane != null -> linePoint.add(nextLane.target)
 			else -> from
 		}
-		val (hole, blocked) = holeHop(glideLine, dir, at + start..at + end, layerAfter)
+		val (hole, blocked) = (at + start..at + end).let { range -> holeHop(glideLine, dir, range, if (layerAfter) layerStart(glideLine, dir, range) ?: range.endInclusive else null) }
 		// Not gotten over, about to brake for it: past it on floor beside it instead, if there's a lane with floor all
 		// along it, still steered over to in time, see [floorLane]. Only in the last looks before braking, farther it may
 		// still get over it faster, see [noLaneYet].
@@ -2471,8 +2495,8 @@ abstract class ObstaclePassingMode(
 	 * How high a glide along [linePoint] from [from] to [to] ahead has to be to clear the blocks there that can be glided
 	 * over, e.g. in a hole: where along the line the feet have to be how high, how high they may go, and where to hold
 	 * them. [topY] is only how high it'd rather go, for blocks needing more it goes as high as there's room over them,
-	 * held a bit above what they need. Null where to hold them with none. One that can't be glided over ends the look,
-	 * where it is is [Clearance.blocked], a lane past it is needed. With the glide over a block [before] it, that one too.
+	 * held a bit above what they need. Null where to hold them with none. Where the first one that can't be glided over
+	 * is is [Clearance.blocked], a lane past it is needed. With the glide over a block [before] it, that one too.
 	 */
 	private fun SafeContext.clearInside(
 		linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, topY: Double, before: Hop? = null,
@@ -2491,8 +2515,11 @@ abstract class ObstaclePassingMode(
 			// Only how high, whether it gets up there in time is up to the glide over all of it.
 			val inner = planHop(linePoint, dir, along + hit.distance, anyway = true)
 			if (inner == null) {
-				blocked = along + hit.distance
-				break
+				// The first, a lane past it is needed. Looked on past it all the same: on the lane past it, e.g. the one
+				// dodged to beside a column at a hole's start, a pillar after it is in the way of the box's swing.
+				if (blocked == null) blocked = along + hit.distance
+				along += hit.distance + PAST_BLOCKED
+				continue
 			}
 			raised += inner.start..inner.end to inner.feetY
 			room = min(room, inner.topY)
@@ -2515,10 +2542,12 @@ abstract class ObstaclePassingMode(
 	 * over from bouncing on: bounced on off the edge the way that's simulated, gliding off at the layer's height it'd come
 	 * over the hole lower and slower, e.g. too low to touch down on a top in it. With a top in it to touch down on, over to
 	 * the lane for that up here while still bouncing: gliding over the hole there's hardly any steering, from where you
-	 * happened to be, e.g. taking off off the middle of the way, no lane past what's in it may be left. Whether it's
-	 * handled, null when it's not got over that way, as before.
+	 * happened to be, e.g. taking off off the middle of the way, no lane past what's in it may be left. The way over it is
+	 * kept as the glide to the hole's end, bouncing on up here until it's held: planned again at the edge from the floor it
+	 * came out another way, e.g. a lane it can't steer over to anymore, or a little short at the speed tilting past what's
+	 * dodged left. On [lane] across the line, dodging. Whether it's handled, null when it's not got over that way, as before.
 	 */
-	private fun SafeContext.layerHole(line: Vec3d, linePoint: Vec3d, dir: Vec3d, edge: Double): Boolean? {
+	private fun SafeContext.layerHole(line: Vec3d, linePoint: Vec3d, dir: Vec3d, edge: Double, lane: Vec3d): Boolean? {
 		// On a lane beside the line, e.g. dodging, the hole may start a bit later there than on the line.
 		val (holeLine, hole) = listOf(linePoint, line).distinct().firstNotNullOfOrNull { point -> holeAfterEdge(point, dir, edge)?.let { point to it } }
 			?: return null.also { ElytraFly.debug { "The blocks end %.1f ahead, no hole right after it".format(edge) } }
@@ -2530,10 +2559,14 @@ abstract class ObstaclePassingMode(
 			touchHoleStart = holeStart
 		}
 		val floorLine = holeLine.add(0.0, baseY - holeLine.y, 0.0)
-		val over = holeHop(floorLine, dir, hole, layerRightAfter(floorLine, dir, hole.endInclusive - progress(floorLine))).first
+		// A plain glide on the lane flown, the line or the lane dodged to, a touch-down on the lane picked for it.
+		val holeLane = if (holeLine == linePoint) lane else Vec3d.ZERO
+		val (found, blocked) = holeHop(floorLine, dir, hole, layerStart(floorLine, dir, hole))
+		val over = if (found.touch == null) found.with(lane = holeLane) else found
 		if (!canGetOver(over, progress(linePoint))) {
 			val why = "$hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"}"
 			keep()
+			layerSpeedUp = true
 			// Far still, a few bounces on faster it may: looked at again, not gliding off it meanwhile.
 			// Not past the distance to brake for it by the time it's looked at again.
 			if (edge - player.velocity.horizontalLength() * LAYER_HOLE_AGAIN_TICKS > brakeDistance() + DODGE_STEER_AHEAD) {
@@ -2545,48 +2578,68 @@ abstract class ObstaclePassingMode(
 			return null
 		}
 		val across = across(dir)
-		val lane = over.lane.dotProduct(across)
 		val touch = over.touch
-		if (touch != null && abs(player.pos.subtract(startPos).dotProduct(across) - lane) > TOUCH_LANE_OFF) {
-			ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it, bouncing on over to the lane %+.2f up here to touch down on the top at y %.2f in it ($touchLaneText)".format(edge, lane, touch.y) }
-			return dodgeTo(Lane(over.lane, 0, lane), hole.endInclusive + TOUCH_PAST)
+		// A plain glide past what's in it that can't be glided over only when that's what's dodged. Else a lane past it is
+		// left to the edge, see [glideOverHole].
+		if (touch == null && blocked != null && !(holeLane != Vec3d.ZERO && holeLane == dodge && progress(floorLine) + blocked <= dodgeEnd + DODGE_MARGIN)) {
+			ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it, bouncing on off the edge for it, something %.1f ahead in it can't be glided over".format(edge, blocked) }
+			keep()
+			return false
 		}
-		ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it, bouncing on off the edge for it".format(edge) }
-		keep()
-		return false
+		val planned = over.also { it.fromLayer = true }
+		val planLane = planned.lane.dotProduct(across)
+		val how = touch?.let { "touching down on the top at y %.2f in it ($touchLaneText)".format(it.y) } ?: "gliding over it on the lane %+.2f".format(planLane)
+		ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, $how, bouncing on up here until holding the height for it".format(edge, hole.endInclusive - hole.start) }
+		if (abs(planLane - (dodge?.dotProduct(across) ?: 0.0)) > 0.01) dodgeTo(Lane(planned.lane, 0, planLane), hole.endInclusive + TOUCH_PAST)
+		hop = planned
+		return true
 	}
 
 	/**
-	 * Whether a layer a block high starts right [end] ahead of [floorLine], down on the floor you started on, to bounce
-	 * on up there: with floor up there for a while and nothing on it, like [isStepUp] looks from the floor.
+	 * Where along the line a layer a block high starts right after [hole] along [floorLine], down on the floor you started
+	 * on, to bounce on up there: with floor up there for a while and nothing on it, like [isStepUp] looks from the floor.
+	 * Also a bit after the hole's end, too little floor before it to come down on and bounce, e.g. a block of it at a
+	 * ragged end: coming down there runs into the layer's side. Null with none.
 	 */
-	private fun SafeContext.layerRightAfter(floorLine: Vec3d, dir: Vec3d, end: Double): Boolean {
-		val up = floorLine.add(0.0, STEP_HEIGHT, 0.0).add(dir.multiply(end))
-		return up.add(dir.multiply(STEP_ON)).boxHasFloor() && up.add(dir.multiply(STEP_CLEAR)).boxHasFloor() && up.obstacleDistance(dir, STEP_CLEAR) == null
+	private fun SafeContext.layerStart(floorLine: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): Double? {
+		val at = progress(floorLine)
+		val end = hole.endInclusive - at
+		val up = floorLine.add(0.0, STEP_HEIGHT, 0.0)
+		val bounceRoom = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
+		// Where the box first has it under it.
+		val start = generateSequence(end) { it + HOP_SCAN_STEP }.takeWhile { it <= end + bounceRoom }
+			.firstOrNull { up.add(dir.multiply(it)).boxHasFloor() } ?: return null
+		val from = up.add(dir.multiply(start))
+		return (at + start).takeIf {
+			from.add(dir.multiply(STEP_ON)).boxHasFloor() && from.add(dir.multiply(STEP_CLEAR)).boxHasFloor() && from.obstacleDistance(dir, STEP_CLEAR) == null
+		}
 	}
 
 	/** Why [hole] right after the end of the layer isn't got over from bouncing on up here, null when it is. */
 	private fun SafeContext.holeAfterEdgeMiss(linePoint: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): String? =
 		linePoint.add(0.0, baseY - linePoint.y, 0.0).let { floorLine ->
-			if (canGetOver(holeHop(floorLine, dir, hole, layerRightAfter(floorLine, dir, hole.endInclusive - progress(floorLine))).first, progress(linePoint))) null
+			if (canGetOver(holeHop(floorLine, dir, hole, layerStart(floorLine, dir, hole)).first, progress(linePoint))) null
 			else hopMiss
 		}
 
 	/**
 	 * The glide along [line] over [hole], from where to where along the line, just above the floor there and higher over
 	 * the blocks in it, see [clearInside]. Partly over its edge the box stands, the rays found where it doesn't. With
-	 * where a block in it is that can't be glided over.
+	 * where a block in it is that can't be glided over. A layer starting at [layerAt] along the line right after it is
+	 * glided onto.
 	 */
 	private fun SafeContext.holeHop(
-		line: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>, layerAfter: Boolean = false,
+		line: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>, layerAt: Double? = null,
 	): Pair<Hop, Double?> {
 		val at = progress(line)
 		// Not lower than you already are, e.g. right off a layer above it.
 		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxHopY(), max(line.y + MAX_BOUNCE_RISE, player.y)))
-		// A layer right after it: over its last block above that, coming down on it, not into its edge.
-		val up = if (!layerAfter) raised
-			else raised + ((hole.endInclusive - LAYER_AFTER_HOLE)..hole.endInclusive to line.y + STEP_HEIGHT)
-		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
+		// A layer right after it: from over its last block on above that until over the layer, coming down on it, not into
+		// its side.
+		val end = max(hole.endInclusive, layerAt ?: hole.endInclusive)
+		val up = if (layerAt == null) raised
+			else raised + ((hole.endInclusive - LAYER_AFTER_HOLE)..end to line.y + STEP_HEIGHT)
+		val over = Hop(hole.start - HOP_SCAN_STEP, end, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
 			low = true, hole = true, aim = aim, raised = up)
 		// Also with none in it on this lane, beside it there may be one.
 		// Gliding over it instead may be faster, only with nothing in it on the line that can't be glided over.
@@ -2674,23 +2727,36 @@ abstract class ObstaclePassingMode(
 		}
 		// Looked at once per lane, from [DODGE_STEER_AHEAD] ahead on, before that it's on the lane it's bouncing on.
 		val ahead = progress + DODGE_STEER_AHEAD
+		// Where you are across the line, the lane you're on.
+		val off = player.pos.subtract(startPos).dotProduct(across)
 		val grid = generateSequence(ahead) { it + HOP_SCAN_STEP }.takeWhile { it <= hop.end + TOUCH_PAST + HOP_SCAN_STEP }.toList()
 		val blocked = HashMap<Triple<Double, Double, Int>, BooleanArray>()
 		fun blockedOn(lane: Double, held: Double, side: Int = 0) =
 			blocked.getOrPut(Triple(lane, held, side)) { BooleanArray(grid.size) { !clearAt(grid[it], lane, held, side) } }
 		// Staying on [lane] from [from] to [to], where it'd swing into something tilted away from the line past it, from
 		// [TOUCH_LEAN_TICKS] before on for the flight to take it on. Those stretches, null when it doesn't get past even so.
+		// On the lane you're on from right ahead: what's on it before [ahead] isn't dodged once flying the plan, e.g. a
+		// column at the start of the hole, steered into it was.
 		fun laneLeans(lane: Double, from: Double, to: Double, held: Double): List<ClosedFloatingPointRange<Double>>? {
 			val either = blockedOn(lane, held)
-			val tilted = if (lane == 0.0) either else blockedOn(lane, held, sign(lane).toInt())
+			val side = sign(lane).toInt()
+			val tilted = if (lane == 0.0) either else blockedOn(lane, held, side)
 			val leans = mutableListOf<ClosedFloatingPointRange<Double>>()
+			fun leanAt(along: Double) {
+				val lean = along - steerSpeed * TOUCH_LEAN_TICKS..along + HOP_SCAN_STEP
+				if (leans.lastOrNull()?.let { it.endInclusive >= lean.start } == true) leans[leans.lastIndex] = leans.last().start..lean.endInclusive
+				else leans += lean
+			}
+			if (abs(lane - off) <= TOUCH_LANE_OFF) for (along in generateSequence(progress + HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it < ahead }) {
+				if (clearAt(along, lane, held)) continue
+				if (lane == 0.0 || !clearAt(along, lane, held, side)) return null
+				leanAt(along)
+			}
 			for (i in grid.indices) {
 				val along = grid[i]
 				if (along < from || along > to || !either[i]) continue
 				if (tilted[i]) return null
-				val lean = along - steerSpeed * TOUCH_LEAN_TICKS..along + HOP_SCAN_STEP
-				if (leans.lastOrNull()?.let { it.endInclusive >= lean.start } == true) leans[leans.lastIndex] = leans.last().start..lean.endInclusive
-				else leans += lean
+				leanAt(along)
 			}
 			return leans
 		}
@@ -2698,9 +2764,9 @@ abstract class ObstaclePassingMode(
 		fun pathClear(at: Double, path: List<Pair<Double, Double>>, until: Double, held: Double): Boolean {
 			// Along the line it only goes on.
 			for (i in 0 until path.lastIndex) {
-				val (along, off) = path[i]
+				val (along, lane) = path[i]
 				if (at + along > until) break
-				if (!clearAt(at + along, off, held, 0, at + path[i + 1].first, path[i + 1].second)) return false
+				if (!clearAt(at + along, lane, held, 0, at + path[i + 1].first, path[i + 1].second)) return false
 			}
 			return true
 		}
@@ -2732,7 +2798,10 @@ abstract class ObstaclePassingMode(
 			touch.leans = leans
 			plans += Plan(touch, lane, covered, "on the lane %+.2f".format(lane) + if (leans.isEmpty()) "" else ", tilted past what's beside it")
 		}
-		// Per height of top, aimed in at the stretch of the one covered best.
+		// Per height of top, aimed in at the stretch of the one covered best. From the lane you're on first, there's no
+		// steering over to another before, e.g. up on a layer past a column at the start of the hole. Then from the one
+		// closest to the aimed at lane.
+		val mine = all.minBy { abs(it - off) }
 		for (first in lanes.map { it.second }.distinctBy { it.y }) {
 			val held = first.y + TOUCH_ABOVE
 			for (aim in all) {
@@ -2741,30 +2810,32 @@ abstract class ObstaclePassingMode(
 				val on = blockedOn(aim, held)
 				val after = grid.indices.lastOrNull { on[it] && grid[it] < first.range.start }?.let { grid[it] + GLIDE_SIZE } ?: continue
 				val latest = first.middle - steerSpeed * (TOUCH_DIVE_TICKS + 1)
-				val entries = all.filter { it != aim }.sortedBy { abs(it - aim) }
-				val found = generateSequence(after) { it + TOUCH_SWITCH_STEP }.takeWhile { it < latest }.firstNotNullOfOrNull { switchAt ->
-					entries.firstNotNullOfOrNull { entry ->
-						val leans = laneLeans(entry, ahead, switchAt, held) ?: return@firstNotNullOfOrNull null
-						val path = steerOffsets(entry, aim, steerSpeed, hop.end + TOUCH_PAST - switchAt)
-						if (pathClear(switchAt, path, first.middle, held)) Triple(switchAt, entry, leans to path) else null
-					}
-				} ?: continue
-				val (switchAt, entry, leansAndPath) = found
-				val (leans, path) = leansAndPath
-				// Where it gets across, the top as it is on that lane.
-				val reached = path.firstOrNull { it.first >= first.middle - switchAt }?.second ?: continue
-				val nearest = all.minBy { abs(it - reached) }
-				val (_, touch, covered) = lanes.firstOrNull { it.first == nearest } ?: continue
-				if (abs(touch.y - first.y) > 0.01 || plans.any { it.lane == entry && it.touch.lane == across.multiply(aim) }) continue
-				// To the top aimed in, then back out on the lane it came on.
-				if (!pathClear(switchAt, path, touch.middle, held)) continue
-				val back = steerOffsets(reached, entry, steerSpeed, hop.end + TOUCH_PAST - touch.middle)
-				if (!pathClear(touch.middle, back, Double.POSITIVE_INFINITY, held)) continue
-				plans += Plan(Touch(touch.range, touch.y, across.multiply(aim)).also {
-					it.switchAt = switchAt
-					it.leans = leans
-				}, entry, covered, "from the lane %+.2f%s, %.1f ahead steering in toward %+.2f, over it at %+.2f"
-					.format(entry, if (leans.isEmpty()) "" else " tilted past what's beside it", switchAt - progress, aim, reached))
+				val closest = all.filter { it != aim }.sortedBy { abs(it - aim) }
+				for (entries in if (mine == aim) listOf(closest) else listOf(listOf(mine), closest)) {
+					val found = generateSequence(after) { it + TOUCH_SWITCH_STEP }.takeWhile { it < latest }.firstNotNullOfOrNull { switchAt ->
+						entries.firstNotNullOfOrNull { entry ->
+							val leans = laneLeans(entry, ahead, switchAt, held) ?: return@firstNotNullOfOrNull null
+							val path = steerOffsets(entry, aim, steerSpeed, hop.end + TOUCH_PAST - switchAt)
+							if (pathClear(switchAt, path, first.middle, held)) Triple(switchAt, entry, leans to path) else null
+						}
+					} ?: continue
+					val (switchAt, entry, leansAndPath) = found
+					val (leans, path) = leansAndPath
+					// Where it gets across, the top as it is on that lane.
+					val reached = path.firstOrNull { it.first >= first.middle - switchAt }?.second ?: continue
+					val nearest = all.minBy { abs(it - reached) }
+					val (_, touch, covered) = lanes.firstOrNull { it.first == nearest } ?: continue
+					if (abs(touch.y - first.y) > 0.01 || plans.any { it.lane == entry && it.touch.lane == across.multiply(aim) }) continue
+					// To the top aimed in, then back out on the lane it came on.
+					if (!pathClear(switchAt, path, touch.middle, held)) continue
+					val back = steerOffsets(reached, entry, steerSpeed, hop.end + TOUCH_PAST - touch.middle)
+					if (!pathClear(touch.middle, back, Double.POSITIVE_INFINITY, held)) continue
+					plans += Plan(Touch(touch.range, touch.y, across.multiply(aim)).also {
+						it.switchAt = switchAt
+						it.leans = leans
+					}, entry, covered, "from the lane %+.2f%s, %.1f ahead steering in toward %+.2f, over it at %+.2f"
+						.format(entry, if (leans.isEmpty()) "" else " tilted past what's beside it", switchAt - progress, aim, reached))
+				}
 			}
 		}
 		var miss: String? = null
@@ -2772,7 +2843,6 @@ abstract class ObstaclePassingMode(
 		// Over on its lane in time from where you are, steered over to it like a dodge: by the hole, in it by the top, or
 		// by steering in. Gliding a hole there's hardly any steering. With room to dive onto the top, e.g. not one right
 		// below after missing another.
-		val off = player.pos.subtract(startPos).dotProduct(across)
 		val speed = player.velocity.horizontalLength()
 		// The way over to it free, the box swinging out to either side.
 		fun reachable(plan: Plan): Boolean {
@@ -3014,7 +3084,7 @@ abstract class ObstaclePassingMode(
 		val resume = if (deeper) null else along.firstOrNull { (distance, point) -> distance > edge && distance <= edge + MAX_GAP && point.boxHasFloor() }?.first
 		// No more of it after, a hole right after it down on the floor that's gotten over from bouncing on: planned from up
 		// here, see [layerHole].
-		if (!onCarpets && resume == null) layerHole(line, linePoint, dir, edge)?.let { return it }
+		if (!onCarpets && resume == null) layerHole(line, linePoint, dir, edge, lane)?.let { return it }
 		if (deeper) return false
 		// Carpets, even a short gap is glided across: down in it you're stopped at the edge of the next one.
 		if (resume != null && resume - edge < MIN_GAP && !onCarpets) return false
