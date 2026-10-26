@@ -53,6 +53,7 @@ import net.minecraft.block.ShapeContext
 import net.minecraft.client.MinecraftClient
 import net.minecraft.entity.Entity
 import net.minecraft.entity.effect.StatusEffects
+import net.minecraft.entity.boss.dragon.EnderDragonPart
 import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
 import net.minecraft.network.packet.s2c.play.EntityVelocityUpdateS2CPacket
@@ -726,14 +727,23 @@ abstract class ObstaclePassingMode(
 	private var lastGoal: BlockPos? = null
 	private var sameGoals = 0
 	private var hopRejection = ""
-	/** Why [freeLane] turned down each lane, for the debug log. */
-	private var laneMiss = ""
+	/** Why [freeLane] turned down each lane, for the debug log. Put together only once read, most never are. */
+	private var laneMissText: Lazy<String> = lazyOf("")
+	private var laneMiss: String
+		get() = laneMissText.value
+		set(value) { laneMissText = lazyOf(value) }
 	/** How many carpets [freeLane] counted on each lane it took, for the debug log. */
-	private var laneCarpets = ""
+	private var laneCarpetsText: Lazy<String> = lazyOf("")
+	private var laneCarpets: String
+		get() = laneCarpetsText.value
+		set(value) { laneCarpetsText = lazyOf(value) }
 	/** Whether a [planHop] since [startDodge] began found a way over but you're too slow to make it yet. */
 	private var hopTooSlow = false
-	/** Where [canHop] found the glide falls short, for the debug log. */
-	private var hopMiss = ""
+	/** Where [canHop] found the glide falls short, for the debug log. Put together only once read, most never are. */
+	private var hopMissText: Lazy<String> = lazyOf("")
+	private var hopMiss: String
+		get() = hopMissText.value
+		set(value) { hopMissText = lazyOf(value) }
 	/** Why the last [dipLane] doesn't bounce through a hole as a dip, for the debug log. */
 	private var dipMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
@@ -1073,10 +1083,53 @@ abstract class ObstaclePassingMode(
 		brake(progress(player.pos) + passerConfig.obstacleLookAhead + 1, "Flagged")
 	}
 
-	fun SafeContext.handlePassingObstacles() = timed { passObstacles() }.also {
-		logPlan()
-		if (ElytraFly.choosing) timed { shadowChoose() }
+	fun SafeContext.handlePassingObstacles() = planning {
+		timed { passObstacles() }.also {
+			logPlan()
+			if (ElytraFly.choosing) timed { shadowChoose() }
+		}
 	}
+
+	/**
+	 * Within one pass nothing moves and no block changes, so what's looked up again and again is kept for it, see
+	 * [planningEntities], [ceilingYIn] and [nextRise]. Outside of one, e.g. for the rotation, looked up anew each time.
+	 */
+	private var planning = false
+	/** The entities [obstacleHits] looks for, as far around you as it looks, and that box, see [planning]. */
+	private var planningEntities: List<Entity>? = null
+	private var planningEntitiesBox: Box? = null
+	/** The roofs [ceilingYIn] found, by the highest looked up to, see [planning]. */
+	private val planningCeilings = HashMap<Pair<Double, Double>, Double>()
+	/** What [nextRise] found, see [planning]. */
+	private val planningRises = HashMap<List<Any?>, Int?>()
+
+	private inline fun <T> planning(block: () -> T): T {
+		forgetPlanning()
+		planning = true
+		try {
+			return block()
+		} finally {
+			planning = false
+			forgetPlanning()
+		}
+	}
+
+	private fun forgetPlanning() {
+		planningEntities = null
+		planningEntitiesBox = null
+		planningCeilings.clear()
+		planningRises.clear()
+	}
+
+	/**
+	 * Within a pass, see [planning], the highest your feet may go below the roof up to [ceiling], from [find] once a pass,
+	 * from where you are. Else from [find] each time.
+	 */
+	protected fun SafeContext.ceilingYIn(ceiling: Double, find: () -> Double): Double =
+		if (!planning) find() else planningCeilings.getOrPut(ceiling to player.y, find)
+
+	/** What the pitch bouncing on depends on besides where you are, see [bouncePitch], for keeping [nextRise] a pass. */
+	protected open fun SafeContext.bounceKey(): Any? = null
 
 	private fun SafeContext.passObstacles(): Boolean {
 		if (player.isOnGround || !player.isGliding) stepLanding = false
@@ -1776,9 +1829,9 @@ abstract class ObstaclePassingMode(
 	private inline fun <T> sandboxed(block: () -> T): T {
 		val rejection = hopRejection
 		val tooSlow = hopTooSlow
-		val noLane = laneMiss
-		val carpets = laneCarpets
-		val miss = hopMiss
+		val noLane = laneMissText
+		val carpets = laneCarpetsText
+		val miss = hopMissText
 		val short = hopShort
 		val exit = hopExitSpeed
 		val wall = hopWallSpeed
@@ -1808,9 +1861,9 @@ abstract class ObstaclePassingMode(
 		} finally {
 			hopRejection = rejection
 			hopTooSlow = tooSlow
-			laneMiss = noLane
-			laneCarpets = carpets
-			hopMiss = miss
+			laneMissText = noLane
+			laneCarpetsText = carpets
+			hopMissText = miss
 			hopShort = short
 			hopExitSpeed = exit
 			hopWallSpeed = wall
@@ -2122,14 +2175,20 @@ abstract class ObstaclePassingMode(
 		val leanDistance = speed * LEAN_TICKS
 		// The path slows down a little each tick, bouncing speeds you up meanwhile. The box swings out that much farther.
 		val laneSpeed = speed + LANE_SPEED_MARGIN
-		val misses = mutableListOf<Pair<Double, String>>()
-		val taken = mutableListOf<Pair<Double, Int>>()
+		// Why each lane was turned down, put together only once [laneMiss] is read.
+		var misses = ArrayList<Pair<Double, () -> String>>()
+		var taken = ArrayList<Pair<Double, Int>>()
+		// What's on each lane crossed on the way over, the same for every lane, tilt and floor looked at.
+		val crossed = HashMap<Int, Obstacle?>()
+		fun crossedHit(crossing: Int): Obstacle? =
+			if (crossed.containsKey(crossing)) crossed[crossing]
+			else linePoint.add(across.multiply(crossing * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs).also { crossed[crossing] = it }
 		val lanes = (-maxOffset..maxOffset)
 			.filter { fewestCarpets || it != currentOffset }
 			.sortedWith(compareBy({ toward?.let { lane -> abs(it * laneStep - lane.dotProduct(across)) } ?: 0.0 }, { it != currentOffset }, { it != 0 },
 				{ abs(it - currentOffset) }, { -it }))
 		// Up on a layer, one staying on it first. Off it you drop down beside it, where the layer is in the way.
-		return (if (onLayer) listOf(true, false) else listOf(true)).firstNotNullOfOrNull { sameFloor -> misses.clear(); taken.clear(); lanes.asSequence().mapNotNull { offset ->
+		return (if (onLayer) listOf(true, false) else listOf(true)).firstNotNullOfOrNull { sameFloor -> misses = ArrayList(); taken = ArrayList(); lanes.asSequence().mapNotNull { offset ->
 				val laneOffset = offset * laneStep
 				val lane = linePoint.add(across.multiply(laneOffset))
 				// Tilted away from where you come from, so on past the obstacle if it's on that side. Else the other way, away
@@ -2144,7 +2203,27 @@ abstract class ObstaclePassingMode(
 					else -> listOf(1 to false, -1 to false, 0 to true)
 				}
 				val sideways = lead == 0.0 && from.sidewaysObstructed(lane.subtract(from))
-				var firstMiss: String? = null
+				// Alike for every tilt, looked at once each, only when it gets that far.
+				val floorMiss by lazy(LazyThreadSafetyMode.NONE) {
+					lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
+						// A hole there with floor again within reach is glided over on the lane.
+						if (spot.boxHasFloor() || !onLayer && spot.floorWithin(dir, MAX_HOLE_LENGTH)) null
+						else missText { "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z) }
+					}
+				}
+				// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
+				val holeMiss by lazy(LazyThreadSafetyMode.NONE) {
+					generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
+						.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
+						?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
+						?.let { hole -> missText { "a hole %.1f ahead".format(hole) } }
+				}
+				// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
+				val crossMiss by lazy(LazyThreadSafetyMode.NONE) {
+					if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull { crossedHit(it) }
+						?.let { hit -> missText { "${hit.what} ahead crossing over" } }
+				}
+				var firstMiss: (() -> String)? = null
 				val found = tilts.firstNotNullOfOrNull { (lean, untilted) ->
 					// Short of the lane by the drift of the tilt, so it's on the lane while passing. Past carpets lying along the way
 					// right on it, the tilt drifts you on away from them.
@@ -2162,29 +2241,18 @@ abstract class ObstaclePassingMode(
 						.coerceIn(0.0, max(0.0, distance - 1))
 					val miss = when {
 						// Ahead, you're not there yet to glide over from.
-						sideways -> "in the way sideways"
-						!tilted && !untilted -> "not tilted ${if (lean > 0) "right" else "left"} past it in time"
-						// From where the swing gets onto it, before that you're between the lanes, see the lanes crossed below.
+						sideways -> missText { "in the way sideways" }
+						!tilted && !untilted -> missText { "not tilted ${if (lean > 0) "right" else "left"} past it in time" }
+						// From where the swing gets onto it, before that you're between the lanes, see the lanes crossed.
 						else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets, mobs)
-							?.let { "${it.what} ahead" }
-							?: lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
-								// A hole there with floor again within reach is glided over on the lane.
-								if (spot.boxHasFloor() || !onLayer && spot.floorWithin(dir, MAX_HOLE_LENGTH)) null
-								else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
-							}
-							// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
-							?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
-								.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
-								?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
-								?.let { "a hole %.1f ahead".format(it) }
-							// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
-							?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
-								linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs)
-									?.let { hit -> "${hit.what} ahead crossing over" }
-							}
-							// The way over itself until passing, farther than those look: the swing over to a lane a block or two off
-							// takes 20 or more, and from where it's as good as on it, it still closes in on it, short of where it passes.
-							?: if (lead > 0) null else steerPathHit(linePoint, dir, path, max(reached, distance - 1))
+							?.let { hit -> missText { "${hit.what} ahead" } }
+							?: floorMiss
+							// Up on a layer, none of the rest is looked at.
+							?: if (onLayer) null else (holeMiss
+								?: crossMiss
+								// The way over itself until passing, farther than those look: the swing over to a lane a block or two off
+								// takes 20 or more, and from where it's as good as on it, it still closes in on it, short of where it passes.
+								?: if (lead > 0) null else steerPathHit(linePoint, dir, path, max(reached, distance - 1))?.let { hit -> missText { hit } })
 					}
 					if (miss != null) {
 						if (firstMiss == null) firstMiss = miss
@@ -2195,15 +2263,17 @@ abstract class ObstaclePassingMode(
 				}
 				// The first of them on it no closer than the one on the way now, else over there it's on you sooner.
 				val (count, first) = if (found != null && fewestCarpets) lane.carpetsAhead(dir, laneSpeed, found.second) else 0 to null
-				val closer = first?.takeIf { offset != currentOffset && it < distance - 1 }?.let { "carpets %.1f ahead, closer".format(it) }
+				val closer = first?.takeIf { offset != currentOffset && it < distance - 1 }?.let { at -> missText { "carpets %.1f ahead, closer".format(at) } }
 				(firstMiss.takeIf { found == null } ?: closer)?.let { misses += (laneOffset - here) to it }
 				if (found == null || closer != null) null
 				else Lane(across.multiply(found.first), found.second, laneOffset, count, offset == currentOffset)
 					.also { if (fewestCarpets) taken += (laneOffset - here) to it.carpets }
 			}.let { found -> if (fewestCarpets) found.minByOrNull { it.carpets } else found.firstOrNull() } }
 			.also {
-				laneMiss = misses.sortedBy { it.first }.missText()
-				laneCarpets = taken.sortedBy { it.first }.joinToString(", ") { (offset, count) -> "%+.2f %d".format(offset, count) }
+				val turnedDown = misses
+				val counted = taken
+				laneMissText = lazy(LazyThreadSafetyMode.NONE) { turnedDown.sortedBy { it.first }.map { (offset, miss) -> offset to miss() }.missText() }
+				laneCarpetsText = lazy(LazyThreadSafetyMode.NONE) { counted.sortedBy { it.first }.joinToString(", ") { (offset, count) -> "%+.2f %d".format(offset, count) } }
 			}
 	}
 
@@ -2247,6 +2317,9 @@ abstract class ObstaclePassingMode(
 		}
 		return carpets to first
 	}
+
+	/** Why a lane was turned down, put together only once read for the debug log. */
+	private fun missText(text: () -> String) = text
 
 	/** The lanes beside you, how far across from you, + to the right, grouped where they're turned down alike, for the debug log. */
 	private fun List<Pair<Double, String>>.missText() =
@@ -2958,10 +3031,12 @@ abstract class ObstaclePassingMode(
 		val to = over.end - at + THREAD_RUN
 		val minY = max(over.feetY, over.targetY - THREAD_Y_MARGIN)
 		val maxY = min(over.topY, over.targetY + THREAD_Y_MARGIN) + GLIDE_SIZE
-		fun fitting(speed: Double) = passage(linePoint, dir, from, to, minY, maxY, speed, offset, THREAD_WINDOW)
 		val speed = player.velocity.horizontalLength()
 		// The fastest it fits through, from a bit faster than you are down.
 		val top = ceil((speed + THREAD_SPEED_ABOVE) / THREAD_SPEED_GRID) * THREAD_SPEED_GRID
+		// What's in the way, once for all of the speeds below, as far out as the fastest puts the box.
+		val boxes = passageBoxes(linePoint, dir, from, to, minY, maxY, passageSpread(max(top, speed), offset, THREAD_WINDOW))
+		fun fitting(speed: Double) = passage(linePoint, dir, from, to, minY, maxY, speed, offset, THREAD_WINDOW, boxes = boxes)
 		val fastest = generateSequence(top) { it - THREAD_SPEED_GRID }.takeWhile { it >= THREAD_MIN_SPEED - 1e-9 }
 			.firstOrNull { (fitting(it)?.width ?: 0.0) >= THREAD_MIN_WIDTH }
 			?: return null.also { threadMiss = "no spot across gets through at every tick down to %.2f a tick".format(THREAD_MIN_SPEED) }
@@ -2992,6 +3067,9 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.passage(
 		origin: Vec3d, dir: Vec3d, from: Double, to: Double, minY: Double, maxY: Double, speed: Double, around: Double, window: Double,
 		leans: List<Int> = listOf(0, 1, -1),
+		// Everything that may be in the way, at least as far out as any spot looked at puts the box. One farther out is
+		// in the way only of spots past the window, it changes nothing.
+		boxes: List<Box> = passageBoxes(origin, dir, from, to, minY, maxY, passageSpread(speed, around, window)),
 	): Passage? {
 		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
 		val across = across(dir)
@@ -3003,20 +3081,6 @@ abstract class ObstaclePassingMode(
 		val az = origin.z + d.z * from
 		val bx = origin.x + d.x * to
 		val bz = origin.z + d.z * to
-		// Everything that may be in the way, as far out as any spot looked at puts the box.
-		val spread = abs(around) + window + half + speed + 1
-		freshShapes()
-		val boxes = ArrayList<Box>()
-		val pos = BlockPos.Mutable()
-		for (x in floor(min(ax, bx) - spread).toInt()..floor(max(ax, bx) + spread).toInt())
-			for (z in floor(min(az, bz) - spread).toInt()..floor(max(az, bz) + spread).toInt())
-				for (y in floor(minY).toInt() - 1..floor(maxY).toInt()) {
-					val shape = wayShape(pos.set(x, y, z))
-					if (shape.isEmpty) continue
-					shape.boundingBoxes.forEach { boxes += it.offset(x.toDouble(), y.toDouble(), z.toDouble()) }
-				}
-		boxes += solidEntities
-		boxes.removeAll { it.maxY <= minY + 1e-7 || it.minY >= maxY - 1e-7 }
 		// The spots across each box is in the way of, the first move along x or along z.
 		fun blocked(xFirst: Boolean): List<Pair<Double, Double>> {
 			val out = ArrayList<Pair<Double, Double>>()
@@ -3039,10 +3103,18 @@ abstract class ObstaclePassingMode(
 						val nx = when (axis) { 0 -> 1.0; 1 -> 0.0; else -> across.x }
 						val nz = when (axis) { 0 -> 0.0; 1 -> 1.0; else -> across.z }
 						val k = across.x * nx + across.z * nz
-						val pMin = (0..3).minOf { px[it] * nx + pz[it] * nz }
-						val pMax = (0..3).maxOf { px[it] * nx + pz[it] * nz }
-						val qMin = (0..3).minOf { qx[it] * nx + qz[it] * nz }
-						val qMax = (0..3).maxOf { qx[it] * nx + qz[it] * nz }
+						var pMin = Double.POSITIVE_INFINITY
+						var pMax = Double.NEGATIVE_INFINITY
+						var qMin = Double.POSITIVE_INFINITY
+						var qMax = Double.NEGATIVE_INFINITY
+						for (i in 0..3) {
+							val p = px[i] * nx + pz[i] * nz
+							val q = qx[i] * nx + qz[i] * nz
+							pMin = min(pMin, p)
+							pMax = max(pMax, p)
+							qMin = min(qMin, q)
+							qMax = max(qMax, q)
+						}
 						// Only touching it isn't hitting it, like the game's collisions.
 						if (abs(k) < 1e-9) {
 							if (pMin >= qMax - 1e-7 || pMax <= qMin + 1e-7) high = low
@@ -3080,14 +3152,45 @@ abstract class ObstaclePassingMode(
 		// Straight along an axis the other one hardly moves, the first is the larger.
 		if (abs(d.x * d.z) < 1e-3) return widest(blocked(abs(d.x) >= abs(d.z)))
 		var best: Passage? = null
+		// Each looked at once for all the leans.
+		val xFirst by lazy(LazyThreadSafetyMode.NONE) { blocked(true) }
+		val zFirst by lazy(LazyThreadSafetyMode.NONE) { blocked(false) }
 		for (lean in leans) {
 			val heading = d.add(across.multiply(lean * Math.tan(Math.toRadians(THREAD_TILT))))
-			val blocks = if (lean == 0) blocked(true) + blocked(false) else blocked(abs(heading.x) >= abs(heading.z))
+			val blocks = if (lean == 0) xFirst + zFirst else if (abs(heading.x) >= abs(heading.z)) xFirst else zFirst
 			val stretch = widest(blocks)?.let { Passage(it.centre, it.width, lean) } ?: continue
 			if (lean == 0 && (stretch.width >= THREAD_FREE_WIDTH || leans.size == 1)) return stretch
 			if (lean != 0 && (best == null || stretch.width > best.width)) best = stretch
 		}
 		return best
+	}
+
+	/** How far out from the way [passage] looks at [speed], up to [window] to either side of [around]. */
+	private fun passageSpread(speed: Double, around: Double, window: Double) = abs(around) + window + GLIDE_SIZE / 2 + speed + 1
+
+	/**
+	 * What's in the way of [passage] from [origin] along [dir], from [from] to [to] along the line, [spread] out to
+	 * either side, between [minY] and [maxY]: the blocks' shapes and what's as solid as one.
+	 */
+	private fun SafeContext.passageBoxes(origin: Vec3d, dir: Vec3d, from: Double, to: Double, minY: Double, maxY: Double, spread: Double): List<Box> {
+		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val ax = origin.x + d.x * from
+		val az = origin.z + d.z * from
+		val bx = origin.x + d.x * to
+		val bz = origin.z + d.z * to
+		freshShapes()
+		val boxes = ArrayList<Box>()
+		val pos = BlockPos.Mutable()
+		for (x in floor(min(ax, bx) - spread).toInt()..floor(max(ax, bx) + spread).toInt())
+			for (z in floor(min(az, bz) - spread).toInt()..floor(max(az, bz) + spread).toInt())
+				for (y in floor(minY).toInt() - 1..floor(maxY).toInt()) {
+					val shape = wayShape(pos.set(x, y, z))
+					if (shape.isEmpty) continue
+					shape.boundingBoxes.forEach { boxes += it.offset(x.toDouble(), y.toDouble(), z.toDouble()) }
+				}
+		boxes += solidEntities
+		boxes.removeAll { it.maxY <= minY + 1e-7 || it.minY >= maxY - 1e-7 }
+		return boxes
 	}
 
 	/**
@@ -3290,14 +3393,14 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.glidingFaster(hop: Hop, touching: Hop, progress: Double): String? {
 		val exit = hopExitSpeed
-		val miss = hopMiss
+		val miss = hopMissText
 		val short = hopShort
 		// Alike, both held from now: the one [canGetOver] found may be held a bounce later.
 		val touchExit = if (canHop(touching, progress, 0)) hopExitSpeed else null
 		// Not only just: a near miss of a simulation over a long hole is a fall into it, see [PLAIN_GLIDE_MARGIN].
 		val plainExit = if (canGetOver(hop, progress) && canHop(hop, progress, 0, margin = PLAIN_GLIDE_MARGIN)) hopExitSpeed else null
 		hopExitSpeed = exit
-		hopMiss = miss
+		hopMissText = miss
 		hopShort = short
 		if (touchExit == null || plainExit == null || plainExit < touchExit + TOUCH_MIN_GAIN) return null
 		return "gliding over it keeps as much speed, %.2f a tick after it, %.2f touching down".format(plainExit, touchExit).also { touchMiss = it }
@@ -4049,6 +4152,10 @@ abstract class ObstaclePassingMode(
 		// Got to the obstacle, for [hopWallSpeed].
 		var atWall = progress >= hop.obstacle
 		if (atWall) hopWallSpeed = from
+		// Where it started, for [hopMiss].
+		val startY = player.y
+		val startClimb = player.velocity.y
+		val startSpeed = player.velocity.horizontalLength()
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
 			val touch = hop.touch
 			var jumped = false
@@ -4067,8 +4174,9 @@ abstract class ObstaclePassingMode(
 				val floor = floorAt(dir, along, hop.lane) ?: run {
 					// Over a hole after a layer bounced on up there, gliding on above the floor down below it.
 					if (hop.hole && onLayer && y > baseY + passerConfig.minObstacleHeight) return@run null
-					hopMiss = "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead with no floor to bounce off"
-						.format(player.y, player.velocity.y, player.velocity.horizontalLength(), along - progress)
+					val ahead = along - progress
+					hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead with no floor to bounce off"
+						.format(startY, startClimb, startSpeed, ahead) }
 					hopShort = Double.POSITIVE_INFINITY
 					return false
 				}
@@ -4109,8 +4217,11 @@ abstract class ObstaclePassingMode(
 			val onTop = hop.touch?.range?.contains(along) == true
 			// Coming over it lower than its top runs into its side.
 			if (onTop && !wasOnTop && !touched && y < hop.touch!!.y) {
-				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, below the top at y %.2f to touch down on"
-					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.touch.y)
+				val atY = y
+				val ahead = along - progress
+				val topY = hop.touch.y
+				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, below the top at y %.2f to touch down on"
+					.format(startY, startClimb, startSpeed, atY, ahead, topY) }
 				// Not a near miss to go for anyway, see [hopShort].
 				hopShort = Double.POSITIVE_INFINITY
 				return false
@@ -4118,8 +4229,12 @@ abstract class ObstaclePassingMode(
 			// Landed on the top this tick, the move across goes on past it standing on it.
 			val low = if (onTopNow || onTop && !touched) Double.NEGATIVE_INFINITY else hop.feetAt(along) + if (onTop) 0.0 else margin
 			if (along >= hop.start && (y < low || y > hop.topY)) {
-				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
-					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.feetAt(along), hop.topY)
+				val atY = y
+				val ahead = along - progress
+				val feet = hop.feetAt(along)
+				val topY = hop.topY
+				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
+					.format(startY, startClimb, startSpeed, atY, ahead, feet, topY) }
 				hopShort = if (y > hop.topY) Double.POSITIVE_INFINITY else hop.feetAt(along) - y
 				return false
 			}
@@ -4391,6 +4506,13 @@ abstract class ObstaclePassingMode(
 	 * Null when it'd come down where there's no floor, or not within the simulation.
 	 */
 	private fun SafeContext.nextRise(progress: Double, lane: Vec3d): Int? {
+		if (!planning) return findNextRise(progress, lane)
+		// All it depends on besides you, kept for the pass, see [planning].
+		val key = listOf(progress, lane, startPos, baseY, getSnappedDir(), bounceKey())
+		return if (planningRises.containsKey(key)) planningRises[key] else findNextRise(progress, lane).also { planningRises[key] = it }
+	}
+
+	private fun SafeContext.findNextRise(progress: Double, lane: Vec3d): Int? {
 		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
@@ -4679,9 +4801,8 @@ abstract class ObstaclePassingMode(
 		// smallest.
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
-		val solid = safeContext.world.getOtherEntities(safeContext.player, around.union(around.offset(reach)).expand(CUBE_REACH + MAGMA_CUBE_MARGIN)) {
-			safeContext.player.collidesWith(it) || mobs && it.glidedOver()
-		}.map { it to if (it.glidedOver()) with(safeContext) { mobBox(it) } else it.boundingBox }
+		val solid = with(safeContext) { obstacleEntities(around.union(around.offset(reach)).expand(CUBE_REACH + MAGMA_CUBE_MARGIN), mobs) }
+			.map { it to if (it.glidedOver()) with(safeContext) { mobBox(it) } else it.boundingBox }
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
 		fun nearest(starts: List<Vec3d>, within: Double): Obstacle? {
 			var nearest: Obstacle? = null
@@ -4711,6 +4832,25 @@ abstract class ObstaclePassingMode(
 		// Carpets only before it, past it they don't matter.
 		val carpet = nearest(carpetStarts, block?.distance ?: maxDistance)
 		return (if (carpet != null && (block == null || carpet.distance < block.distance)) carpet else block) to block
+	}
+
+	/**
+	 * The entities in [box] as solid as blocks to you, and with [mobs] the ones glided over, see [obstacleHits]. Within a
+	 * pass, see [planning], picked out of the ones all around you looked up once, in the same order.
+	 */
+	private fun SafeContext.obstacleEntities(box: Box, mobs: Boolean): List<Entity> {
+		fun inTheWay(entity: Entity) = player.collidesWith(entity) || mobs && entity.glidedOver()
+		if (!planning) return world.getOtherEntities(player, box, ::inTheWay)
+		val around = planningEntitiesBox ?: player.boundingBox.expand(SOLID_ENTITY_RANGE).also { all ->
+			planningEntitiesBox = all
+			// A dragon's parts are looked up only with the dragon in the box, never picked out of these.
+			planningEntities = world.getOtherEntities(player, all) { player.collidesWith(it) || it.glidedOver() }
+				.takeUnless { found -> found.any { it is EnderDragonPart } }
+		}
+		val all = planningEntities
+		if (all == null || box.minX < around.minX || box.minY < around.minY || box.minZ < around.minZ ||
+			box.maxX > around.maxX || box.maxY > around.maxY || box.maxZ > around.maxZ) return world.getOtherEntities(player, box, ::inTheWay)
+		return all.filter { it.boundingBox.intersects(box) && inTheWay(it) }
 	}
 
 	/** Each block's collision shape this tick. The planner looks at the same blocks dozens of times a tick. */
@@ -4744,6 +4884,10 @@ abstract class ObstaclePassingMode(
 		solidEntities = emptyList()
 		shapeContext = ShapeContext.absent()
 		shapesAge = -1
+		// Not put together yet, they'd hold on to the world through what they'd look up.
+		laneMiss = ""
+		laneCarpets = ""
+		hopMiss = ""
 	}
 
 	private fun SafeContext.shapeAt(pos: BlockPos): VoxelShape {
