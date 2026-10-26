@@ -148,6 +148,8 @@ abstract class ObstaclePassingMode(
 		 * than the game's, about 0.03 slower over a long hold.
 		 */
 		private const val THREAD_SPEED_MARGIN = 0.05
+		/** How far before an opening it has to land at least to take off again and come in slower, see [restartFor]. */
+		private const val RESTART_ROOM = 15.0
 		/** As wide as this at the spot either axis may go first, the heading isn't held to one side, see [Thread.lean]. */
 		private const val THREAD_FREE_WIDTH = 0.25
 		/** How far above and below the height held the box is kept clear going through, holding it wavers a bit. */
@@ -794,6 +796,8 @@ abstract class ObstaclePassingMode(
 	private var hopMiss: String
 		get() = hopMissText.value
 		set(value) { hopMissText = lazyOf(value) }
+	/** Where the opening is that it lands before only to take off again slower, see [threadHold]. */
+	private var restartFor: Double? = null
 	/** Why the last [dipLane] doesn't bounce through a hole as a dip, for the debug log. */
 	private var dipMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
@@ -1301,6 +1305,14 @@ abstract class ObstaclePassingMode(
 			if (landedTicks >= MAX_LANDING_TICKS) ElytraFly.debug { "Still gliding after landing, walking anyway" }
 			landedTicks = 0
 			commitBrake("passObstacles", null)
+			// Landed only to come in slower for an opening, taking off again right here, see [threadHold].
+			if (restartFor == at) {
+				restartFor = null
+				skipHopAt = null
+				ElytraFly.debug { "Landed to come in slower for the opening %.1f ahead, taking off again".format(at - progress(playerPos)) }
+				return false
+			}
+			restartFor = null
 			// Came down on top of a layer, e.g. one right after a hole, with the way on up there free: bouncing on it.
 			if (startPos.y > brakeY + 0.01 && !Vec3d(playerPos.x, closestLinePoint.y, playerPos.z).isObstructed(snappedDir)) {
 				ElytraFly.debug { "Landed up on the blocks, the way on is free up there, bouncing on" }
@@ -5189,8 +5201,12 @@ abstract class ObstaclePassingMode(
 		}
 		if (!now()) return false
 		if (hopWallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN && thread.wallAt - progress > brakeDistance()) {
-			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, it fits up to %.2f".format(
-				thread.wallAt - progress, hopWallSpeed, thread.maxSpeed))
+			// Room to take off again before it: landing only to come in slower, lined up with it on the bounces up to
+			// speed again, not walking. Else walking on as before.
+			val restart = thread.wallAt - progress > brakeDistance() + RESTART_ROOM
+			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, it fits up to %.2f, landing to %s".format(
+				thread.wallAt - progress, hopWallSpeed, thread.maxSpeed, if (restart) "take off again slower" else "walk around it"))
+			if (restart) restartFor = thread.wallAt
 			return false
 		}
 		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f, to get there at %.2f, it fits up to %.2f".format(
