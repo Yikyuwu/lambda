@@ -1595,8 +1595,9 @@ abstract class ObstaclePassingMode(
 		dodgeCarpets = carpets
 		onLane = false
 		dodgeAfterMob = false
-		fitDodge = slowingFor != null
-		if (slowingFor != null && at >= slowingFor - DODGE_MARGIN) slowFor = null
+		val takesOver = slowingFor != null && at >= slowingFor - DODGE_MARGIN
+		fitDodge = takesOver
+		if (takesOver) slowFor = null
 		return true
 	}
 
@@ -2611,6 +2612,8 @@ abstract class ObstaclePassingMode(
 			}
 			if (lane != Vec3d.ZERO && lane != dodge) commitLane("glideOverHole", Lane(lane, 0, lane.dotProduct(across(dir))), at + end + DODGE_MARGIN)
 			else if (lane == Vec3d.ZERO && dodge != null) commitNoLane("glideOverHole")
+			// Held slow, it wouldn't come down into the dip.
+			commitSlowFor("glideOverHole", null)
 			commitHop("glideOverHole", down)
 			return true
 		}
