@@ -109,6 +109,10 @@ abstract class ObstaclePassingMode(
 		private const val DODGE_MARGIN = 3.0
 		/** Closer than this there's no time left to steer, walking around it is safer. */
 		private const val MIN_DODGE_DISTANCE = 4.0
+		/** How far along an obstacle is looked at for room over it as high as it may fly, a block askew diagonally. */
+		private const val TALL_SCAN = 1.5
+		/** How often what's past the start of a layer is looked at while gliding up onto it, see [dodgePastOnLayer]. */
+		private const val LAYER_LOOK_TICKS = 5
 		/**
 		 * After landing from a brake, how long until you stand: the server ends the glide only once it sees you
 		 * down, about a ping, and till then you slide on at full speed. Then walking friction stops you in a few.
@@ -558,6 +562,8 @@ abstract class ObstaclePassingMode(
 	private var dodgeYaw: Double? = null
 	/** Which way across the line to tilt the heading passing the obstacle, 0 for none. */
 	private var dodgeLean = 0
+	/** Where the layer starts that the lane was picked from down here to get onto, see [dodgePastOnLayer]. */
+	private var dodgeUpAt: Double? = null
 	/** Dodging carpets, back onto the line only once it's free of them too. */
 	private var dodgeCarpets = false
 	/** How far across the line the lane is that's dodged to, [dodge] short of it by the drift of the tilt. */
@@ -998,6 +1004,14 @@ abstract class ObstaclePassingMode(
 			return brake(progress(playerPos) + 1, "Hit a wall")
 		hop?.let { hop ->
 			val progress = progress(playerPos)
+			// Gliding up onto a layer, what's past its start up there comes into sight on the way: onto a lane past it now,
+			// the way up onto the layer is planned again on it, see [dodgePastOnLayer].
+			if (hop.step && !onLayer && dodge == null && passerConfig.dodge && player.age % LAYER_LOOK_TICKS == 0 &&
+				hop.obstacle - progress >= MIN_DODGE_DISTANCE &&
+				dodgePastOnLayer(Vec3d(playerPos.x, closestLinePoint.y, playerPos.z), closestLinePoint, snappedDir, hop.obstacle - progress, "the layer", hop)) {
+				this@ObstaclePassingMode.hop = null
+				return@let
+			}
 			// Planned slow, right after taking off, the box swings out farther now at speed, into blocks beside the line.
 			// Not the obstacle itself: its edge runs askew diagonally, the swing reaches its corner up to that much sooner.
 			val before = hop.obstacle - progress - halfWidth(snappedDir) - sweep(snappedDir) - HOP_SCAN_STEP
@@ -1271,14 +1285,49 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.dodgePastNext(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String, over: Hop): Boolean {
 		val after = over.end - progress(from)
 		val next = from.add(dir.multiply(after)).add(0.0, if (over.step) over.stepHeight else 0.0, 0.0)
-			.obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD) ?: return false
-		val lane = freeLane(from, linePoint, dir, after + next.distance, Vec3d.ZERO) ?: return false
+			.obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)
+		val lane = next?.let { freeLane(from, linePoint, dir, after + it.distance, Vec3d.ZERO) }
+		if (next == null || lane == null) return over.step && dodgePastOnLayer(from, linePoint, dir, distance, block, over)
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), another %.1f after it (${next.what}), dodging past both ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
 		return dodgeTo(lane, progress(from) + after + next.distance)
 	}
 
+	/**
+	 * Gliding up onto the layer [distance] ahead, something past its start up there that can't be glided over even as
+	 * high as it may fly, e.g. a column in a hole right after a short layer: steers onto a lane past it from down here
+	 * already. From up there it's seen first, too close to steer over to one, see [isStepUp] on the lane for the way up.
+	 * Whether it did.
+	 */
+	private fun SafeContext.dodgePastOnLayer(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String, over: Hop): Boolean {
+		val look = passerConfig.dodgeLookAhead - distance
+		if (look < MIN_DODGE_DISTANCE) return false
+		// From the layer's start up there, the lanes and the floor along them looked at from its height.
+		val up = Vec3d(0.0, over.stepHeight, 0.0)
+		val start = linePoint.add(dir.multiply(distance)).add(up)
+		val next = start.obstacleHit(dir, look) ?: return false
+		if (!tooHighToGlideOver(start, dir, next.distance)) return false
+		val lane = freeLane(from.add(dir.multiply(distance)).add(up), start, dir, next.distance, Vec3d.ZERO) ?: run {
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, no free lane past it from here ($laneMiss)".format(distance, next.distance) }
+			return false
+		}
+		ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, dodging past it ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
+		dodgeTo(lane, progress(start) + next.distance)
+		dodgeUpAt = progress(start)
+		return true
+	}
+
+	/** Whether what's [distance] ahead of [from] along [dir] is in the way of the gliding box even as high as it may hop. */
+	private fun SafeContext.tooHighToGlideOver(from: Vec3d, dir: Vec3d, distance: Double): Boolean {
+		val feetY = maxHopY().takeIf { it.isFinite() } ?: return false
+		return generateSequence(distance + HOP_SCAN_STEP / 2) { it + HOP_SCAN_STEP }.takeWhile { it < distance + TALL_SCAN }.any { along ->
+			val at = from.add(dir.multiply(along))
+			!spaceEmpty(Box(at.x - GLIDE_SIZE / 2, feetY, at.z - GLIDE_SIZE / 2, at.x + GLIDE_SIZE / 2, feetY + GLIDE_SIZE, at.z + GLIDE_SIZE / 2))
+		}
+	}
+
 	/** Steers over to [lane], past the obstacle ending [at] along the line, or the [carpets]. Always true. */
 	private fun dodgeTo(lane: Lane, at: Double, carpets: Boolean = false): Boolean {
+		dodgeUpAt = null
 		dodge = lane.target
 		dodgeLean = lane.lean
 		dodgeOffset = lane.offset
@@ -1618,7 +1667,9 @@ abstract class ObstaclePassingMode(
 			}
 			// Past what the lane was picked for, that's known free. Not of carpets, picked with the fewest of them.
 			else -> {
-				val skip = if (dodgeCarpets) 0.0 else (dodgeEnd + DODGE_MARGIN - progress).coerceAtLeast(0.0)
+				// Not before getting up onto the layer it was picked past, that's to be bounced onto on the lane first.
+				val skip = if (dodgeCarpets || !onLayer && dodgeUpAt.let { it != null && progress < it }) 0.0
+					else (dodgeEnd + DODGE_MARGIN - progress).coerceAtLeast(0.0)
 				// Along the lane itself like when it was picked, the target is short of it by the tilt.
 				val onLane = dodgeLanePoint(linePoint, dir)
 				// Tilted, the box swings out only that side. On the lane from where you are, drifting across.
@@ -1657,7 +1708,8 @@ abstract class ObstaclePassingMode(
 					// Onto the line when it's up there too, off to the side of a narrow one it'd soon drop off its edge.
 					if (!dodgeCarpets && !onLine && !skipHopAt.near(progress + distance) &&
 						!holeBefore(onLane, dir, progress, distance) && isStepUp(onLane, dir, distance)) {
-						val lineUp = linePoint.obstacleDistance(dir, distance + STEP_CLEAR)?.takeIf { isStepUp(linePoint, dir, it) }
+						// Not with what's dodged up there past its start, e.g. picked from down here, see [dodgePastOnLayer].
+						val lineUp = linePoint.obstacleDistance(dir, distance + STEP_CLEAR)?.takeIf { progress + it >= dodgeEnd && isStepUp(linePoint, dir, it) }
 							?.let { planHop(linePoint, dir, it, true) }
 						(lineUp ?: planHop(from, dir, distance, true, lean = tilt))?.let { up ->
 							ElytraFly.debug { "Obstacle %.1f ahead on the lane ($block), a layer to bounce on, gliding up onto it ${if (lineUp != null) "on the line " else ""}at y %.2f".format(distance, up.feetY) }
@@ -3634,6 +3686,7 @@ abstract class ObstaclePassingMode(
 	/** Back onto the line, still dodging until on it. */
 	private fun swingBack() {
 		dodge = Vec3d.ZERO
+		dodgeUpAt = null
 		onLane = false
 		fitDodge = false
 		atFitSpeed = false
@@ -3644,6 +3697,7 @@ abstract class ObstaclePassingMode(
 	/** Always false, for returning it from [steerDodge]. */
 	private fun stopDodge(): Boolean {
 		dodge = null
+		dodgeUpAt = null
 		onLane = false
 		dodgeAfterMob = false
 		slowFor = null
