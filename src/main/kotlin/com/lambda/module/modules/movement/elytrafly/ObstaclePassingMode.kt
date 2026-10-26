@@ -2775,7 +2775,10 @@ abstract class ObstaclePassingMode(
 			for (offset in listOf(0.0, -step, step, -2 * step, 2 * step)) {
 				if (abs(offset) > passerConfig.maxDodge + 1e-6) continue
 				val lanePoint = linePoint.add(across.multiply(offset))
-				val wall = lanePoint.obstacleHit(dir, distance + DODGE_MARGIN, speed = 0.0, mobs = false)?.distance ?: continue
+				// Glided over from the first thing in its way: the lane's own, or the block in yours when that's sooner or
+				// nothing's on the lane there, an opening may well be right on it, e.g. the line between two floating blocks
+				// the swing of your box reaches.
+				val wall = min(lanePoint.obstacleHit(dir, distance + DODGE_MARGIN, speed = 0.0, mobs = false)?.distance ?: distance, distance)
 				val over = planHop(lanePoint, dir, wall, swings = false, anyway = true) ?: continue
 				val thread = threadPlan(linePoint, dir, offset, over, off) ?: continue
 				if (centres.any { abs(it - thread.centre) < THREAD_CENTRES_APART }) continue
