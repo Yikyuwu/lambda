@@ -4818,7 +4818,7 @@ abstract class ObstaclePassingMode(
 	 * side, away from what's dodged.
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double): Double = when {
-		thread.let { it != null && progress < it.wallAt + DODGE_MARGIN && it.hopStart == hop.start } && hop.lane == dodge -> threadYaw(linePoint, dir, progress, thread ?: return 0.0)
+		thread.let { it != null && progress < it.wallAt + DODGE_MARGIN && it.hopStart == hop.start } && hop.lane == dodge -> threadYaw(linePoint, dir, progress, thread ?: return steerYaw(linePoint, hop.lane, dir))
 		// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].
 		// Steering out farther still if need be, not in.
 		hop.hole && hop.touch?.leans?.any { progress in it } == true &&
