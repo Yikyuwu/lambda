@@ -4451,8 +4451,8 @@ abstract class ObstaclePassingMode(
 		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = player.velocity.horizontalLength(), margin: Double = 0.0,
 		gain: Double = bounceGain(),
 	): Boolean {
-		val memo = hopRunMemo ?: return simulateHop(hop, progress, holdFrom, from, margin)
-		val key = HopRunKey(hop, progress, holdFrom, from, margin, hop.held, hop.topped, hop.rose, hop.touchedAt)
+		val memo = hopRunMemo ?: return simulateHop(hop, progress, holdFrom, from, margin, gain)
+		val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, hop.held, hop.topped, hop.rose, hop.touchedAt)
 		memo[key]?.let { run ->
 			hopMiss = run.miss
 			hopShort = run.short
@@ -4461,7 +4461,7 @@ abstract class ObstaclePassingMode(
 			hopWallSpeed = run.wall
 			return run.made
 		}
-		return simulateHop(hop, progress, holdFrom, from, margin).also { memo[key] = HopRun(it, hopMiss, hopShort, hopExitSpeed, hopTicks, hopWallSpeed) }
+		return simulateHop(hop, progress, holdFrom, from, margin, gain).also { memo[key] = HopRun(it, hopMiss, hopShort, hopExitSpeed, hopTicks, hopWallSpeed) }
 	}
 
 	/** How [canHop] went for a glide simulated already, while the chooser looks, see [hopRunMemo]. */
@@ -4469,7 +4469,7 @@ abstract class ObstaclePassingMode(
 
 	/** A glide simulated by [canHop]: the [hop] itself, not one alike, from where with what, and how far it's flown already. */
 	private data class HopRunKey(
-		val hop: Hop, val progress: Double, val holdFrom: Int?, val from: Double, val margin: Double,
+		val hop: Hop, val progress: Double, val holdFrom: Int?, val from: Double, val margin: Double, val gain: Double,
 		val held: Boolean, val topped: Boolean, val rose: Boolean, val touchedAt: Int,
 	)
 
@@ -4491,7 +4491,7 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** [canHop] simulated. */
-	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double): Boolean {
+	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double): Boolean {
 		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		var topped = hop.topped
