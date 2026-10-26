@@ -229,6 +229,8 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val DROP_BEFORE = 2.0
 		private const val HOP_SIM_TICKS = 80
+		/** How long the way over to a lane is followed at most, as far as it looks ahead even at a third of a block a tick. */
+		private const val STEER_SIM_TICKS = 400
 		/** Long enough to bounce up to speed from a take-off and over a hop as far as it's looked for. */
 		private const val CAN_HOP_SIM_TICKS = 200
 		/** How many ticks after the next bounce starts holding from it is looked at, see [holdingFor]. */
@@ -346,7 +348,10 @@ abstract class ObstaclePassingMode(
 		 * flight to take on [MIN_LEAN_DEGREES], short so it doesn't drift off the lane, it can't steer in meanwhile.
 		 */
 		private const val TOUCH_LEAN_TICKS = 8
-		/** How much more room than the box a lane to touch down on in a hole needs on the way, see [touchLane]. */
+		/**
+		 * How much more room than the box a lane to touch down on in a hole needs on the way, see [touchLane], and the way
+		 * over to a lane, see [steerPathHit].
+		 */
 		private const val LANE_CLEAR_MARGIN = 0.05
 		/** How long after touching down the glide may still be ended, until the bounce off the top takes off again. */
 		private const val TOUCH_GRACE_TICKS = 5
@@ -1503,54 +1508,74 @@ abstract class ObstaclePassingMode(
 		// Up on a layer, one staying on it first. Off it you drop down beside it, where the layer is in the way.
 		return (if (onLayer) listOf(true, false) else listOf(true)).firstNotNullOfOrNull { sameFloor -> misses.clear(); taken.clear(); lanes.asSequence().mapNotNull { offset ->
 				val laneOffset = offset * laneStep
-				// Tilted away from where you come from, so on past the obstacle if it's on that side.
-				// The lane you're on keeps its tilt, it's leaning already.
-				val lean = if (offset == currentOffset && dodge != null) dodgeLean
-					else if (leans && abs(laneOffset - here) > 0.1) sign(laneOffset - here).toInt() else 0
-				// Short of the lane by the drift of the tilt, so it's on the lane while passing. Past carpets lying along the way
-				// right on it, the tilt drifts you on away from them.
-				val target = if (fewestCarpets) laneOffset else laneOffset - lean * leanDrift(leanDistance)
-				val path = steerPath(here, dir, target, lean, lead + distance - leanDistance, lead + distance + DODGE_MARGIN)
-				// From [lead] on all of the way over, it may not be over there yet. Else past the obstacle.
-				val passing = path.filter { it.along >= if (lead > 0) lead else distance - 1 }.ifEmpty { listOf(path.last()) }
-				val low = passing.minOf { it.offset }
-				val high = passing.maxOf { it.offset }
-				// Only when it's tilted the whole way past it, the box doesn't swing in.
-				val tilted = lean != 0 && passing.all { Math.toDegrees(it.heading) * lean >= MIN_LEAN_DEGREES }
-				val middle = linePoint.add(across.multiply((low + high) / 2))
-				// How far along the swing gets onto the lane, at most up to the obstacle.
-				val reached = (path.firstOrNull { abs(it.offset - target) < LANE_REACHED }?.along ?: distance)
-					.coerceIn(0.0, max(0.0, distance - 1))
 				val lane = linePoint.add(across.multiply(laneOffset))
-				val miss = when {
-					// Ahead, you're not there yet to glide over from.
-					lead == 0.0 && from.sidewaysObstructed(lane.subtract(from)) -> "in the way sideways"
-					// From where the swing gets onto it, before that you're between the lanes, see the lanes crossed below.
-					else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets, mobs)
-						?.let { "${it.what} ahead" }
-						?: lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
-							// A hole there with floor again within reach is glided over on the lane.
-							if (spot.boxHasFloor() || !onLayer && spot.floorWithin(dir, MAX_HOLE_LENGTH)) null
-							else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
-						}
-						// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
-						?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
-							.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
-							?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
-							?.let { "a hole %.1f ahead".format(it) }
-						// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
-						?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
-							linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs)
-								?.let { hit -> "${hit.what} ahead crossing over" }
-						}
+				// Tilted away from where you come from, so on past the obstacle if it's on that side. Else the other way, away
+				// from what's beside the lane on this side: only when the heading has come round to it before passing, which
+				// axis goes first is known only then. The lane you're on keeps its tilt, it's leaning already. Each with whether
+				// it's taken untilted too, the box swinging out to either side.
+				val fromSide = if (leans && abs(laneOffset - here) > 0.1) sign(laneOffset - here).toInt() else 0
+				val tilts = when {
+					offset == currentOffset && dodge != null -> listOf(dodgeLean to true)
+					fewestCarpets || !leans -> listOf(fromSide to true)
+					fromSide != 0 -> listOf(fromSide to true, -fromSide to false)
+					else -> listOf(1 to false, -1 to false, 0 to true)
+				}
+				val sideways = lead == 0.0 && from.sidewaysObstructed(lane.subtract(from))
+				var firstMiss: String? = null
+				val found = tilts.firstNotNullOfOrNull { (lean, untilted) ->
+					// Short of the lane by the drift of the tilt, so it's on the lane while passing. Past carpets lying along the way
+					// right on it, the tilt drifts you on away from them.
+					val target = if (fewestCarpets) laneOffset else laneOffset - lean * leanDrift(leanDistance)
+					val path = steerPath(here, dir, target, lean, lead + distance - leanDistance, lead + distance + DODGE_MARGIN, holdSpeed = true)
+					// From [lead] on all of the way over, it may not be over there yet. Else past the obstacle.
+					val passing = path.filter { it.along >= if (lead > 0) lead else distance - 1 }.ifEmpty { listOf(path.last()) }
+					val low = passing.minOf { it.offset }
+					val high = passing.maxOf { it.offset }
+					// Only when it's tilted the whole way past it, the box doesn't swing in.
+					val tilted = lean != 0 && passing.all { Math.toDegrees(it.heading) * lean >= MIN_LEAN_DEGREES }
+					val middle = linePoint.add(across.multiply((low + high) / 2))
+					// How far along the swing gets onto the lane, at most up to the obstacle.
+					val reached = (path.firstOrNull { abs(it.offset - target) < LANE_REACHED }?.along ?: distance)
+						.coerceIn(0.0, max(0.0, distance - 1))
+					val miss = when {
+						// Ahead, you're not there yet to glide over from.
+						sideways -> "in the way sideways"
+						!tilted && !untilted -> "not tilted ${if (lean > 0) "right" else "left"} past it in time"
+						// From where the swing gets onto it, before that you're between the lanes, see the lanes crossed below.
+						else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets, mobs)
+							?.let { "${it.what} ahead" }
+							?: lane.add(dir.multiply(distance)).let { if (sameFloor) it else it.add(0.0, baseY - it.y, 0.0) }.let { spot ->
+								// A hole there with floor again within reach is glided over on the lane.
+								if (spot.boxHasFloor() || !onLayer && spot.floorWithin(dir, MAX_HOLE_LENGTH)) null
+								else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
+							}
+							// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
+							?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
+								.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
+								?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
+								?.let { "a hole %.1f ahead".format(it) }
+							// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
+							?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
+								linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs)
+									?.let { hit -> "${hit.what} ahead crossing over" }
+							}
+							// The way over itself until passing, farther than those look: the swing over to a lane a block or two off
+							// takes 20 or more, and from where it's as good as on it, it still closes in on it, short of where it passes.
+							?: if (lead > 0) null else steerPathHit(linePoint, dir, path, max(reached, distance - 1))
+					}
+					if (miss != null) {
+						if (firstMiss == null) firstMiss = miss
+						null
+					}
+					// Past carpets tilted once on the lane, so the box swings out only the side they were counted on.
+					else target to (if (tilted || fewestCarpets) lean else 0)
 				}
 				// The first of them on it no closer than the one on the way now, else over there it's on you sooner.
-				val (count, first) = if (miss == null && fewestCarpets) lane.carpetsAhead(dir, laneSpeed, lean) else 0 to null
+				val (count, first) = if (found != null && fewestCarpets) lane.carpetsAhead(dir, laneSpeed, found.second) else 0 to null
 				val closer = first?.takeIf { offset != currentOffset && it < distance - 1 }?.let { "carpets %.1f ahead, closer".format(it) }
-				(miss ?: closer)?.let { misses += (laneOffset - here) to it }
-				if (miss != null || closer != null) null
-				// Past carpets tilted once on the lane, so the box swings out only the side they were counted on.
-				else Lane(across.multiply(target), if (tilted || fewestCarpets) lean else 0, laneOffset, count, offset == currentOffset)
+				(firstMiss.takeIf { found == null } ?: closer)?.let { misses += (laneOffset - here) to it }
+				if (found == null || closer != null) null
+				else Lane(across.multiply(found.first), found.second, laneOffset, count, offset == currentOffset)
 					.also { if (fewestCarpets) taken += (laneOffset - here) to it.carpets }
 			}.let { found -> if (fewestCarpets) found.minByOrNull { it.carpets } else found.firstOrNull() } }
 			.also {
@@ -3384,10 +3409,13 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * The way across the line you take for [distance] along it, steering with [steerYaw] from [offset] across it over
-	 * to [target], then from [leanFrom] on tilted [lean] across it. The flight turns a tenth of the way to where you
-	 * look each tick, so it lags behind.
+	 * to [target], then from [leanFrom] on tilted [lean] across it, once over at [target] or coming from the side it
+	 * tilts to, like [leaning]. The flight turns a tenth of the way to where you look each tick, so it lags behind.
+	 * With [holdSpeed] at your speed all the way, bouncing on holds it, else slowing down like gliding.
 	 */
-	private fun SafeContext.steerPath(offset: Double, dir: Vec3d, target: Double, lean: Int, leanFrom: Double, distance: Double): List<SteerState> {
+	private fun SafeContext.steerPath(
+		offset: Double, dir: Vec3d, target: Double, lean: Int, leanFrom: Double, distance: Double, holdSpeed: Boolean = false,
+	): List<SteerState> {
 		val across = across(dir)
 		val velocity = player.velocity
 		var speed = velocity.horizontalLength()
@@ -3395,18 +3423,40 @@ abstract class ObstaclePassingMode(
 		var off = offset
 		var along = 0.0
 		val path = mutableListOf(SteerState(along, off, heading, speed))
-		repeat(HOP_SIM_TICKS) {
+		repeat(if (holdSpeed) STEER_SIM_TICKS else HOP_SIM_TICKS) {
 			if (along >= distance) return path
 			val drift = speed * sin(heading) * STEER_DAMPING_TICKS
-			val aim = if (lean != 0 && along >= leanFrom) Math.toRadians(LEAN_DEGREES) * lean
+			val aim = if (lean != 0 && along >= leanFrom && (target - off) * lean <= LANE_REACHED) Math.toRadians(LEAN_DEGREES) * lean
 				else atan2(target - off - drift, DODGE_STEER_AHEAD)
 			heading += (aim - heading) * 0.1
 			off += speed * sin(heading)
 			along += speed * cos(heading)
-			speed *= 0.99
+			if (!holdSpeed) speed *= 0.99
 			path.add(SteerState(along, off, heading, speed))
 		}
 		return path
+	}
+
+	/**
+	 * What's in the way of the box steering along [path] from [linePoint] until [until] along the line, by a bit. Each
+	 * tick moves along one axis and then the other, the box swings out to the corner between, see [sweep]. As high as
+	 * [obstacleHit] looks. Where along the line, null when it's free.
+	 */
+	private fun SafeContext.steerPathHit(linePoint: Vec3d, dir: Vec3d, path: List<SteerState>, until: Double): String? {
+		val across = across(dir)
+		val bottom = linePoint.y + passerConfig.minObstacleHeight
+		val top = linePoint.y + if (passerConfig.headHitters) 1.99 else passerConfig.minObstacleHeight + WIDTH_MARGIN
+		fun free(x: Double, z: Double) = spaceEmpty(Box(x - GLIDE_SIZE / 2, bottom, z - GLIDE_SIZE / 2, x + GLIDE_SIZE / 2, top, z + GLIDE_SIZE / 2)
+			.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
+		fun point(state: SteerState) = linePoint.add(dir.multiply(state.along)).add(across.multiply(state.offset))
+		// From the first tick on, where you are now you're already.
+		for (i in 0 until path.lastIndex) {
+			if (path[i].along >= until) break
+			val from = point(path[i])
+			val to = point(path[i + 1])
+			if (!free(to.x, from.z) || !free(from.x, to.z) || !free(to.x, to.z)) return "in the way %.1f ahead on the way over".format(path[i + 1].along)
+		}
+		return null
 	}
 
 	/**
@@ -4070,11 +4120,19 @@ abstract class ObstaclePassingMode(
 	/**
 	 * Whether the heading is tilted past what's dodged at [progress] along the line, from shortly before it until past it.
 	 * Tilted on after, it drifted off the lane a block over 115 ticks into what's beside it. Carpets may lie along the lane
-	 * for long, see [dodgeLeanYaw].
+	 * for long, see [dodgeLeanYaw]. Only once over on the lane or coming from the side it tilts to, like [steerPath]:
+	 * tilted before getting there, e.g. dodging something close, it'd never get there.
 	 */
 	private fun SafeContext.leaning(progress: Double) =
 		dodgeLean != 0 && progress >= dodgeEnd - player.velocity.horizontalLength() * LEAN_TICKS &&
-			(dodgeCarpets || progress <= dodgeEnd + DODGE_MARGIN)
+			(dodgeCarpets || progress <= dodgeEnd + DODGE_MARGIN && overForTilt())
+
+	/** Whether you're over at the lane steered to, past it the way the heading tilts, or coming from that side. */
+	private fun SafeContext.overForTilt(): Boolean {
+		val across = across(getSnappedDir())
+		val target = (dodge ?: return true).dotProduct(across)
+		return (target - Vec3d(player.x - startPos.x, 0.0, player.z - startPos.z).dotProduct(across)) * dodgeLean <= LANE_REACHED
+	}
 
 	/** Back onto the line, still dodging until on it. */
 	private fun swingBack() {
