@@ -105,6 +105,7 @@ object ElytraFly : Module(
     @JvmStatic val fakeFly by setting("Fake Fly", false, "Rapidly swaps the chestplate and elytra to give the appearance the player is flying without an elytra. May also reduce durability loss")
     private val safetyWarning by setting("Safety Warning", true, "Warns on enable when AutoArmor, AutoDisconnect or AutoTotem is off")
     private val debugLog by setting("Debug Log", false, "Writes setbacks and why the obstacle passer walks to the game log, to find out why flying stops")
+    private val chooserLog by setting("Chooser Log", false, "Also logs which way past an obstacle the coming chooser would pick, costs a few ms a decision") { debugLog }
 
     private const val BOUNCE_TAB = "Bounce"
 //    private const val CONTROL_TAB = "Control"
@@ -337,6 +338,8 @@ object ElytraFly : Module(
 
     /** Whether [debug] writes anything, to skip work done only for the log. */
     val debugging get() = debugLog
+    /** Whether the chooser that only logs runs, see [ObstaclePassingMode]. */
+    val choosing get() = debugLog && chooserLog
 
     /** Writes [message] to the game log with [debugLog]. */
     fun debug(message: () -> String) {
