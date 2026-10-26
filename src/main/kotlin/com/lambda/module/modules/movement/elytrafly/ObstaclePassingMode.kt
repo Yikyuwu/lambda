@@ -1675,7 +1675,7 @@ abstract class ObstaclePassingMode(
 					// [touchLane]. Over to another for it, e.g. away from the top's side, it can't steer back in time.
 					if (touchSide.let { it != null && progress + distance > touchHoleStart && progress + distance < it.second }) return@let
 					val next = when {
-						distance < MIN_DODGE_DISTANCE -> null
+						distance < MIN_DODGE_DISTANCE -> null.also { laneMiss = "too close to steer over" }
 						// Over to another only with fewer of them on it.
 						carpetsOnly && !onLine -> if (!fewestCarpetsLane.allows(block)) null
 							else freeLane(here, linePoint, dir, distance, lane, past = CARPET_CLEAR, fewestCarpets = true)?.takeUnless { it.stays }
@@ -3622,9 +3622,14 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.onDodgeLane(linePoint: Vec3d, dir: Vec3d) =
 		(Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(across(dir)) - dodgeOffset) * dodgeLean >= 0
 
-	/** Whether the heading is tilted past what's dodged at [progress] along the line, from shortly before it on. */
+	/**
+	 * Whether the heading is tilted past what's dodged at [progress] along the line, from shortly before it until past it.
+	 * Tilted on after, it drifted off the lane a block over 115 ticks into what's beside it. Carpets may lie along the lane
+	 * for long, see [dodgeLeanYaw].
+	 */
 	private fun SafeContext.leaning(progress: Double) =
-		dodgeLean != 0 && progress >= dodgeEnd - player.velocity.horizontalLength() * LEAN_TICKS
+		dodgeLean != 0 && progress >= dodgeEnd - player.velocity.horizontalLength() * LEAN_TICKS &&
+			(dodgeCarpets || progress <= dodgeEnd + DODGE_MARGIN)
 
 	/** Back onto the line, still dodging until on it. */
 	private fun swingBack() {
