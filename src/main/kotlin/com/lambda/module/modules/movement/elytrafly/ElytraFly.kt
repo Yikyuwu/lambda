@@ -117,7 +117,7 @@ object ElytraFly : Module(
     private const val GRIM_ROCKET_BOOST_RESCALE = 1.65
     const val TRACE_TICKS = 10
     /** The gliding bit of the entity flags (data 0). */
-    private const val GLIDING_FLAG = 0x80
+    private const val GLIDING_FLAG = 1 shl Entity.GLIDING_FLAG_INDEX
     /** How far around to list the mobs when the server ends the glide in the air. */
     private const val GLIDE_END_RADIUS = 8.0
     /** This many setbacks within [SETBACK_WINDOW_MS] stop it, it's stuck. */
@@ -299,7 +299,7 @@ object ElytraFly : Module(
                     traceLine("  received data ${packet.trackedValues.joinToString { "${it.id}=${it.value}" }}")
                     // The glide ended by the server mid-flight, set back soon after. Whether mobs around have to do with it.
                     val flags = packet.trackedValues.firstOrNull { it.id == 0 }?.value as? Byte
-                    if (flags != null && flags.toInt() and GLIDING_FLAG == 0) runGameScheduled {
+                    if (flags != null && flags.toInt() and GLIDING_FLAG == 0 && player.getFlag(Entity.GLIDING_FLAG_INDEX)) runGameScheduled {
                         if (!player.isOnGround) debug {
                             val near = world.getOtherEntities(player, player.boundingBox.expand(GLIDE_END_RADIUS)).joinToString {
                                 "${EntityType.getId(it.type).path} %.1f away".format(it.distanceTo(player))
