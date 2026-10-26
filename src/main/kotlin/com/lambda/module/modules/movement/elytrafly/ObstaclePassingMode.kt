@@ -1744,6 +1744,9 @@ abstract class ObstaclePassingMode(
 							return true
 						}
 					}
+					// Up on a layer, something low enough in the hole after its end: glided over with the hole once off it on
+					// the lane, see [glideOverHole]. Up here only the hole's start is a hole, gliding over it isn't planned.
+					if (onLayer && !onLine && holeBefore(onLane, dir, progress, distance) && !tooHighToGlideOver(onLane, dir, distance)) return@let
 					// Still passing what's dodged, something farther on the lane is looked at once past it. Over to another
 					// lane now would cross the line right where what's dodged is.
 					if (!onLine && progress < dodgeEnd && progress + distance > dodgeEnd + DODGE_STEER_AHEAD) return@let
