@@ -156,6 +156,8 @@ abstract class ObstaclePassingMode(
 		private const val THREAD_RUN = 1.0
 		/** How often what's past the start of a layer is looked at while gliding up onto it, see [dodgePastOnLayer]. */
 		private const val LAYER_LOOK_TICKS = 5
+		/** How often something past a layer's start with no way past it yet is looked at again while far, see [dodgePastOnLayer]. */
+		private const val LAYER_RELOOK_TICKS = 10
 		/**
 		 * After landing from a brake, how long until you stand: the server ends the glide only once it sees you
 		 * down, about a ping, and till then you slide on at full speed. Then walking friction stops you in a few.
@@ -802,8 +804,12 @@ abstract class ObstaclePassingMode(
 	private var threadMiss = ""
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
 	private var noLaneAt: Double? = null
+	/** The lane dodged to when [noLaneAt] was found, null on the line. */
+	private var noLaneDodge: Vec3d? = null
 	/** Where along the line obstacles and holes with no way past yet are, and the [passTicks] each was looked at. */
 	private val noWayYet = HashMap<Long, Int>()
+	/** Like [noWayYet], what [dodgePastOnLayer] found no way past, apart so it doesn't hold back looking at anything else. */
+	private val noPastOnLayerYet = HashMap<Long, Int>()
 	/** Ticks obstacles were passed in, a clock for [lookedLately]. */
 	private var passTicks = 0
 	/** Where along the line an obstacle is that got too close to get over, which is dodged instead. */
@@ -976,6 +982,7 @@ abstract class ObstaclePassingMode(
 			sameGoals = 0
 			scanTicks = 0
 			noWayYet.clear()
+			noPastOnLayerYet.clear()
 			commitTouchSide(null)
 			diveTop = null
 			stepLanding = false
@@ -1141,7 +1148,8 @@ abstract class ObstaclePassingMode(
 		// Past the hole with the top to touch down on, its side isn't kept for anything ahead any more.
 		if (touchSide?.let { progress(player.pos) > it.second } == true) commitTouchSide(null)
 		// Past it, or on a lane or landing for it.
-		if (noLaneAt?.let { progress(player.pos) > it } == true || dodge != null || brakeAt != null || !player.isGliding) noLaneAt = null
+		// Not each tick on the lane it was found from, that'd log it again each tick, only once on another or off it.
+		if (noLaneAt?.let { progress(player.pos) > it } == true || dodge != noLaneDodge || brakeAt != null || !player.isGliding) noLaneAt = null
 		if (!BaritoneHandler.baritoneAvailable) {
 			logError("Obstacle passing requires baritone to be installed!")
 			ElytraFly.disable()
@@ -1601,10 +1609,15 @@ abstract class ObstaclePassingMode(
 		val up = Vec3d(0.0, over.stepHeight, 0.0)
 		val start = linePoint.add(dir.multiply(distance)).add(up)
 		val next = start.obstacleHit(dir, look) ?: return false
+		// No way past it found a moment ago and still far, looked at again every [RELOOK_TICKS] only, see [lookedLately].
+		val at = progress(start) + next.distance
+		noPastOnLayerYet.values.removeIf { passTicks - it >= LAYER_RELOOK_TICKS }
+		if (distance + next.distance > brakeDistance() + DODGE_STEER_AHEAD && (-1..1).any { at.roundToLong() + it in noPastOnLayerYet }) return false
 		if (!tooHighToGlideOver(start, dir, next.distance)) return false
 		// Steering over from where you are, at its height on the way there: the layer starts within reach of a glide.
 		val lane = freeLane(from.add(up), linePoint.add(up), dir, distance + next.distance, Vec3d.ZERO) ?: run {
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, no free lane past it from here ($laneMiss)".format(distance, next.distance) }
+			noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
 		// Up onto the layer on that lane too, the way up is planned again there, see [steerDodge].
@@ -1612,6 +1625,7 @@ abstract class ObstaclePassingMode(
 		val upAt = lanePoint.obstacleDistance(dir, distance + STEP_CLEAR)?.takeIf { isStepUp(lanePoint, dir, it) }
 		if (upAt == null || planHop(lanePoint, dir, upAt, true) == null) {
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, not up onto it on the lane past it ${lane.target.describe(dir)}".format(distance, next.distance) }
+			noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, dodging past it ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
@@ -2544,6 +2558,9 @@ abstract class ObstaclePassingMode(
 					// In a hole with a top to touch down on, glided over: the lane through it is the hole's to pick, see
 					// [touchLane]. Over to another for it, e.g. away from the top's side, it can't steer back in time.
 					if (touchSide.let { it != null && progress + distance > touchHoleStart && progress + distance < it.second }) return@let
+					// No other lane and nothing to glide over a moment ago, still far: keeping to the lane like then, looked at
+					// again every [RELOOK_TICKS] only, like [startDodge] does, each lane is simulated each time.
+					if (!carpetsOnly && !onLine && lookedLately(progress + distance, distance)) return@let
 					val next = when {
 						distance < MIN_DODGE_DISTANCE -> null.also { laneMiss = "too close to steer over" }
 						// Over to another only with fewer of them on it.
@@ -4676,6 +4693,7 @@ abstract class ObstaclePassingMode(
 	private fun noLaneYet(at: Double, reason: String): Boolean {
 		if (noLaneAt?.let { abs(it - at) < 1.5 } != true) ElytraFly.debug { reason }
 		noLaneAt = at
+		noLaneDodge = dodge
 		noWayYet.values.removeIf { passTicks - it >= RELOOK_TICKS }
 		noWayYet[at.roundToLong()] = passTicks
 		return false
