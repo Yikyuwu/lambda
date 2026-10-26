@@ -82,6 +82,8 @@ class BounceElytraFly(
 		private const val MIN_TAKEOFF_HEIGHT = 0.75
 		/** How far below the box a floor counts as stood on. */
 		private const val FLOOR_CHECK = 0.01
+		/** How far past the next move down a floor counts as landed on, like the hold near the floor bounced on. */
+		private const val LANDING_CHECK = 0.163
 
 		/** Level, so you keep bouncing but don't speed up. */
 		private const val COAST_PITCH = 0.0
@@ -175,7 +177,19 @@ class BounceElytraFly(
 				// Only bouncing. Held back after a setback or while landing, the server sees you stand still, sets you back
 				// again and again. Nor falling off a block you bounced on. Also the tick before touching down, the server
 				// often ended the glide when the landing came on its own.
-				!flightPaused && bounceFloor.let { floor -> player.y >= floor && player.y + min(player.velocity.y, 0.0) - floor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163 }
+				!flightPaused && (bounceFloor.let { floor -> player.y >= floor && player.y + min(player.velocity.y, 0.0) - floor < if (passerConfig.passObstacles) passerConfig.minObstacleHeight + 0.1 else 0.163 } ||
+					landingNext())
+
+	/**
+	 * Whether the next move comes down on a floor, wherever: the flight line may not be at it yet, e.g. gliding down into
+	 * a dip or off a layer onto the floor or a top it wasn't planned for. Its landing goes out held back with the jump too.
+	 * Not braking to land, the server would see you stand still held back.
+	 */
+	private fun SafeContext.landingNext(): Boolean {
+		if (isBraking || waitingForChunks || player.velocity.y > 0) return false
+		val move = player.boundingBox.offset(player.velocity.x, 0.0, player.velocity.z)
+		return world.isSpaceEmpty(player, move) && !world.isSpaceEmpty(player, move.offset(0.0, player.velocity.y - LANDING_CHECK, 0.0))
+	}
 
 	/**
 	 * The floor you bounce on. The flight line moves up onto a layer before you first touch it, the floor you last
@@ -217,11 +231,12 @@ class BounceElytraFly(
 					// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
 					// Also right before chunks that aren't loaded yet, gliding on would carry you into them.
 					isBraking || waitingForChunks -> 90.0
+					// Level for the jump off the floor. The server ended the glide there and moves the jump like one on
+					// foot, looking down the glide would take the first 0.42 up as only 0.33 and get set back. Also
+					// holding the height for something from this bounce on, the hold takes over once in the air.
+					player.isOnGround -> COAST_PITCH
 					// Holding the height over an obstacle instead of bouncing into it.
 					hold != null -> hold
-					// Level for the jump off the floor. The server ended the glide there and moves the jump like one on
-					// foot, looking down the glide would take the first 0.42 up as only 0.33 and get set back.
-					player.isOnGround -> COAST_PITCH
 					// Straight down the glide moves like a jump on foot, which the server does until it takes the start.
 					// Slowing down or coasting, the whole way up: easing up into the brake while still rising, on 2b2t the
 					// server set it back at the top of the bounce again and again, 120 times in a few hours.
@@ -309,7 +324,10 @@ class BounceElytraFly(
 			if (minimizePackets && player.getFlag(Entity.GLIDING_FLAG_INDEX) && !fakeFly && !yMotion) return@listen
 			if (player.isOnGround) return@listen
 
-			flyOrFakeFly()
+			// Started again in the air, the server ended the glide on a bounce: jumping with it like vanilla does only on the
+			// tick it starts again, Grim sets back a start without the jump right after it and one with it held (ElytraB).
+			val restarting = !player.getFlag(Entity.GLIDING_FLAG_INDEX)
+			if (flyOrFakeFly() && restarting) wantJump = true
 		}
 
 		listen<TickEvent.Post>({ -100 }) {
