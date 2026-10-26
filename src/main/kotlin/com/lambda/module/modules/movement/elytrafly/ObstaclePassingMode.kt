@@ -222,8 +222,17 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_SINK = 0.6
 		/** How high above the top to touch down on it skims, diving, until the box is over it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM = 0.05
+		/**
+		 * How many ticks in a row down gliding without moving is stuck, walking on: taken off standing still the first
+		 * touch down has no speed yet, its bounce pushes you on. Walked again there, it took off and stopped over and over.
+		 */
+		private const val STILL_TICKS = 3
 		/** How much faster after it gliding over a top has to be than touching down on it to glide instead, see [glidingFaster]. */
 		private const val TOUCH_MIN_GAIN = 0.02
+		/** How much higher than needed gliding over has to get over to be done instead of touching down, see [glidingFaster]. */
+		private const val PLAIN_GLIDE_MARGIN = 0.2
+		/** How many bounces of a layer before its end with a hole after it it's landed on as late as before, see [stepLanding]. */
+		private const val STEP_LANDING_BOUNCES = 2
 		/** How far before the end of a hole with a layer right after it the feet are above that layer already, see [holeHop]. */
 		private const val LAYER_AFTER_HOLE = 1.5
 		/** How many ticks of a dip a block deep there has to be at least to bounce on down there, about a bounce, see [dipLane]. */
@@ -996,7 +1005,7 @@ abstract class ObstaclePassingMode(
 				// Onto a layer from below, up there as soon as all of the box is over it: down onto it from its start, not its
 				// middle, and well onto it, not on its edge.
 				progress > hop.end || hop.step && !onLayer && progress > hop.obstacle &&
-					topOverlap(playerPos, baseY + hop.stepHeight) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 -> {
+					topOverlap(playerPos, baseY + hop.stepHeight) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 && !holeSoonAfterLayer(closestLinePoint, snappedDir) -> {
 					// Above the layer now, from the line down on the floor it'd be in the way right where you are.
 					when {
 						hop.step -> {
@@ -1081,7 +1090,9 @@ abstract class ObstaclePassingMode(
 		if (!player.isOnGround) return false
 
 		val notProgressing = Speedometer.calculateSpeed(true, SpeedUnit.BlocksPerSecond) < 0.01
-		if (player.isGliding && notProgressing) {
+		// Not on the first touch down after taking off standing still: that tick's bounce pushes you on, see [STILL_TICKS].
+		stillTicks = if (player.isGliding && notProgressing) stillTicks + 1 else 0
+		if (stillTicks >= STILL_TICKS) {
 			ElytraFly.debug { "Not moving while gliding" }
 			return pathToValidPoint(closestLinePoint, snappedDir)
 		}
@@ -2196,7 +2207,8 @@ abstract class ObstaclePassingMode(
 		val short = hopShort
 		// Alike, both held from now: the one [canGetOver] found may be held a bounce later.
 		val touchExit = if (canHop(touching, progress, 0)) hopExitSpeed else null
-		val plainExit = if (canGetOver(hop, progress) && canHop(hop, progress, 0)) hopExitSpeed else null
+		// Not only just: a near miss of a simulation over a long hole is a fall into it, see [PLAIN_GLIDE_MARGIN].
+		val plainExit = if (canGetOver(hop, progress) && canHop(hop, progress, 0, margin = PLAIN_GLIDE_MARGIN)) hopExitSpeed else null
 		hopExitSpeed = exit
 		hopMiss = miss
 		hopShort = short
@@ -2663,8 +2675,26 @@ abstract class ObstaclePassingMode(
 		startPos = Vec3d(startPos.x, baseY - STEP_HEIGHT, startPos.z)
 	}
 
+	/** Ticks in a row down on the ground gliding without moving, see [STILL_TICKS]. */
+	private var stillTicks = 0
+
 	/** Where along the line the dip planned to bounce on lies, see [dipLane]. */
 	private var dipAt: ClosedFloatingPointRange<Double>? = null
+
+	/**
+	 * Whether the layer climbed up onto ends within [STEP_LANDING_BOUNCES] bounces ahead of [linePoint] with a hole
+	 * right after it: landing on it early there shifts the bounces so the last one off its edge may come too low for the
+	 * hole, landed on as late as before, see [stepLanding].
+	 */
+	private fun SafeContext.holeSoonAfterLayer(linePoint: Vec3d, dir: Vec3d): Boolean {
+		val up = linePoint.add(0.0, baseY + STEP_HEIGHT - linePoint.y, 0.0)
+		val reach = player.velocity.horizontalLength() * DIP_BOUNCE_TICKS * STEP_LANDING_BOUNCES
+		val edge = generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it <= reach }
+			.firstOrNull { !up.add(dir.multiply(it)).boxHasFloor() } ?: return false
+		val floor = linePoint.add(0.0, baseY - linePoint.y, 0.0)
+		return generateSequence(edge) { it + HOP_SCAN_STEP }.takeWhile { it <= edge + HOLE_TOUCHDOWN_MARGIN + 1 }
+			.any { !floor.add(dir.multiply(it)).boxHasFloor() }
+	}
 
 	/** Bouncing in a dip a block below the floor you started on, see [dipLane]. */
 	protected val inDip get() = startPos.y < baseY - 0.01
