@@ -252,6 +252,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_LANE_OFF = 0.15
 		/** How much later steering in toward the lane over a top in a hole is tried next, see [touchLane]. */
 		private const val TOUCH_SWITCH_STEP = 0.5
+		/** How long until a hole after a layer not gotten over yet from far is looked at again, see [layerHole]. */
+		private const val LAYER_HOLE_AGAIN_TICKS = 5
 		/**
 		 * How long before what's beside the lane through a hole it's tilted past, see [touchLane]. Long enough for the
 		 * flight to take on [MIN_LEAN_DEGREES], short so it doesn't drift off the lane, it can't steer in meanwhile.
@@ -599,6 +601,8 @@ abstract class ObstaclePassingMode(
 	private var skipHopAt: Double? = null
 	/** Where along the line the layer you bounce on ends with no gliding across to more of it, not to look again. */
 	private var noGapAt: Double? = null
+	/** When to look again at a hole after the end of a layer not gotten over yet from far, see [layerHole]. */
+	private var layerHoleAgain: Int? = null
 
 	/**
 	 * Steering past a blocked spot, flying level meanwhile so it doesn't speed into it. Not once over on the lane, it
@@ -741,6 +745,7 @@ abstract class ObstaclePassingMode(
 			skipAt = null
 			skipHopAt = null
 			noGapAt = null
+			layerHoleAgain = null
 			noLaneAt = null
 			landedTicks = 0
 			lastGoal = null
@@ -1921,10 +1926,10 @@ abstract class ObstaclePassingMode(
 	 * happened to be, e.g. taking off off the middle of the way, no lane past what's in it may be left. Whether it's
 	 * handled, null when it's not got over that way, as before.
 	 */
-	private fun SafeContext.layerHole(linePoint: Vec3d, dir: Vec3d, edge: Double): Boolean? {
-		val hole = holeAfterEdge(linePoint, dir, edge) ?: return null.also {
-			ElytraFly.debug { "The blocks end %.1f ahead, no hole right after it".format(edge) }
-		}
+	private fun SafeContext.layerHole(line: Vec3d, linePoint: Vec3d, dir: Vec3d, edge: Double): Boolean? {
+		// On a lane beside the line, e.g. dodging, the hole may start a bit later there than on the line.
+		val (holeLine, hole) = listOf(linePoint, line).distinct().firstNotNullOfOrNull { point -> holeAfterEdge(point, dir, edge)?.let { point to it } }
+			?: return null.also { ElytraFly.debug { "The blocks end %.1f ahead, no hole right after it".format(edge) } }
 		// The side of the top it's not over to yet only kept dodging over to it, see [touchSide].
 		val side = touchSide
 		val holeStart = touchHoleStart
@@ -1932,10 +1937,19 @@ abstract class ObstaclePassingMode(
 			touchSide = side
 			touchHoleStart = holeStart
 		}
-		val over = holeHop(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir, hole).first
-		if (!canGetOver(over, progress(linePoint))) return null.also {
-			ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, not gotten over from bouncing on ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"})".format(edge, hole.endInclusive - hole.start) }
+		val over = holeHop(holeLine.add(0.0, baseY - holeLine.y, 0.0), dir, hole).first
+		if (!canGetOver(over, progress(linePoint))) {
+			val why = "$hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"}"
 			keep()
+			// Far still, a few bounces on faster it may: looked at again, not gliding off it meanwhile.
+			// Not past the distance to brake for it by the time it's looked at again.
+			if (edge - player.velocity.horizontalLength() * LAYER_HOLE_AGAIN_TICKS > brakeDistance() + DODGE_STEER_AHEAD) {
+				ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, not gotten over from bouncing on yet ($why), looking again".format(edge, hole.endInclusive - hole.start) }
+				layerHoleAgain = player.age + LAYER_HOLE_AGAIN_TICKS
+				return false
+			}
+			ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, not gotten over from bouncing on ($why)".format(edge, hole.endInclusive - hole.start) }
+			return null
 		}
 		val across = across(dir)
 		val lane = over.lane.dotProduct(across)
@@ -2337,6 +2351,11 @@ abstract class ObstaclePassingMode(
 			return false
 		}
 		val at = progress(linePoint) + edge
+		// A hole after it not gotten over yet from far, looked at again a few ticks on, see [layerHole].
+		if (layerHoleAgain.let { it != null && player.age >= it }) {
+			layerHoleAgain = null
+			noGapAt = null
+		}
 		if (noGapAt.near(at) || skipHopAt.near(at)) return false
 		noGapAt = at
 		// Deeper than the floor you started on, that's for walking around.
@@ -2345,7 +2364,7 @@ abstract class ObstaclePassingMode(
 		val resume = if (deeper) null else along.firstOrNull { (distance, point) -> distance > edge && distance <= edge + MAX_GAP && point.boxHasFloor() }?.first
 		// No more of it after, a hole right after it down on the floor that's gotten over from bouncing on: planned from up
 		// here, see [layerHole].
-		if (!onCarpets && resume == null) layerHole(linePoint, dir, edge)?.let { return it }
+		if (!onCarpets && resume == null) layerHole(line, linePoint, dir, edge)?.let { return it }
 		if (deeper) return false
 		// Carpets, even a short gap is glided across: down in it you're stopped at the edge of the next one.
 		if (resume != null && resume - edge < MIN_GAP && !onCarpets) return false
@@ -2534,9 +2553,47 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.canGetOver(hop: Hop, progress: Double) = when {
 		hop.held -> canHop(hop, progress)
-		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0)
+		// Up on a layer before a hole, held from one of the last bounces before it like the flight does, see [holdingFor]:
+		// from up here now it glides too long, not held at all it comes down in it.
+		hop.low -> canHop(hop, progress, NO_HOLD) || canHop(hop, progress, 0) ||
+			hop.hole && onLayer && risesBefore(hop, progress).any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, margin = NEXT_BOUNCE_HEIGHT_MARGIN) }
 		// The one from close by last, its miss is the one told and gone by, see [hopShort].
 		else -> !hop.hole && !hop.under && fromNextBounce(hop, progress) || canHop(hop, progress)
+	}
+
+	/**
+	 * In how many ticks the last bounces before [hop] rise, bouncing on from here at [progress], the last first: only the
+	 * last, from the one before it too with blocks in it to get up over like [holdingFor] holds. Like [canHop] bounces,
+	 * no floor ends it.
+	 */
+	private fun SafeContext.risesBefore(hop: Hop, progress: Double): List<Int> {
+		val dir = getSnappedDir()
+		val gravity = player.finalGravity
+		val bounce = bouncePitch()
+		var y = player.y
+		var climb = player.velocity.y
+		var speed = player.velocity.horizontalLength()
+		var along = progress
+		val rises = mutableListOf<Int>()
+		for (tick in 0 until CAN_HOP_SIM_TICKS) {
+			if (along >= hop.start) break
+			if (y <= startPos.y && climb <= 0) {
+				val floor = floorAt(dir, along, hop.lane) ?: break
+				if (y <= floor) {
+					y = floor
+					climb = JUMP_VELOCITY
+					speed += BOUNCE_SPEED_GAIN
+					rises += tick
+				}
+			}
+			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
+				climb = c
+				speed = s
+			}
+			y += climb
+			along += speed
+		}
+		return rises.asReversed().take(if (hop.raised.isNotEmpty()) 2 else 1)
 	}
 
 	/**
@@ -2573,12 +2630,14 @@ abstract class ObstaclePassingMode(
 			// Only off floor that's there, e.g. not in a hole on the way.
 			else if (y <= startPos.y && climb <= 0) {
 				val floor = floorAt(dir, along, hop.lane) ?: run {
+					// Over a hole after a layer bounced on up there, gliding on above the floor down below it.
+					if (hop.hole && onLayer && y > baseY + passerConfig.minObstacleHeight) return@run null
 					hopMiss = "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead with no floor to bounce off"
 						.format(player.y, player.velocity.y, player.velocity.horizontalLength(), along - progress)
 					hopShort = Double.POSITIVE_INFINITY
 					return false
 				}
-				if (y <= floor) {
+				if (floor != null && y <= floor) {
 					y = floor
 					climb = JUMP_VELOCITY
 					speed += BOUNCE_SPEED_GAIN
