@@ -144,10 +144,19 @@ abstract class ObstaclePassingMode(
 		/** How much faster than you are it's looked for, the bounces before it speed you up. */
 		private const val THREAD_SPEED_ABOVE = 0.4
 		/**
-		 * How much slower than the fastest that fits it's held to arrive: the simulated glide loses a tenth more speed
-		 * than the game's, about 0.03 slower over a long hold.
+		 * How much slower than the fastest that fits it's held to arrive. The glide through one is simulated like the
+		 * game's, see [glide], the speed logged going through is a tick before it, about 0.01 faster.
 		 */
 		private const val THREAD_SPEED_MARGIN = 0.05
+		/** How far above and below the height held it flaps to shed speed for an opening, see [flapPitch]. */
+		private const val SHED_BAND = 0.2
+		/**
+		 * How many ticks before the opening's held over it stops flapping at the latest, the last ones are steered onto the
+		 * spot it gets through with the speed it has then, see [threadYaw].
+		 */
+		private const val SHED_CLEAR_TICKS = 10
+		/** Rising off the floor less than this high, it's held plainly instead of flapping, see [shedPitch]. */
+		private const val SHED_RISE = 0.75
 		/** How far before an opening it has to land at least to take off again and come in slower, see [restartFor]. */
 		private const val RESTART_ROOM = 15.0
 		/** How long the glide over a hole [planSpeed] looks at is kept for it, the speed needed hardly changes meanwhile. */
@@ -598,6 +607,8 @@ abstract class ObstaclePassingMode(
 	) {
 		/** Whether how it went through was logged. */
 		var logged = false
+		/** Held for it too fast, flapping until holding the height gets there slow enough, see [shedPitch]. */
+		var shedding = false
 		/** Where across it goes through at each speed, by [THREAD_SPEED_STEP]s, null where none is wide enough. */
 		val centres = HashMap<Int, Double?>()
 	}
@@ -1027,6 +1038,16 @@ abstract class ObstaclePassingMode(
 		val held = this@ObstaclePassingMode.hop ?: hop
 		if (held.hole && (player.y >= held.targetY - TOPPED_MARGIN || held.rose && climb <= 0)) held.topped = true
 		if (climb > 0) held.rose = true
+		// Too fast for the opening holding the height: flapping until that gets there slow enough, see [shedPitch].
+		thread?.takeIf { it.shedding && it.hopStart == held.start && !player.isOnGround }?.let { through ->
+			shedPitch(held, through.maxSpeed, along)?.let { return@timed it }
+			through.shedding = false
+			ElytraFly.debug {
+				val made = canHop(held, along, 0, gain = 0.0, turn = true)
+				"Done flapping %.1f before the opening at %.2f, holding the height %s".format(through.wallAt - along, player.velocity.horizontalLength(),
+					if (made) "gets there at %.2f, it fits up to %.2f".format(hopWallSpeed, through.maxSpeed) else "doesn't get up there")
+			}
+		}
 		val speed = player.velocity.horizontalLength()
 		holdPitch(player.y, climb, speed, held.holdY(player.y, along, dive = dive, overTop = overTop), player.finalGravity, held.sinkAt(dive && overTop))
 	}
@@ -4008,11 +4029,15 @@ abstract class ObstaclePassingMode(
 			.firstOrNull { (fitting(it)?.width ?: 0.0) >= THREAD_MIN_WIDTH }
 			?: return null.also { threadMiss = "no spot across gets through at every tick down to %.2f a tick".format(THREAD_MIN_SPEED) }
 		val maxSpeed = if (fastest > top - 1e-6) Double.POSITIVE_INFINITY else fastest - THREAD_SPEED_MARGIN
-		// Too fast for it even holding the height from now on, the hardest it slows down: only with room to land before it
-		// and take off again slower, see [threadHold].
-		if (maxSpeed.isFinite() && canHop(over.with(lane = across(dir).multiply(offset)), progress(player.pos), 0) && hopWallSpeed > maxSpeed &&
-			over.obstacle - progress(player.pos) <= landingDistance() + RESTART_ROOM)
-			return null.also { threadMiss = "it'd get there at %.2f a tick holding the height from now on, it fits up to %.2f, no room to land and take off again before it".format(hopWallSpeed, maxSpeed) }
+		// Too fast for it even holding the height from now on and flapping, the hardest it slows down: only with room to
+		// land before it and take off again slower, see [threadHold].
+		val through = over.with(lane = across(dir).multiply(offset))
+		val now = progress(player.pos)
+		if (maxSpeed.isFinite() && canHop(through, now, 0, turn = true) && hopWallSpeed > maxSpeed && over.obstacle - now <= landingDistance() + RESTART_ROOM) {
+			val held = hopWallSpeed
+			if (!shedRun(through, maxSpeed, now))
+				return null.also { threadMiss = "it'd get there at %.2f a tick holding the height from now on, too fast flapping too, it fits up to %.2f, no room to land and take off again before it".format(held, maxSpeed) }
+		}
 		// Planned at about the speed it gets there at, the spot is looked for again at the speed it has, see [centreAt].
 		val plan = (if (maxSpeed.isFinite()) fitting(fastest) else fitting(speed)?.takeIf { it.width >= THREAD_MIN_WIDTH } ?: fitting(fastest))
 			?: return null.also { threadMiss = "no spot across gets through" }
@@ -5214,14 +5239,14 @@ abstract class ObstaclePassingMode(
 	/**
 	 * Whether holding the height with [holdPitch] gets you over [hop] from [progress] on, bouncing off the floor
 	 * on the way if need be. From [holdFrom] ticks on, by default once close enough like [holdingFor]. Simulates the glide
-	 * tick by tick, at [from] a tick for now.
+	 * tick by tick, at [from] a tick for now, with vanilla's [turn] of the velocity through an opening, see [glide].
 	 */
 	private fun SafeContext.canHop(
 		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = simSpeed(), margin: Double = 0.0,
-		gain: Double = bounceGain(),
+		gain: Double = bounceGain(), turn: Boolean = threaded(hop),
 	): Boolean {
-		val memo = hopRunMemo ?: return simulateHop(hop, progress, holdFrom, from, margin, gain)
-		val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, hop.held, hop.topped, hop.rose, hop.touchedAt, chainStart)
+		val memo = hopRunMemo ?: return simulateHop(hop, progress, holdFrom, from, margin, gain, turn)
+		val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, turn, hop.held, hop.topped, hop.rose, hop.touchedAt, chainStart)
 		memo[key]?.let { run ->
 			hopMiss = run.miss
 			hopShort = run.short
@@ -5234,7 +5259,7 @@ abstract class ObstaclePassingMode(
 			hopTouched = run.touched
 			return run.made
 		}
-		return simulateHop(hop, progress, holdFrom, from, margin, gain).also {
+		return simulateHop(hop, progress, holdFrom, from, margin, gain, turn).also {
 			memo[key] = HopRun(it, hopMiss, hopShort, hopExitSpeed, hopExitAt, hopExitY, hopExitClimb, hopTicks, hopWallSpeed, hopTouched)
 		}
 	}
@@ -5247,7 +5272,7 @@ abstract class ObstaclePassingMode(
 
 	/** A glide simulated by [canHop]: the [hop] itself, not one alike, from where with what, and how far it's flown already. */
 	private data class HopRunKey(
-		val hop: Hop, val progress: Double, val holdFrom: Int?, val from: Double, val margin: Double, val gain: Double,
+		val hop: Hop, val progress: Double, val holdFrom: Int?, val from: Double, val margin: Double, val gain: Double, val turn: Boolean,
 		val held: Boolean, val topped: Boolean, val rose: Boolean, val touchedAt: Int, val start: ChainStart?,
 	)
 
@@ -5293,8 +5318,11 @@ abstract class ObstaclePassingMode(
 		}
 	}
 
+	/** Whether [hop] is the one through an opening that only fits slower, see [Thread]. */
+	private fun threaded(hop: Hop) = thread?.let { it.hopStart == hop.start && it.maxSpeed.isFinite() } == true
+
 	/** [canHop] simulated. */
-	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double): Boolean {
+	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double, turn: Boolean): Boolean {
 		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		var topped = hop.topped
@@ -5359,7 +5387,7 @@ abstract class ObstaclePassingMode(
 			val dive = hop.diving(along, speed, touched)
 			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, topped, touched, dive, overTop), gravity,
 				hop.sinkAt(dive && overTop)) else if (jumped) JUMP_PITCH else bounce(y, climb)
-			glide(climb, speed, pitch, gravity).let { (c, s) ->
+			glide(climb, speed, pitch, gravity, turn).let { (c, s) ->
 				climb = c
 				speed = s
 			}
@@ -5714,9 +5742,9 @@ abstract class ObstaclePassingMode(
 	 * later bounce then still makes it, else held from now, also coming down: bouncing on to the floor then only gets
 	 * there too fast. Holding is the hardest it slows down, bouncing without the sprint, looking straight down or up
 	 * like slowing for chunks, slows only 0.004 to 0.010 a block. Too fast even so, e.g. sped up a lot after it was
-	 * planned, it lands before it while there's room, and takes off again to come in slower when there's room for
-	 * that after landing, also when holding only just fits, the simulated glide is a bit off over a long hold: in the
-	 * simulator from 0.8 to 1.8 a tick with the opening first seen 57 to 64 ahead always through.
+	 * planned, it flaps on the way to shed the rest, see [shedRun]. Too fast flapping too, it lands before it while
+	 * there's room, and takes off again to come in slower when there's room for that after landing: in the simulator
+	 * from 0.8 to 1.8 a tick with the opening first seen 57 to 64 ahead always through.
 	 */
 	private fun SafeContext.threadHold(hop: Hop, progress: Double): Boolean? {
 		val thread = thread?.takeIf { it.hopStart == hop.start && it.maxSpeed.isFinite() } ?: return null
@@ -5746,18 +5774,86 @@ abstract class ObstaclePassingMode(
 		}
 		val wall = thread.wallAt - progress
 		val restart = wall > landingDistance() + RESTART_ROOM
-		if (wall > landingDistance() && (wallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN || restart && wallSpeed > thread.maxSpeed)) {
+		// Too fast holding the height: flapping on the way sheds the rest, see [shedRun]. Gliding through beats landing.
+		val shed = wallSpeed > thread.maxSpeed && shedRun(hop, thread.maxSpeed, progress)
+		val shedSpeed = hopWallSpeed
+		if (!shed && wall > landingDistance() && (wallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN || restart && wallSpeed > thread.maxSpeed)) {
 			// Room to take off again before it: landing only to come in slower, lined up with it on the bounces up to
 			// speed again, not walking. Else walking on as before.
-			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, it fits up to %.2f, landing to %s".format(
+			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, flapping too fast too, it fits up to %.2f, landing to %s".format(
 				wall, wallSpeed, thread.maxSpeed, if (restart) "take off again slower" else "walk around it"))
 			if (restart) restartFor = thread.wallAt
 			return false
 		}
-		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f${if (falling) " coming down" else ""}, to get there at %.2f, it fits up to %.2f".format(
+		// Not flapping it all off, held anyway close by: as much as flapping still gets it up there.
+		thread.shedding = wallSpeed > thread.maxSpeed
+		val flapping = if (shed) ", flapping to get there at %.2f".format(shedSpeed) else if (thread.shedding) ", flapping what it can" else ""
+		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f${if (falling) " coming down" else ""}, to get there at %.2f$flapping, it fits up to %.2f".format(
 			wall, player.velocity.horizontalLength(), wallSpeed, thread.maxSpeed) }
 		slowJumpsFor = thread.hopStart
 		return true
+	}
+
+	/**
+	 * Whether flapping, see [flapPitch], from where the glides are simulated from at [progress], gets you through the
+	 * opening [hop] glides through no faster than [maxSpeed]: flapping as long as holding the height gets there faster,
+	 * like the flight does, see [shedPitch]. The speed it gets there at in [hopWallSpeed]. In the simulator, bouncing at
+	 * 0.8 to 1.8 a tick with the opening first seen 40 to 64 ahead, 97 instead of 90 in 100 glide through, the rest still
+	 * land to come in slower, from 1.6 a tick up seen at most 52 ahead.
+	 */
+	private fun SafeContext.shedRun(hop: Hop, maxSpeed: Double, progress: Double): Boolean {
+		val gravity = player.finalGravity
+		var y = simY()
+		var climb = simClimb()
+		var speed = simSpeed()
+		var along = progress
+		repeat(CAN_HOP_SIM_TICKS) {
+			val pitch = fromChainStart(ChainStart(y, climb, speed)) { shedPitch(hop, maxSpeed, along) }
+				?: return fromChainStart(ChainStart(y, climb, speed)) { canHop(hop, along, 0, gain = 0.0, turn = true) && hopWallSpeed <= maxSpeed }
+			glide(climb, speed, pitch, gravity, turn = true).let { (c, s) ->
+				climb = c
+				speed = s
+			}
+			y += climb
+			along += speed
+		}
+		return false
+	}
+
+	/**
+	 * The pitch flapping this tick to shed speed for the opening [hop] glides through, from where the glides are simulated
+	 * from at [along]: while holding the height from here gets there faster than [maxSpeed], and from after this tick's
+	 * flap it still gets up there. Not within [SHED_CLEAR_TICKS] of where it's held over, nor where there's no room for
+	 * the band flapped in. Null when not flapping.
+	 */
+	private fun SafeContext.shedPitch(hop: Hop, maxSpeed: Double, along: Double): Double? {
+		if (!canHop(hop, along, 0, gain = 0.0, turn = true) || hopWallSpeed <= maxSpeed) return null
+		val y = simY()
+		val climb = simClimb()
+		val speed = simSpeed()
+		val low = hop.targetY - SHED_BAND
+		val high = hop.targetY + SHED_BAND
+		// Rising off the floor only just, the server may not glide yet and moves you like a jump: held plainly there.
+		val pitch = if (climb > 0 && y - startPos.y < SHED_RISE) holdPitch(y, climb, speed, hop.targetY, player.finalGravity)
+			else flapPitch(y, climb, speed, low, high, player.finalGravity)
+		val (nextClimb, nextSpeed) = glide(climb, speed, pitch, player.finalGravity, turn = true)
+		if (along + nextSpeed * (1 + SHED_CLEAR_TICKS) >= hop.start) return null
+		val at = startPos.add(getSnappedDir().multiply(along + nextSpeed)).add(hop.lane)
+		val half = GLIDE_SIZE / 2
+		if (!spaceEmpty(Box(at.x - half, min(low, y + nextClimb), at.z - half, at.x + half, max(high, y + nextClimb) + GLIDE_SIZE, at.z + half), hazards = false)) return null
+		return pitch.takeIf { fromChainStart(ChainStart(y + nextClimb, nextClimb, nextSpeed)) { canHop(hop, along + nextSpeed, 0, gain = 0.0, turn = true) } }
+	}
+
+	/**
+	 * Flapping between [low] and [high] from [y] climbing at [climb] at [speed], the hardest the glide sheds speed with
+	 * the height kept: looking up as far as holding does turns speed into climbing, looking straight down the wings don't
+	 * lift, the climb isn't turned back into speed. Up while the top of the climb up gives stays below [high], or the
+	 * top of the one down, the next height falling, is below [low], else down. Below the band, e.g. still rising from
+	 * the bounce, it's up there by the climb it has.
+	 */
+	private fun flapPitch(y: Double, climb: Double, speed: Double, low: Double, high: Double, gravity: Double): Double {
+		fun top(pitch: Double) = glide(climb, speed, pitch, gravity, turn = true).first.let { y + it + max(it, 0.0) * max(it, 0.0) / (2 * gravity) }
+		return if (top(-MAX_HOP_PITCH_UP.toDouble()) <= high || top(90.0) < low) -MAX_HOP_PITCH_UP.toDouble() else 90.0
 	}
 
 	/**
@@ -5956,8 +6052,14 @@ abstract class ObstaclePassingMode(
 		return y * 0.98
 	}
 
-	/** Vanilla's elytra glide, the climb and speed after a tick at [pitch] facing where you fly. */
-	private fun glide(climb: Double, speed: Double, pitch: Double, gravity: Double): Pair<Double, Double> {
+	/**
+	 * Vanilla's elytra glide, the climb and speed after a tick at [pitch] facing where you fly. Vanilla then turns the
+	 * velocity a tenth of the way back to the look at the speed it had, flying where you look that takes a tenth off
+	 * each change of speed, with [turn] that too: without it a hold of 60 blocks got there 0.03 slower than flown
+	 * (0.79 instead of 0.82). Only for openings, see [Thread], so far: the margins of the glides over holes were found
+	 * without it, with it some that only just make it go for it and miss.
+	 */
+	private fun glide(climb: Double, speed: Double, pitch: Double, gravity: Double, turn: Boolean = false): Pair<Double, Double> {
 		val rad = Math.toRadians(pitch)
 		val cosSq = cos(rad) * cos(rad)
 		var y = climb + gravity * (-1 + cosSq * 0.75)
@@ -5972,6 +6074,7 @@ abstract class ObstaclePassingMode(
 			y += lift * 3.2
 			horizontal -= lift
 		}
+		if (turn) horizontal += (speed - horizontal) * 0.1
 		return y * 0.98 to horizontal * 0.99
 	}
 
