@@ -58,6 +58,7 @@ import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
 import net.minecraft.util.math.Box
 import net.minecraft.util.hit.BlockHitResult
+import net.minecraft.util.math.ChunkSectionPos
 import net.minecraft.util.math.Vec3d
 import net.minecraft.util.shape.VoxelShape
 import net.minecraft.util.shape.VoxelShapes
@@ -98,6 +99,8 @@ abstract class ObstaclePassingMode(
 		private const val PASS_COOLDOWN_TICKS = 100
 		/** Ahead of RotationLock, which would otherwise keep the yaw on the line. */
 		private const val DODGE_PRIORITY = 101
+		/** Ahead of everything else, the clock and a new world are seen first, see [flightTicks]. */
+		private const val CLOCK_PRIORITY = 1000
 		/** How far ahead on the lane to steer at, shorter turns sharper. A sharp turn at speed gets set back. */
 		private const val DODGE_STEER_AHEAD = 12.0
 		/** Close enough to the line to fly straight on again. */
@@ -631,6 +634,14 @@ abstract class ObstaclePassingMode(
 	/** The floor you started on. The line goes up onto a layer of blocks [STEP_HEIGHT] high on it, or of carpets, and back down. */
 	private var baseY = 0.0
 	var passingToPos: Vec3d? = null
+	/**
+	 * Ticks flown, once each tick, the clock for what's kept for a few ticks. Not the player's age, that starts over on
+	 * respawn while the module stays on, and what's kept until a later age would never be let go of.
+	 */
+	protected var flightTicks = 0
+	/** Which player and world the plan is for, by identity only, see [newWorld]. Holding on to them would keep a world left behind in memory. */
+	private var planPlayer = 0
+	private var planWorld = 0
 	private var failedPasses = 0
 	private var passCooldown = 0
 
@@ -820,8 +831,8 @@ abstract class ObstaclePassingMode(
 		hop.touch?.let { touch ->
 			if (player.isOnGround && abs(player.y - touch.y) < 0.01) {
 				if (!hop.touched) ElytraFly.debug { "Touched down on it at y %.2f, bouncing off it".format(touch.y) }
-				hop.touchedAt = player.age
-				diveTop = touch.y to player.age
+				hop.touchedAt = flightTicks
+				diveTop = touch.y to flightTicks
 				hop.topped = true
 				return@timed null
 			}
@@ -848,7 +859,7 @@ abstract class ObstaclePassingMode(
 				along, touch!!.range.start, touch.range.endInclusive, dive, percent(now), percent(next), player.y, player.velocity.y)
 		}
 		if (dive && overTop) {
-			diveTop = touch!!.y to player.age
+			diveTop = touch!!.y to flightTicks
 			if (!hop.overTop) {
 				hop.overTop = true
 				ElytraFly.debug { "Over the top to touch down on at y %.2f climbing %.2f, %.0f%% of the box over it, diving onto it at y %.2f"
@@ -904,6 +915,8 @@ abstract class ObstaclePassingMode(
 
 	init {
 		onEnable {
+			planPlayer = System.identityHashCode(player)
+			planWorld = System.identityHashCode(world)
 			startPos = floorBelow()
 			baseY = startPos.y
 			if (passerConfig.passObstacles) centerLine()
@@ -939,6 +952,10 @@ abstract class ObstaclePassingMode(
 		}
 		// Left the world, e.g. disconnected and waiting in the queue: the shape caches hold on to it through you.
 		listenUnsafe<WorldEvent.Leave> { dropShapes() }
+		listen<TickEvent.Pre>({ CLOCK_PRIORITY }) {
+			flightTicks++
+			if (System.identityHashCode(player) != planPlayer || System.identityHashCode(world) != planWorld) newWorld()
+		}
 		listen<TickEvent.Pre>({ DODGE_PRIORITY }) {
 			if (passingNanos > SLOW_PASSING_NANOS) ElytraFly.debug { "Obstacle passing took %.1f ms last tick".format(passingNanos / 1e6) }
 			passingNanos = 0
@@ -955,6 +972,24 @@ abstract class ObstaclePassingMode(
 		}
 		// Setbacks come in on the network thread, what's planned is changed on the game thread only.
 		onFlag { runGameScheduled { flagged(); logPlan() } }
+	}
+
+	/**
+	 * Respawned or joined a world, with the module on: what was planned is for the old one, dropped right away. Planned
+	 * anew like on enable once the chunk you're in is loaded, the floor below is looked for then.
+	 */
+	private fun SafeContext.newWorld() {
+		if (passingToPos != null) BaritoneHandler.cancel()
+		passingToPos = null
+		pausedWalk = false
+		commitNoLane("newWorld")
+		commitBrake("newWorld", null)
+		commitHop("newWorld", null)
+		stepLanding = false
+		dropShapes()
+		if (!world.isChunkLoaded(ChunkSectionPos.getSectionCoord(player.blockX), ChunkSectionPos.getSectionCoord(player.blockZ))) return
+		ElytraFly.debug { "Respawned or joined a world, planning anew" }
+		onEnableListeners.forEach { it() }
 	}
 
 	/** Set back, what it was at isn't tried again, and with [PasserSettings.walkWhenFlagged] it lands to walk on. */
@@ -1119,7 +1154,7 @@ abstract class ObstaclePassingMode(
 				Vec3d(playerPos.x, baseY, playerPos.z).boxHasFloor()) offTheLayer()
 			// Gliding up onto a layer, what's past its start up there comes into sight on the way: onto a lane past it now,
 			// the way up onto the layer is planned again on it, see [dodgePastOnLayer].
-			if (hop.step && !onLayer && dodge == null && passerConfig.dodge && player.age % LAYER_LOOK_TICKS == 0 &&
+			if (hop.step && !onLayer && dodge == null && passerConfig.dodge && flightTicks % LAYER_LOOK_TICKS == 0 &&
 				hop.obstacle - progress >= MIN_DODGE_DISTANCE &&
 				dodgePastOnLayer(Vec3d(playerPos.x, closestLinePoint.y, playerPos.z), closestLinePoint, snappedDir, hop.obstacle - progress, "the layer", hop)) {
 				commitHop("passObstacles", null)
@@ -1142,7 +1177,7 @@ abstract class ObstaclePassingMode(
 			val makesIt by lazy { hop.open || hop.anyway || hop.cube && hop.held || canGetOver(hop, progress) }
 			when {
 				// Touching down on a top ends the glide until the bounce off it takes off again.
-				!player.isGliding && !(hop.touched && player.age - hop.touchedAt <= TOUCH_GRACE_TICKS) -> commitHop("passObstacles", null)
+				!player.isGliding && !(hop.touched && flightTicks - hop.touchedAt <= TOUCH_GRACE_TICKS) -> commitHop("passObstacles", null)
 				// Past the top without touching down on it, held low for it: planned again from here.
 				hop.touch.let { it != null && !hop.touched && progress > it.range.endInclusive + TOUCH_NEAR } -> {
 					ElytraFly.debug { "Missed the top to touch down on, looking again" }
@@ -1198,7 +1233,7 @@ abstract class ObstaclePassingMode(
 				!makesIt && (hop.hole || !hop.under && !hop.low && hopShort <= ANYWAY_SHORT) -> {
 					if (!hop.held) ElytraFly.debug { "Can't quite get over it at %.1f ($hopMiss), holding as high as it goes anyway".format(hop.start - progress) }
 					hop.held = true
-					hop.heldCheckedAt = player.age
+					hop.heldCheckedAt = flightTicks
 					dodgeYaw = hopYaw(closestLinePoint, laneFromGlide(hop, closestLinePoint, snappedDir, progress) ?: hop, snappedDir, progress)
 					return false
 				}
@@ -3042,7 +3077,7 @@ abstract class ObstaclePassingMode(
 			// Not past the distance to brake for it by the time it's looked at again.
 			if (edge - player.velocity.horizontalLength() * LAYER_HOLE_AGAIN_TICKS > brakeDistance() + DODGE_STEER_AHEAD) {
 				ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, not gotten over from bouncing on yet ($why), looking again".format(edge, hole.endInclusive - hole.start) }
-				layerHoleAgain = player.age + LAYER_HOLE_AGAIN_TICKS
+				layerHoleAgain = flightTicks + LAYER_HOLE_AGAIN_TICKS
 				return false
 			}
 			ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, not gotten over from bouncing on ($why)".format(edge, hole.endInclusive - hole.start) }
@@ -3440,16 +3475,16 @@ abstract class ObstaclePassingMode(
 	 */
 	protected fun SafeContext.touchFloor(): Double? {
 		// Diving onto it, held whatever the hop does meanwhile, e.g. ended or planned again the tick before touching down.
-		// Fake Lag asks this from the network thread too, it's only let go of on the game thread.
+		// Only let go of on the game thread.
 		diveTop?.let { (y, since) ->
-			if (player.isGliding && player.age - since in 0..TOUCH_DIVE_HOLD_TICKS) return y
+			if (player.isGliding && flightTicks - since in 0..TOUCH_DIVE_HOLD_TICKS) return y
 			if (MinecraftClient.getInstance().isOnThread) diveTop = null
 		}
 		val hop = hop ?: return null
 		val touch = hop.touch ?: return null
 		val progress = progress(player.pos)
 		return touch.y.takeIf {
-			if (hop.touched) player.age - hop.touchedAt <= 1
+			if (hop.touched) flightTicks - hop.touchedAt <= 1
 			else progress >= touch.range.start - TOUCH_HELD_AROUND && progress <= touch.range.endInclusive + TOUCH_HELD_AROUND
 		}
 	}
@@ -3592,7 +3627,7 @@ abstract class ObstaclePassingMode(
 		}
 		val at = progress(linePoint) + edge
 		// A hole after it not gotten over yet from far, looked at again a few ticks on, see [layerHole].
-		if (layerHoleAgain.let { it != null && player.age >= it }) {
+		if (layerHoleAgain.let { it != null && flightTicks >= it }) {
 			layerHoleAgain = null
 			noGapAt = null
 		}
@@ -4115,8 +4150,8 @@ abstract class ObstaclePassingMode(
 	 * held it stays held.
 	 */
 	private fun SafeContext.holdingFor(hop: Hop, progress: Double): Boolean {
-		if (hop.held || hop.heldCheckedAt == player.age) return hop.held
-		hop.heldCheckedAt = player.age
+		if (hop.held || hop.heldCheckedAt == flightTicks) return hop.held
+		hop.heldCheckedAt = flightTicks
 		val speed = player.velocity.horizontalLength()
 		hop.held = when {
 			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later. With blocks
@@ -4247,7 +4282,7 @@ abstract class ObstaclePassingMode(
 			?: return canHop(hop, progress, 0) && !fromNextBounce(hop, progress, CUBE_BOUNCE_MARGIN, CUBE_BOUNCE_HEIGHT_MARGIN)
 		if (fromNextBounce(high, progress, CUBE_BOUNCE_MARGIN, CUBE_BOUNCE_HEIGHT_MARGIN)) return false
 		high.held = true
-		high.heldCheckedAt = player.age
+		high.heldCheckedAt = flightTicks
 		commitHop("holdCube", high)
 		ElytraFly.debug { "Fast enough to glide over the mob high, at y %.2f, %.2f after it".format(high.targetY, hopExitSpeed) }
 		return true
@@ -4511,8 +4546,8 @@ abstract class ObstaclePassingMode(
 
 	/** Starts the caches over each tick, blocks change between ticks. */
 	private fun SafeContext.freshShapes() {
-		if (shapesAge == player.age && shapesWorld == System.identityHashCode(world)) return
-		shapesAge = player.age
+		if (shapesAge == flightTicks && shapesWorld == System.identityHashCode(world)) return
+		shapesAge = flightTicks
 		shapesWorld = System.identityHashCode(world)
 		shapes.clear()
 		hazardCells.clear()

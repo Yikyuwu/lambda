@@ -25,6 +25,7 @@ import com.lambda.event.events.ConnectionEvent
 import com.lambda.event.events.MovementEvent
 import com.lambda.event.events.PacketEvent
 import com.lambda.event.events.TickEvent
+import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.handlers.BaritoneHandler
@@ -37,6 +38,7 @@ import com.lambda.module.modules.movement.elytrafly.ElytraFly.FlyMode
 import com.lambda.module.modules.movement.elytrafly.ElytraFly.fakeFly
 import com.lambda.module.modules.movement.elytrafly.ObstaclePassingMode
 import com.lambda.module.modules.movement.elytrafly.PasserSettings
+import com.lambda.threading.runGameScheduled
 import com.lambda.threading.runSafe
 import com.lambda.util.PacketUtils.handlePacketSilently
 import com.lambda.util.PacketUtils.sendPacketSilently
@@ -54,6 +56,8 @@ import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket
+import net.minecraft.network.packet.s2c.play.GameJoinS2CPacket
+import net.minecraft.network.packet.s2c.play.PlayerRespawnS2CPacket
 import net.minecraft.util.PlayerInput
 import net.minecraft.util.math.Vec2f
 import net.minecraft.util.math.Vec3d
@@ -122,7 +126,7 @@ class BounceElytraFly(
 	private val flagPause by c.setting("FlagPause Pause", 5, 0..100, 1, "How long to pause if the server flags you for a movement check", "ticks")
 	private val minimizePackets by c.setting("Minimize Packets", true, "Shrinks the amount of start fly packets sent to the server as much as possible")
 	private val fakeLag by c.setting("Fake Lag", true, "Emulates the player lagging to allow flying in 1x2 tunnels")
-		.onValueChange { _, to -> if (!to) flushPackets() }
+		.onValueChange { _, to -> if (!to) { holdPings = false; flushPackets() } }
 	private val waitForChunks by c.setting("Wait For Chunks", true, "Keeps a few seconds of flight of loaded chunks ahead, slowing down and landing when there are fewer. The server sets you back for flying into missing ones")
 	private val chunkLookAhead by c.setting("Chunk Look-Ahead", 96, 16..160, 8, "How far ahead loaded chunks are looked for. Flying faster wants more of them loaded ahead", " blocks") { waitForChunks }
 
@@ -153,6 +157,16 @@ class BounceElytraFly(
 	private val pingPackets = ConcurrentLinkedQueue<CommonPingS2CPacket>()
 	/** Packets are sent from the network thread too, e.g. replies to the server. */
 	private val sendPacketQueue = ConcurrentLinkedQueue<Packet<*>>()
+	/**
+	 * [queuePackets] as last worked out on the game thread, for holding pings on the network thread: the game state it
+	 * reads isn't safe to read there.
+	 */
+	@Volatile private var holdPings = false
+	/**
+	 * The server respawned you, e.g. into another dimension, and the plan isn't made for the new player yet, see
+	 * [ObstaclePassingMode.newWorld]. Nothing is held back meanwhile, what was is sent right away.
+	 */
+	@Volatile private var respawning = false
 	private var sneakLeft = false
 	private var sneakRight = false
 	private var interrupting = false
@@ -171,7 +185,7 @@ class BounceElytraFly(
 		get() = !pauseTimer.hasSurpassed(flagPause) || interrupting || BaritoneHandler.isActive || waitingForChunks || isBraking || isWaiting || noElytra
 
 	private val SafeContext.queuePackets
-		get() = fakeLag && player.isGliding && (!yMotionSetting || !onYMotionAngle) &&
+		get() = fakeLag && !respawning && player.isGliding && (!yMotionSetting || !onYMotionAngle) &&
 				queuedTicks < MAX_FAKE_LAG_TICKS &&
 				// Only bouncing. Held back after a setback or while landing, the server sees you stand still, sets you back
 				// again and again. Nor falling off a block you bounced on. Also the tick before touching down, the server
@@ -216,6 +230,7 @@ class BounceElytraFly(
 			if (sendPacketQueue.isEmpty()) queuedTicks = 0
 			// Also a tick without the movement they wait for, see below.
 			else if (++queuedTicks >= MAX_FAKE_LAG_TICKS || !queuePackets) flushPackets()
+			holdPings = queuePackets
 
 			if (autoPitch) {
 				val hold = hopPitch()
@@ -369,36 +384,55 @@ class BounceElytraFly(
 			// landing, the server sees you on the ground after it and ends it again.
 			if (event.packet.let { it is ClientCommandC2SPacket && it.mode == ClientCommandC2SPacket.Mode.START_FALL_FLYING })
 				return@listen flushPackets()
-			// The server ignores your movement until you confirm its setback.
-			if (queuePackets && event.packet !is TeleportConfirmC2SPacket) {
+			// The server ignores your movement until you confirm its setback. Nor across a change of protocol state, e.g.
+			// acknowledging a reconfiguration: after it what's held couldn't be sent anymore.
+			val queue = queuePackets
+			holdPings = queue
+			if (queue && event.packet !is TeleportConfirmC2SPacket && !event.packet.transitionsNetworkState()) {
 				sendPacketQueue.add(event.packet)
 				ElytraFly.traceLine { "  held back ${ElytraFly.describe(event.packet)}" }
 				event.cancel()
 				return@listen
 			}
-			if (sendPacketQueue.isEmpty() || event.packet is TeleportConfirmC2SPacket) return@listen flushPackets()
+			if (sendPacketQueue.isEmpty() || event.packet is TeleportConfirmC2SPacket || event.packet.transitionsNetworkState())
+				return@listen flushPackets()
 			// The held back ones wait for the next movement and go out with it at once, so the server gets the landing
 			// and the jump together. Handling the landing on its own, it ends the glide.
 			sendPacketQueue.add(event.packet)
 			event.cancel()
 			if (event.packet is PlayerMoveC2SPacket) flushPackets()
 		}
+		// On the network thread, it reads only what the game thread worked out.
 		listen<PacketEvent.Receive.Pre>({ 1 }) { event ->
-			if (event.packet is CommonPingS2CPacket && queuePackets) {
+			// Respawned, e.g. into another dimension, or joined another server behind a proxy.
+			if (event.packet is PlayerRespawnS2CPacket || event.packet is GameJoinS2CPacket) {
+				respawning = true
+				holdPings = false
+				// The game thread applies received packets before its tasks, so this runs right after the respawn, before
+				// the next tick. Still in order: what's sent meanwhile goes in the queue behind what's held, a teleport
+				// confirm sends what's held first.
+				runGameScheduled {
+					runSafe { flushPackets() } ?: dropPackets()
+					queuedTicks = 0
+				}
+			}
+			if (event.packet is CommonPingS2CPacket && holdPings && !respawning) {
 				pingPackets.add(event.packet)
 				event.cancel()
 			}
 		}
 
 		// Held back for the server you left, the next one would get them.
-		listenUnsafe<ConnectionEvent.Connect.Pre> {
-			sendPacketQueue.clear()
-			pingPackets.clear()
-		}
+		listenUnsafe<ConnectionEvent.Connect.Pre> { dropPackets() }
+		// Left the world. Still connected it all goes out first, gone there's no one to send it to.
+		listenUnsafe<WorldEvent.Leave> { runSafe { flushPackets() } ?: dropPackets() }
 
 		onFlag { pauseTimer.reset() }
 
 		onEnable {
+			// Also on respawn, the new player is taken on, see [ObstaclePassingMode.newWorld].
+			respawning = false
+			holdPings = false
 			pacer.reset()
 			hitRoof = false
 			// The floor below when started in the air, else packets would be held back up there.
@@ -411,6 +445,7 @@ class BounceElytraFly(
 			wantJump = false
 			prevGliding = false
 			flushPackets()
+			holdPings = false
 			sneakLeft = false
 			sneakRight = false
 		}
@@ -494,6 +529,14 @@ class BounceElytraFly(
 			connection.sendPacketSilently(packet, flush = sendPacketQueue.isEmpty())
 		}
 		while (true) connection.handlePacketSilently(pingPackets.poll() ?: break)
+	}
+
+	/** Only when there's no one to send them to, else they're flushed. */
+	private fun dropPackets() {
+		sendPacketQueue.clear()
+		pingPackets.clear()
+		holdPings = false
+		respawning = false
 	}
 
 	fun getModifiedVelocity(original: Vec3d) =
