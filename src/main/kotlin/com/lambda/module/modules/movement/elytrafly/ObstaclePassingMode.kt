@@ -22,7 +22,9 @@ import com.lambda.config.Config
 import com.lambda.config.ConfigBlock
 import com.lambda.context.SafeContext
 import com.lambda.event.events.TickEvent
+import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
+import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.RotationManager
@@ -46,6 +48,7 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import net.minecraft.block.BlockState
 import net.minecraft.block.Blocks
 import net.minecraft.block.ShapeContext
+import net.minecraft.client.MinecraftClient
 import net.minecraft.entity.Entity
 import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
@@ -181,6 +184,10 @@ abstract class ObstaclePassingMode(
 		private const val MAX_HOP_PITCH_UP = 30
 		/** How many degrees apart [holdPitch] looks first. */
 		private const val HOLD_PITCH_STEP = 6
+		/** cos² of each whole pitch from -[MAX_HOP_PITCH_UP] to 90, the same as [glide] works out, see [glideClimb]. */
+		private val PITCH_COS_SQ = DoubleArray(MAX_HOP_PITCH_UP + 91) { cos(Math.toRadians((it - MAX_HOP_PITCH_UP).toDouble())).let { c -> c * c } }
+		/** -sin of each whole pitch from -[MAX_HOP_PITCH_UP] to 90, see [glideClimb]. */
+		private val PITCH_NEG_SIN = DoubleArray(MAX_HOP_PITCH_UP + 91) { -sin(Math.toRadians((it - MAX_HOP_PITCH_UP).toDouble())) }
 		/** Taking longer than this a tick, it's logged. The game has 50 for all. */
 		private const val SLOW_PASSING_NANOS = 5_000_000L
 		/**
@@ -772,6 +779,8 @@ abstract class ObstaclePassingMode(
 			hop = null
 			dropShapes()
 		}
+		// Left the world, e.g. disconnected and waiting in the queue: the shape caches hold on to it through you.
+		listenUnsafe<WorldEvent.Leave> { dropShapes() }
 		listen<TickEvent.Pre>({ DODGE_PRIORITY }) {
 			if (passingNanos > SLOW_PASSING_NANOS) ElytraFly.debug { "Obstacle passing took %.1f ms last tick".format(passingNanos / 1e6) }
 			passingNanos = 0
@@ -1784,6 +1793,17 @@ abstract class ObstaclePassingMode(
 			else -> from
 		}
 		val (hole, blocked) = holeHop(glideLine, dir, at + start..at + end)
+		// Not gotten over, about to brake for it: past it on floor beside it instead, if there's a lane with floor all
+		// along it, still steered over to in time, see [floorLane]. Only in the last looks before braking, farther it may
+		// still get over it faster, see [noLaneYet].
+		fun sideStep(reason: String): Boolean {
+			// Not with a top in it to touch down on that may still be made closer by, see [touchLane].
+			if (dodging || touchMiss.startsWith("touching down") || start <= brakeDistance() + DODGE_STEER_AHEAD ||
+				start > brakeDistance() + DODGE_STEER_AHEAD + player.velocity.horizontalLength() * (RELOOK_TICKS + 2)) return false
+			val lane = floorLane(from, linePoint, dir, start, end) ?: return false
+			ElytraFly.debug { "$reason, side-stepping it on the floor ${lane.target.describe(dir)}" }
+			return dodgeTo(lane, at + end + DODGE_MARGIN)
+		}
 		// One in it that can't be, e.g. on the lane dodged to, only with a lane past it to steer over to meanwhile. Else
 		// it's in the way like a wall in the hole, waited for or landed before while there's room to. Right at its edge
 		// braking drops you in, it's glided over and steered past once there's a lane, see [laneFromGlide]. What's
@@ -1793,12 +1813,14 @@ abstract class ObstaclePassingMode(
 			else freeLane(from, linePoint, dir, blocked, dodge ?: Vec3d.ZERO)?.takeIf { it.target != (dodge ?: Vec3d.ZERO) } ?: run {
 				val reason = "Hole %.1f ahead, %.1f long, ${from.obstacleBlock(dir, blocked + 1)} %.1f ahead in it can't be glided over, no lane past it ($laneMiss)"
 					.format(start, end - start, blocked)
+				if (sideStep(reason)) return true
 				return if (start > brakeDistance() + DODGE_STEER_AHEAD) noLaneYet(at + start, reason) else brake(at + start, reason)
 			}
 		val lane = nextLane ?: pastBlocked
 		val past = if (nextLane != null) next else blocked
 		if (!canGetOver(hole, at)) {
 			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"})".format(start, end - start)
+			if (sideStep(reason)) return true
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
 		}
 		// Touching down on a top in it, on the lane picked for that through the hole, over to it while still bouncing.
@@ -1826,6 +1848,35 @@ abstract class ObstaclePassingMode(
 		dodgeTo(lane, at + past)
 		hop = hole.with(lane = lane.target)
 		return true
+	}
+
+	/**
+	 * A lane beside the hole [start] to [end] ahead of [from] with floor all along it, nothing on it, and steered over to
+	 * before the hole: bounced on past it instead of braking for it. The closest, null with none.
+	 */
+	private fun SafeContext.floorLane(from: Vec3d, linePoint: Vec3d, dir: Vec3d, start: Double, end: Double): Lane? {
+		val across = across(dir)
+		val step = laneStep(dir) / 4
+		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val here = from.subtract(linePoint).dotProduct(across)
+		val at = progress(from)
+		val room = player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS + HOLE_TOUCHDOWN_MARGIN
+		return (-sides..sides).filter { it != 0 }.sortedBy { abs(it * step - here) }.firstNotNullOfOrNull { side ->
+			val offset = side * step
+			val lanePoint = linePoint.add(across.multiply(offset))
+			// Floor under all of the box, also where steering only gets it close to the lane, toward the hole.
+			fun floorAll(point: Vec3d) = holesAhead(point, dir).none { it.start < at + end + room && it.endInclusive > at }
+			if (!floorAll(lanePoint) || !floorAll(linePoint.add(across.multiply(offset - sign(offset - here) * LANE_REACHED)))) return@firstNotNullOfOrNull null
+			if (lanePoint.obstacleHit(dir, end + DODGE_MARGIN) != null) return@firstNotNullOfOrNull null
+			// Over on it well before the hole: steering over to it, the hole is looked at from where you are, see [steerDodge].
+			val reached = steerPath(here, dir, offset, 0, start, start).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
+			if (reached == null || reached > start - brakeDistance()) return@firstNotNullOfOrNull null
+			// Nothing on the lanes swung across on the way over from where you are.
+			val from = (here / step).roundToInt()
+			if ((min(from, side)..max(from, side)).any { it != side && it != from &&
+					linePoint.add(across.multiply(it * step)).obstacleHit(dir, reached + 1) != null }) return@firstNotNullOfOrNull null
+			Lane(across.multiply(offset), 0, offset)
+		}
 	}
 
 	/**
@@ -2257,9 +2308,10 @@ abstract class ObstaclePassingMode(
 	 */
 	protected fun SafeContext.touchFloor(): Double? {
 		// Diving onto it, held whatever the hop does meanwhile, e.g. ended or planned again the tick before touching down.
+		// Fake Lag asks this from the network thread too, it's only let go of on the game thread.
 		diveTop?.let { (y, since) ->
-			if (player.isGliding && player.age - since <= TOUCH_DIVE_HOLD_TICKS) return y
-			diveTop = null
+			if (player.isGliding && player.age - since in 0..TOUCH_DIVE_HOLD_TICKS) return y
+			if (MinecraftClient.getInstance().isOnThread) diveTop = null
 		}
 		val hop = hop ?: return null
 		val touch = hop.touch ?: return null
@@ -2923,10 +2975,25 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun holdPitch(y: Double, climb: Double, speed: Double, target: Double, gravity: Double, sink: Double = HOLD_SINK): Double {
 		val wanted = ((target - y) * 0.3).coerceIn(-sink, MAX_HOLD_CLIMB)
-		fun miss(pitch: Int) = abs(glide(climb, speed, pitch.toDouble(), gravity).first - wanted)
-		// Every few degrees and then each one around the best, simulated a few hundred times a tick.
-		val coarse = (-MAX_HOP_PITCH_UP..90 step HOLD_PITCH_STEP).minBy(::miss)
-		return (max(-MAX_HOP_PITCH_UP, coarse - HOLD_PITCH_STEP + 1)..min(90, coarse + HOLD_PITCH_STEP - 1)).minBy(::miss).toDouble()
+		fun miss(pitch: Int) = abs(glideClimb(climb, speed, pitch, gravity) - wanted)
+		// Every few degrees and then each one around the best, simulated a few hundred times a tick: plain loops, the
+		// first best like minBy.
+		var coarse = -MAX_HOP_PITCH_UP
+		var coarseMiss = miss(coarse)
+		for (pitch in -MAX_HOP_PITCH_UP + HOLD_PITCH_STEP..90 step HOLD_PITCH_STEP) miss(pitch).let { if (it < coarseMiss) { coarse = pitch; coarseMiss = it } }
+		var best = max(-MAX_HOP_PITCH_UP, coarse - HOLD_PITCH_STEP + 1)
+		var bestMiss = miss(best)
+		for (pitch in best + 1..min(90, coarse + HOLD_PITCH_STEP - 1)) miss(pitch).let { if (it < bestMiss) { best = pitch; bestMiss = it } }
+		return best.toDouble()
+	}
+
+	/** [glide]'s climb alone at a whole [pitch] from -[MAX_HOP_PITCH_UP] to 90, from [PITCH_COS_SQ] and [PITCH_NEG_SIN]. */
+	private fun glideClimb(climb: Double, speed: Double, pitch: Int, gravity: Double): Double {
+		val cosSq = PITCH_COS_SQ[pitch + MAX_HOP_PITCH_UP]
+		var y = climb + gravity * (-1 + cosSq * 0.75)
+		if (y < 0) y += y * -0.1 * cosSq
+		if (pitch < 0) y += speed * PITCH_NEG_SIN[pitch + MAX_HOP_PITCH_UP] * 0.04 * 3.2
+		return y * 0.98
 	}
 
 	/** Vanilla's elytra glide, the climb and speed after a tick at [pitch] facing where you fly. */
