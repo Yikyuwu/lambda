@@ -5245,8 +5245,18 @@ abstract class ObstaclePassingMode(
 	 * this one both slip by.
 	 */
 	private fun SafeContext.fromNextBounce(
-		hop: Hop, progress: Double, ticks: Int = NEXT_BOUNCE_MARGIN, height: Double = NEXT_BOUNCE_HEIGHT_MARGIN,
+		hop: Hop, progress: Double, ticks: Int = NEXT_BOUNCE_MARGIN, height: Double = nextBounceHeight(hop),
 	) = nextRise(progress, hop.lane)?.let { canHop(hop, progress, it + ticks, margin = height) } == true
+
+	/**
+	 * How much higher than needed [fromNextBounce] has to get you over [hop]. Over a block, a wall or onto a layer it's
+	 * held at [Hop.targetY], only up to [HOP_MARGIN] over what it clears, never higher: no more than half of that, else
+	 * from the next bounce it'd never do and it'd hold from the first bounce in reach every time, e.g. up out of a dip
+	 * from 15 blocks off at 0.77 and up there at 0.65 instead of from the next bounce at 0.98 (in the simulator the box
+	 * still clears the edge by 0.11 at least). Over a hole or onto a top it's held higher, there as is.
+	 */
+	private fun nextBounceHeight(hop: Hop) =
+		if (hop.hole || hop.touch != null) NEXT_BOUNCE_HEIGHT_MARGIN else min(NEXT_BOUNCE_HEIGHT_MARGIN, (hop.targetY - hop.feetY) / 2)
 
 	/**
 	 * In how many ticks the next bounce off the floor rises, bouncing on from here at [progress] along the line on [lane].
