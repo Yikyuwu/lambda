@@ -1574,16 +1574,15 @@ abstract class ObstaclePassingMode(
 								else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
 							}
 							// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
-							// In brackets, else up on a layer the looks after it would be skipped too.
-							?: (if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
+							?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
 								.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
 								?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
-								?.let { "a hole %.1f ahead".format(it) })
+								?.let { "a hole %.1f ahead".format(it) }
 							// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
-							?: (if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
+							?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
 								linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs)
 									?.let { hit -> "${hit.what} ahead crossing over" }
-							})
+							}
 							// The way over itself until passing, farther than those look: the swing over to a lane a block or two off
 							// takes 20 or more, and from where it's as good as on it, it still closes in on it, short of where it passes.
 							?: if (lead > 0) null else steerPathHit(linePoint, dir, path, max(reached, distance - 1))
@@ -3000,8 +2999,9 @@ abstract class ObstaclePassingMode(
 		// On the line, or on the lane dodged to, swinging back to the line too.
 		val current = dodge ?: Vec3d.ZERO
 		if (hop.lane != current || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole || passTicks % RELOOK_TICKS != 0) return null
-		// Its lane was picked free past the hole, see [touchLane].
-		if (hop.touch != null && !hop.touched) return null
+		// Its lane was picked free past the hole, see [touchLane]. Planned up on a layer with what's on its lane, see
+		// [layerHole]: over to another meanwhile it steered across what's dodged, e.g. a column right beside it.
+		if (hop.touch != null && !hop.touched || hop.fromLayer) return null
 		val onLane = current != Vec3d.ZERO
 		val here = Vec3d(player.x, linePoint.y, player.z)
 		val lanePoint = if (onLane) dodgeLanePoint(linePoint, dir) else linePoint
