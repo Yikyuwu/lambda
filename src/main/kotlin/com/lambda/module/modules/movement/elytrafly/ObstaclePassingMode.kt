@@ -125,6 +125,8 @@ abstract class ObstaclePassingMode(
 		 * narrows down to none at 1.15. On the bounces before the glide through it slows down to it.
 		 */
 		private const val THREAD_SPEED = 0.9
+		/** How many ticks before the wall braking down to [THREAD_SPEED] stops at the latest, to get to the height for it. */
+		private const val THREAD_BRAKE_TICKS = 15
 		/** How often what's past the start of a layer is looked at while gliding up onto it, see [dodgePastOnLayer]. */
 		private const val LAYER_LOOK_TICKS = 5
 		/**
@@ -646,6 +648,8 @@ abstract class ObstaclePassingMode(
 	private var hopTooSlow = false
 	/** Where [canHop] found the glide falls short, for the debug log. */
 	private var hopMiss = ""
+	/** Why the last [dipLane] doesn't bounce through a hole as a dip, for the debug log. */
+	private var dipMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
 	private var touchMiss = ""
 
@@ -755,6 +759,13 @@ abstract class ObstaclePassingMode(
 				hop.topped = true
 				return@timed null
 			}
+		}
+		// Too fast to go through a single block missing diagonally, braking on, see [slowingToFit], not holding the height
+		// for it yet while there's room to get back up there. Holding it, no braking takes over.
+		thread?.let { thread ->
+			val speed = player.velocity.horizontalLength()
+			if (thread.hopStart == hop.start && speed > THREAD_SPEED && thread.wallAt - progress(player.pos) > speed * THREAD_BRAKE_TICKS)
+				return@timed null
 		}
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
 		// A top coming, skimmed down to just above a few ticks early, see [Hop.holdY]: where the box really comes over it,
@@ -2009,7 +2020,7 @@ abstract class ObstaclePassingMode(
 		val lane = nextLane ?: pastBlocked
 		val past = if (nextLane != null) next else blocked
 		if (!canGetOver(hole, at)) {
-			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"})".format(start, end - start)
+			val reason = "Hole %.1f ahead, %.1f long, can't get over it ($hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"}${if (dodging || onLayer || inDip) "" else "; not a dip: $dipMiss"})".format(start, end - start)
 			if (sideStep(reason)) return true
 			return if (start > brakeDistance()) noLaneYet(at + start, reason) else brake(at + start, reason)
 		}
@@ -2048,6 +2059,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.dipLane(from: Vec3d, linePoint: Vec3d, dir: Vec3d, start: Double, end: Double): Pair<Vec3d, Hop>? {
 		val speed = player.velocity.horizontalLength()
+		dipMiss = "too short to bounce in at this speed"
 		if (end - start < speed * DIP_BOUNCE_TICKS + DROP_BEFORE + STEP_ON) return null
 		val across = across(dir)
 		val step = laneStep(dir) / 4
@@ -2063,28 +2075,32 @@ abstract class ObstaclePassingMode(
 			val point = linePoint.add(across.multiply(side * step)).add(dir.multiply(along))
 			if (point.boxHasFloor()) continue
 			val box = lowBox(point)
-			if (!spaceEmpty(box)) return null
+			if (!spaceEmpty(box)) return null.also { dipMiss = "something in it %.1f ahead".format(along) }
 			whole = whole?.union(box) ?: box
 		}
+		dipMiss = if (whole == null) "no floor a block down" else "a mob in it"
 		if (whole == null || world.getOtherEntities(player, whole) { it.glidedOver() }.isNotEmpty()) return null
+		dipMiss = "no lane"
 		return (-sides..sides).sortedBy { abs(it * step - here) }.firstNotNullOfOrNull { side ->
 			val offset = side * step
 			val lanePoint = linePoint.add(across.multiply(offset))
 			// Over on it before the glide down into it.
 			if (abs(offset - here) > TOUCH_LANE_OFF) {
 				val reached = steerPath(here, dir, offset, 0, start, start).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
-				if (reached == null || reached > start - DROP_BEFORE - DODGE_STEER_AHEAD) return@firstNotNullOfOrNull null
+				if (reached == null || reached > start - DROP_BEFORE - DODGE_STEER_AHEAD)
+					return@firstNotNullOfOrNull null.also { dipMiss = "%+.2f can't be steered over to in time".format(offset) }
 			}
 			// Floor a block down all along it, none up here, and room to bounce on down there.
 			val clear = generateSequence(start + HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it < end - HOP_SCAN_STEP }.all { along ->
 				val point = lanePoint.add(dir.multiply(along))
 				!point.boxHasFloor() && Vec3d(point.x, low, point.z).boxHasFloor() && spaceEmpty(lowBox(point).expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
 			}
-			if (!clear) return@firstNotNullOfOrNull null
+			if (!clear) return@firstNotNullOfOrNull null.also { dipMiss = "%+.2f not clear down in it".format(offset) }
 			// Up out of it again at its end, like onto a layer.
-			if (!isStepUp(Vec3d(lanePoint.x, low, lanePoint.z), dir, end)) return@firstNotNullOfOrNull null
+			if (!isStepUp(Vec3d(lanePoint.x, low, lanePoint.z), dir, end))
+				return@firstNotNullOfOrNull null.also { dipMiss = "%+.2f no step up out of it at its end".format(offset) }
 			val down = planHop(lanePoint, dir, (start - DROP_BEFORE).coerceAtLeast(HOP_SCAN_STEP), true, DROP_BEFORE + STEP_ON)
-				?: return@firstNotNullOfOrNull null
+				?: return@firstNotNullOfOrNull null.also { dipMiss = "%+.2f the glide down into it: $hopRejection".format(offset) }
 			// On the line itself exactly no lane, -0.0 across isn't [Vec3d.ZERO].
 			val lane = if (side == 0) Vec3d.ZERO else across.multiply(offset)
 			dipAt = at + start..at + end
