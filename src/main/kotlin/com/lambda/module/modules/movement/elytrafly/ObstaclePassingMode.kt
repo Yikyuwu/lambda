@@ -2869,8 +2869,8 @@ abstract class ObstaclePassingMode(
 		way.hop?.let { hop ->
 			// The deciders' plan judged as they judge it, see [touchedExit].
 			val end = blockHopRun(hop, at, speed, strict = way.kind != "plan") ?: return null
-			// Through an opening only as slow as it fits.
-			if (way.thread != null && hopWallSpeed > way.thread.maxSpeed) return null
+			// Through an opening only as slow as it fits, the way it's flown there, see [slowEnough].
+			if (way.thread != null && way.thread.maxSpeed.isFinite() && !slowEnough(hop, way.thread.maxSpeed, at, speed)) return null
 			// Together with what follows it from where it ends: through an opening into a block past it too close to get over
 			// from there at that speed and height is no way past, see [continuation].
 			val then = continuation(hop.lane, dir, end) ?: return null
@@ -2880,6 +2880,25 @@ abstract class ObstaclePassingMode(
 		val lane = way.lane ?: return null
 		if (faster != 0.0 && !stillFree(lane, from, linePoint, dir, dodgePast, speed)) return null
 		return bounceOn(speed, end - at, end - at)?.second
+	}
+
+	/**
+	 * Whether [hop] through an opening gets there no faster than [maxSpeed] from [progress] at [from] a tick, judged the
+	 * way [threadHold] flies it once committed, with vanilla's turn of the velocity: held from the last bounce before it,
+	 * else from close by, with the sprint, else without it, else flapping the rest off, see [shedRun]. Landing to come in
+	 * slower is no way past for the chooser. In the simulator, bouncing at 0.8 to 1.8 a tick with an opening that fits up
+	 * to 0.95 16 to 64 ahead, of 858 none it takes doesn't get through and 34 it leaves would, before 526 and one taken
+	 * landed.
+	 */
+	private fun SafeContext.slowEnough(hop: Hop, maxSpeed: Double, progress: Double, from: Double): Boolean {
+		fun wallSpeed(gain: Double): Double? {
+			val last = bounceRises(hop, progress, simY(), simClimb(), from, gain).lastOrNull()
+			if (last != null && canHop(hop, progress, last, from, gain = gain, turn = true)) return hopWallSpeed
+			return if (canHop(hop, progress, from = from, gain = gain, turn = true)) hopWallSpeed else null
+		}
+		if ((wallSpeed(BOUNCE_SPEED_GAIN) ?: Double.POSITIVE_INFINITY) <= maxSpeed) return true
+		val slow = wallSpeed(0.0) ?: return false
+		return slow <= maxSpeed || fromChainStart(ChainStart(simY(), simClimb(), from)) { shedRun(hop, maxSpeed, progress) }
 	}
 
 	/** Where a glide simulated by [canHop] is right past the hop: [at] along the line, the feet at [y] climbing at [climb], at [speed]. */
