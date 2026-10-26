@@ -236,8 +236,13 @@ abstract class ObstaclePassingMode(
 		private const val STEP_CLEAR = 4.0
 		/** A gap in a layer you bounce on up to this long is glided across, a longer one you drop down into. */
 		private const val MAX_GAP = 8.0
-		/** A shorter gap is crossed bouncing on, there's no time to fall into it. */
+		/**
+		 * A shorter gap is crossed bouncing on, there's no time to fall into it, unless a bounce comes down right in it:
+		 * sinking a cm below the top there, the next of its blocks is in the way, see [intoLayerSide].
+		 */
 		private const val MIN_GAP = 1.5
+		/** How far the box may stick out over the floor around a gap in a layer and still come down in it, see [intoLayerSide]. */
+		private const val GAP_FALL_MARGIN = 0.1
 		/**
 		 * How far before a layer's end to stop bouncing and glide off it. Bounced off its very edge, the server takes
 		 * you for off it already and sets you back.
@@ -1394,6 +1399,16 @@ abstract class ObstaclePassingMode(
 				if (thread?.hopStart != hop.start) return
 				skipHopAt = hop.start
 				commitNoLane("passObstacles")
+			}
+			// Bouncing on up on a layer, the next bounce would come down in a gap in it, into the side of the layer after
+			// it, and holding from now doesn't make it: the gap's glided across first, what's after it planned again past it.
+			if (onLayer && player.isGliding && !hop.held) bounceIntoGap(progress, hop.lane)?.let { (at, on) ->
+				if (!holdingFor(hop, progress)) gapGlide(closestLinePoint, snappedDir, hop.lane, at, on)?.let { across ->
+					commitHop("passObstacles", across)
+					noGapAt = null
+					dodgeYaw = hopYaw(closestLinePoint, across, snappedDir, progress)
+					return false
+				}
 			}
 			when {
 				// Touching down on a top ends the glide until the bounce off it takes off again.
@@ -2941,6 +2956,12 @@ abstract class ObstaclePassingMode(
 						else missText { "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z) }
 					}
 				}
+				// Staying up on a layer, a gap in it on the way that's no hole to glide over: one longer than glided across, see
+				// [planGap], drops it down beside the layer. A shorter one is bounced or glided across, see [gapGlide].
+				val gapMiss by lazy(LazyThreadSafetyMode.NONE) {
+					if (!sameFloor || !onLayer || onCarpets) null
+					else layerGapOn(lane, dir, max(lead, HOP_SCAN_STEP), distance)?.let { gap -> missText { "a gap in the blocks %.1f ahead".format(gap) } }
+				}
 				// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
 				val holeMiss by lazy(LazyThreadSafetyMode.NONE) {
 					generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
@@ -2977,6 +2998,7 @@ abstract class ObstaclePassingMode(
 						else -> middle.add(dir.multiply(reached)).obstacleHit(dir, distance + past - reached, (high - low) / 2 + STEER_MARGIN, if (tilted) lean else 0, laneSpeed, carpets, mobs)
 							?.let { hit -> missText { "${hit.what} ahead" } }
 							?: floorMiss
+							?: gapMiss
 							// Up on a layer, none of the rest is looked at.
 							?: if (onLayer) null else (holeMiss
 								?: crossMiss
@@ -4702,13 +4724,30 @@ abstract class ObstaclePassingMode(
 			.takeWhile { it <= passerConfig.dodgeLookAhead }
 			.map { it to linePoint.add(dir.multiply(it)) }
 			.takeWhile { (_, point) -> point.isLoaded }
-		val edge = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
+		val first = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
+		// A gap too short to come down in bouncing on, floor below it and the layer again right after it.
+		fun shortGap(edge: Double) = linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0).boxHasFloor() &&
+			along.firstOrNull { (distance, point) -> distance > edge && distance < edge + MIN_GAP && point.boxHasFloor() } != null
 		// Off its end already, e.g. a glide off it that got cut short. A lane beside a layer of blocks is off it from the
-		// start, while the line still is on it you're still up there.
-		if (edge <= HOP_SCAN_STEP) {
+		// start, while the line still is on it you're still up there. Over a short gap in it, bounced across, still on it.
+		if (first <= HOP_SCAN_STEP && (onCarpets || !shortGap(first))) {
 			if (lane != Vec3d.ZERO && !onCarpets && line.boxHasFloor()) return false
 			offTheLayer()
 			return false
+		}
+		// The next bounce would come down in a gap in it, into the side of the layer after it: glided across.
+		bounceIntoGap(progress(linePoint), lane)?.let { (at, on) ->
+			gapGlide(line, dir, lane, at, on)?.let { across ->
+				commitHop("planGap", across)
+				return true
+			}
+		}
+		// A gap too short to come down in bouncing on, the bounces before it come down past it, is bounced across: what's
+		// past it is what's planned for, e.g. the hole after the layer's end. Carpets, even a short gap is glided across.
+		var edge = first
+		if (!onCarpets) while (shortGap(edge)) {
+			val resume = along.first { (distance, point) -> distance > edge && point.boxHasFloor() }.first
+			edge = along.firstOrNull { (distance, point) -> distance > resume && !point.boxHasFloor() }?.first ?: return false
 		}
 		val at = progress(linePoint) + edge
 		// A hole after it not gotten over yet from far, looked at again a few ticks on, see [layerHole].
@@ -4726,8 +4765,6 @@ abstract class ObstaclePassingMode(
 		// here, see [layerHole].
 		if (!onCarpets && resume == null) layerHole(line, linePoint, dir, edge, lane)?.let { return it }
 		if (deeper) return false
-		// Carpets, even a short gap is glided across: down in it you're stopped at the edge of the next one.
-		if (resume != null && resume - edge < MIN_GAP && !onCarpets) return false
 		if (resume == null) {
 			// Carpets right after a layer of them, down there too close to steer past. Over to a lane free of them
 			// still up here, the layer leaves room for it.
@@ -4980,6 +5017,7 @@ abstract class ObstaclePassingMode(
 		var speed = from
 		var along = progress
 		val rises = mutableListOf<Int>()
+		val fall = GapFall()
 		for (tick in 0 until CAN_HOP_SIM_TICKS) {
 			if (along >= hop.start) break
 			var jumped = false
@@ -4993,12 +5031,16 @@ abstract class ObstaclePassingMode(
 					jumped = true
 				}
 			}
+			val from = along
+			val fromY = y
 			glide(climb, speed, if (jumped) JUMP_PITCH else bounce(y, climb), gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			y += climb
 			along += speed
+			// Down in a gap in the layer there's no bounce off it, see [intoLayerSide].
+			if (intoLayerSide(fall, dir, hop.lane, from, fromY, along, y)) break
 		}
 		return rises.asReversed().take(if (hop.raised.isNotEmpty()) 2 else 1)
 	}
@@ -5078,6 +5120,8 @@ abstract class ObstaclePassingMode(
 		val startY = player.y
 		val startClimb = player.velocity.y
 		val startSpeed = player.velocity.horizontalLength()
+		// Bouncing on up on a layer, down in a gap in it, see [intoLayerSide].
+		val fall = GapFall()
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
 			val touch = hop.touch
 			var jumped = false
@@ -5123,6 +5167,8 @@ abstract class ObstaclePassingMode(
 				speed = s
 			}
 			val wasOnTop = overTop && hop.touch != null
+			val fromAlong = along
+			val fromY = y
 			// The move goes down first, at where the box is: over the top, coming down through its height lands on it, on
 			// the tick the box is over it at all, like the flight's.
 			if (touch != null && !touched && wasOnTop && y >= touch.y && y + climb <= touch.y) {
@@ -5131,6 +5177,14 @@ abstract class ObstaclePassingMode(
 				onTopNow = true
 			} else y += climb
 			along += speed
+			// Bouncing on before it, down in a gap in the layer bounced on, into the side of the next of its blocks.
+			if (fromAlong < hop.start && intoLayerSide(fall, dir, hop.lane, fromAlong, fromY, along, y)) {
+				val ahead = fromAlong - progress
+				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down in a gap in the blocks %.1f ahead, into the side of the next"
+					.format(startY, startClimb, startSpeed, ahead) }
+				hopShort = Double.POSITIVE_INFINITY
+				return false
+			}
 			if (!atWall && along >= hop.obstacle) {
 				atWall = true
 				hopWallSpeed = speed
@@ -5183,6 +5237,122 @@ abstract class ObstaclePassingMode(
 			onLayer && spot.add(0.0, baseY - startPos.y, 0.0).boxHasFloor() -> baseY
 			else -> null
 		}
+	}
+
+	/** Coming down below the top of the layer bounced on over a gap in it, not onto it, see [intoLayerSide]. */
+	private class GapFall {
+		var sinking = false
+	}
+
+	/**
+	 * Whether the move from [from] at [fromY] to [to] at [y] along the line on [lane], bouncing on up on a layer, runs
+	 * into the side of the layer: the move goes down first, where the box is, then across. Over a gap in the layer, a
+	 * missing block will do, nothing stops it at the top, it sinks below it and the next of the layer's blocks is in the
+	 * way across. A box only just over the gap counts, it's flown a little off where the simulation has it. [fall] keeps
+	 * whether it's sinking in one from move to move.
+	 */
+	private fun SafeContext.intoLayerSide(fall: GapFall, dir: Vec3d, lane: Vec3d, from: Double, fromY: Double, to: Double, y: Double): Boolean {
+		if (!onLayer || y >= startPos.y) {
+			fall.sinking = false
+			return false
+		}
+		fun band(along: Double, inset: Double) = startPos.add(dir.multiply(along)).add(lane).let {
+			Box(it.x - 0.29 + inset, max(y, baseY), it.z - 0.29 + inset, it.x + 0.29 - inset, startPos.y, it.z + 0.29 - inset)
+		}
+		// Up on the layer all the way there, only gaps in it with the floor below on the way: not off its end, e.g. down in
+		// a hole beside a pillar in it, that's for the glide over the hole, see [layerHole].
+		fun onTheLayer(along: Double) = startPos.add(dir.multiply(along)).add(lane).add(0.0, baseY - startPos.y, 0.0).boxHasFloor() &&
+			layerGapOn(startPos.add(lane), dir, min(progress(player.pos), from), along) == null
+		// Down through the top this move: onto the layer where it's under you, else into the gap.
+		if (fromY >= startPos.y) fall.sinking = spaceEmpty(band(from, GAP_FALL_MARGIN), hazards = false, border = false) && onTheLayer(from)
+		return fall.sinking && !spaceEmpty(band(to, 0.0), hazards = false, border = false) && onTheLayer(to)
+	}
+
+	/**
+	 * Where along the line the next bounce, bouncing on from [progress] up on a layer, comes down in a gap in it and runs
+	 * into the side of the layer after it, see [intoLayerSide], on [lane] or where you are across the line. Null when it
+	 * comes down on the layer.
+	 */
+	private fun SafeContext.bounceIntoGap(progress: Double, lane: Vec3d): Pair<Double, Vec3d>? {
+		if (!onLayer || onCarpets) return null
+		val dir = getSnappedDir()
+		val across = across(dir)
+		val here = across.multiply(Vec3d(player.x - startPos.x, 0.0, player.z - startPos.z).dotProduct(across))
+		val gravity = player.finalGravity
+		val bounce = bouncePitch()
+		return listOf(lane, here).distinct().firstNotNullOfOrNull { on ->
+			val fall = GapFall()
+			var y = player.y
+			var climb = player.velocity.y
+			var speed = player.velocity.horizontalLength()
+			var along = progress
+			var jumped = player.isOnGround
+			if (jumped) {
+				climb = JUMP_VELOCITY
+				speed += bounceGain()
+			}
+			for (tick in 0 until CAN_HOP_SIM_TICKS) {
+				val from = along
+				val fromY = y
+				glide(climb, speed, if (jumped) JUMP_PITCH else bounce(y, climb), gravity).let { (c, s) ->
+					climb = c
+					speed = s
+				}
+				jumped = false
+				y += climb
+				along += speed
+				if (intoLayerSide(fall, dir, on, from, fromY, along, y)) return@firstNotNullOfOrNull from to on
+				// Down on the layer, or off its end.
+				if (y < startPos.y && !fall.sinking) break
+			}
+			null
+		}
+	}
+
+	/**
+	 * A glide across the gap in the layer [at] along the line on the lane [on] the next bounce would come down in, see
+	 * [bounceIntoGap], on [lane] from [line], held from now: up to then it'd bounce into it. Null when that doesn't make it.
+	 */
+	private fun SafeContext.gapGlide(line: Vec3d, dir: Vec3d, lane: Vec3d, at: Double, on: Vec3d): Hop? {
+		val progress = progress(line)
+		val point = line.add(on)
+		val ahead = at - progress
+		fun floor(distance: Double) = point.add(dir.multiply(distance)).boxHasFloor()
+		val scan = generateSequence(max(HOP_SCAN_STEP, ahead - 1)) { it + HOP_SCAN_STEP }.takeWhile { it <= ahead + MAX_GAP }
+		val edge = scan.firstOrNull { !floor(it) }?.takeIf { it <= ahead + 1 } ?: max(HOP_SCAN_STEP, ahead)
+		val resume = scan.firstOrNull { it > edge && floor(it) } ?: return null
+		val across = planHop(line.add(lane), dir, edge, true, resume - edge + STEP_ON, anyway = true)
+			?.with(stepHeight = layerHeight, lane = lane) ?: run {
+				ElytraFly.debug { "The next bounce comes down in a gap in the blocks %.1f ahead, not gliding across it ($hopRejection)".format(ahead) }
+				return null
+			}
+		if (!canHop(across, progress, 0)) {
+			ElytraFly.debug { "The next bounce comes down in a gap in the blocks %.1f ahead, not gliding across it from here ($hopMiss)".format(ahead) }
+			return null
+		}
+		across.held = true
+		across.heldCheckedAt = flightTicks
+		ElytraFly.debug { "The next bounce comes down in a gap in the blocks %.1f ahead, %.1f long, gliding across it at y %.2f".format(edge, resume - edge, across.feetY) }
+		return across
+	}
+
+	/**
+	 * How far ahead of [lanePoint] up on the layer bounced on, from [from] to [to] ahead, the first gap in it is that's
+	 * not bounced or glided across staying up there: longer than [MAX_GAP], or with no floor below. Null with none.
+	 */
+	private fun SafeContext.layerGapOn(lanePoint: Vec3d, dir: Vec3d, from: Double, to: Double): Double? {
+		fun floor(distance: Double) = lanePoint.add(dir.multiply(distance)).boxHasFloor()
+		var at = from
+		while (at <= to) {
+			if (floor(at)) {
+				at += HOP_SCAN_STEP
+				continue
+			}
+			if (!lanePoint.add(dir.multiply(at)).add(0.0, baseY - lanePoint.y, 0.0).boxHasFloor()) return at
+			val resume = generateSequence(at + HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it <= at + MAX_GAP }.firstOrNull { floor(it) } ?: return at
+			at = resume + HOP_SCAN_STEP
+		}
+		return null
 	}
 
 	/**
@@ -5306,6 +5476,9 @@ abstract class ObstaclePassingMode(
 		hop.heldCheckedAt = flightTicks
 		val speed = player.velocity.horizontalLength()
 		hop.held = when {
+			// Up on a layer, the next bounce would come down in a gap in it, into the side of the layer after it: from now
+			// when that makes it, else it's glided across first, see [gapGlide]. Over a hole that's [lastBounceBefore].
+			!hop.hole && onLayer && bounceIntoGap(progress, hop.lane) != null -> canHop(hop, progress, 0)
 			// Over a hole from the last bounce before it, rising: up there from the jump, not pulling up later. With blocks
 			// in it to get up over, from an earlier one when held from the next one it'd no longer get over them. Looked
 			// at a bit later than that one, a near miss in the simulation doesn't let both slip by. Held from much
@@ -5400,6 +5573,7 @@ abstract class ObstaclePassingMode(
 		var speed = player.velocity.horizontalLength()
 		var along = progress
 		val rises = mutableListOf<Int>()
+		val fall = GapFall()
 		for (tick in 0 until CAN_HOP_SIM_TICKS) {
 			if (along >= hop.start || rises.size >= count) break
 			var jumped = false
@@ -5413,12 +5587,16 @@ abstract class ObstaclePassingMode(
 					jumped = true
 				}
 			}
+			val from = along
+			val fromY = y
 			glide(climb, speed, if (jumped) JUMP_PITCH else bounce(y, climb), gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			y += climb
 			along += speed
+			// Down in a gap in the layer there's no bounce off it, see [intoLayerSide].
+			if (intoLayerSide(fall, dir, hop.lane, from, fromY, along, y)) break
 		}
 		return rises
 	}
@@ -5466,14 +5644,18 @@ abstract class ObstaclePassingMode(
 		var climb = player.velocity.y
 		var speed = player.velocity.horizontalLength()
 		var along = progress
+		val fall = GapFall()
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
+			val from = along
+			val fromY = y
 			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			y += climb
 			along += speed
-			// Coming down where there's no floor there's no next bounce.
+			// Coming down where there's no floor there's no next bounce, nor in a gap in the layer, see [intoLayerSide].
+			if (intoLayerSide(fall, dir, lane, from, fromY, along, y)) return null
 			if (y <= startPos.y) floorAt(dir, along, lane)?.let { if (y <= it) return tick + 1 } ?: return null
 		}
 		return null
@@ -5492,13 +5674,18 @@ abstract class ObstaclePassingMode(
 		var climb = player.velocity.y
 		var speed = player.velocity.horizontalLength()
 		var along = progress
+		val fall = GapFall()
 		repeat(CAN_HOP_SIM_TICKS) {
+			val from = along
+			val fromY = y
 			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			y += climb
 			along += speed
+			// Down in a gap in the layer before it, held from this one, see [intoLayerSide].
+			if (intoLayerSide(fall, dir, hop.lane, from, fromY, along, y)) return true
 			if (y <= startPos.y) {
 				// Down in it, or on its edge or past it, too close to bounce once more.
 				val floor = floorAt(dir, along, hop.lane) ?: return true
