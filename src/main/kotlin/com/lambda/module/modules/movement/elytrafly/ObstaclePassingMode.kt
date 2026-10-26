@@ -1219,9 +1219,19 @@ abstract class ObstaclePassingMode(
 			// No floor in sight, it glides on as far as it can anyway.
 			// Over a magma cube once held it climbs on anyway, missing it by a bit it bumps into it higher up at worst.
 			val makesIt by lazy { hop.open || hop.anyway || hop.cube && hop.held || canGetOver(hop, progress) }
+			// The glide through an opening dropped, its lane goes too: it ends past the wall, steering on along it the wall
+			// would be skipped as passed, see [steerDodge]. Not planned again right away, see [throughOpening].
+			fun dropThread() {
+				if (thread?.hopStart != hop.start) return
+				skipHopAt = hop.start
+				commitNoLane("passObstacles")
+			}
 			when {
 				// Touching down on a top ends the glide until the bounce off it takes off again.
-				!player.isGliding && !(hop.touched && flightTicks - hop.touchedAt <= TOUCH_GRACE_TICKS) -> commitHop("passObstacles", null)
+				!player.isGliding && !(hop.touched && flightTicks - hop.touchedAt <= TOUCH_GRACE_TICKS) -> {
+					dropThread()
+					commitHop("passObstacles", null)
+				}
 				// Past the top without touching down on it, held low for it: planned again from here.
 				hop.touch.let { it != null && !hop.touched && progress > it.range.endInclusive + TOUCH_NEAR } -> {
 					ElytraFly.debug { "Missed the top to touch down on, looking again" }
@@ -1229,6 +1239,7 @@ abstract class ObstaclePassingMode(
 				}
 				inTheWay != null -> {
 					ElytraFly.debug { "In the way %.1f ahead before the obstacle at this speed (${inTheWay.what}), not gliding over it".format(inTheWay.distance + skip) }
+					dropThread()
 					commitHop("passObstacles", null)
 				}
 				// Onto a layer from below, up there as soon as all of the box is over it: down onto it from its start, not its
@@ -1283,6 +1294,7 @@ abstract class ObstaclePassingMode(
 				}
 				!makesIt -> {
 					ElytraFly.debug { "Can't get over the obstacle at %.1f in time ($hopMiss), dodging instead".format(hop.start - progress) }
+					dropThread()
 					skipHopAt = hop.start
 					commitHop("passObstacles", null)
 					if (dodgeAfterMob) commitNoLane("passObstacles")
@@ -2845,6 +2857,11 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.throughOpening(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String): Boolean {
 		if (distance < MIN_DODGE_DISTANCE) return false
+		// Given up on just now, e.g. something in the way before it: not planned again each tick.
+		if (skipHopAt.near(progress(from) + distance)) {
+			openingMiss = "given up on it just now"
+			return false
+		}
 		val across = across(dir)
 		// Like [freeLane], a quarter lane at a time, the opening may be narrower than a lane.
 		val step = laneStep(dir) / 4
