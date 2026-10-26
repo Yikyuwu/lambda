@@ -967,6 +967,8 @@ abstract class ObstaclePassingMode(
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
 		if (slowFor?.let { progress(player.pos) > it } == true || !player.isGliding) commitSlowFor("passObstacles", null)
+		// Past the hole with the top to touch down on, its side isn't kept for anything ahead any more.
+		if (touchSide?.let { progress(player.pos) > it.second } == true) commitTouchSide(null)
 		// Past it, or on a lane or landing for it.
 		if (noLaneAt?.let { progress(player.pos) > it } == true || dodge != null || brakeAt != null || !player.isGliding) noLaneAt = null
 		if (!BaritoneHandler.baritoneAvailable) {
@@ -1459,13 +1461,16 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Commits steering over to [lane], past the obstacle ending [at] along the line, or the [carpets], by [owner]. Always
-	 * true. Also drops the layer the lane was picked to get onto and the opening threaded, and takes over slowing down to
-	 * fit, the lane is dodged on as one that only fits slower until past it, see [fitDodge].
+	 * true. Also drops the layer the lane was picked to get onto. The opening threaded only when it's another lane, that
+	 * one was its plan. Slowing down to fit is taken over only by a lane past what it slows down for, the lane is dodged
+	 * on as one that only fits slower until past it, see [fitDodge]. A lane for something before that, e.g. a hole on the
+	 * way, keeps slowing down for it.
 	 */
 	private fun commitLane(owner: String, lane: Lane, at: Double, carpets: Boolean = false): Boolean {
 		planOwners += owner
 		dodgeUpAt = null
-		thread = null
+		if (lane.target != dodge) thread = null
+		val slowingFor = slowFor
 		dodge = lane.target
 		dodgeLean = lane.lean
 		dodgeOffset = lane.offset
@@ -1474,8 +1479,8 @@ abstract class ObstaclePassingMode(
 		dodgeCarpets = carpets
 		onLane = false
 		dodgeAfterMob = false
-		fitDodge = slowFor != null
-		slowFor = null
+		fitDodge = slowingFor != null
+		if (slowingFor != null && at >= slowingFor - DODGE_MARGIN) slowFor = null
 		return true
 	}
 
@@ -3106,6 +3111,8 @@ abstract class ObstaclePassingMode(
 		// Its lane was picked free past the hole, see [touchLane]. Planned up on a layer with what's on its lane, see
 		// [layerHole]: over to another meanwhile it steered across what's dodged, e.g. a column right beside it.
 		if (hop.touch != null && !hop.touched || hop.fromLayer) return null
+		// Through an opening: the lane is the opening's until through it, its plan is checked on its own, see [threadHold].
+		if (thread.let { it != null && it.hopStart == hop.start && progress < it.wallAt + DODGE_MARGIN }) return null
 		val onLane = current != Vec3d.ZERO
 		val here = Vec3d(player.x, linePoint.y, player.z)
 		val lanePoint = if (onLane) dodgeLanePoint(linePoint, dir) else linePoint
@@ -3124,9 +3131,56 @@ abstract class ObstaclePassingMode(
 		}
 		val (distance, what) = next ?: return null
 		val lane = freeLane(here, linePoint, dir, distance, current)?.takeIf { it.target != current } ?: return null
+		// The lane replaces the one the glide was planned on only with the way over to it free at the height glided at,
+		// [freeLane] looks at bounce height, and not at all up on a layer: over a hole or a block it's glided over, not in
+		// the way, a column beside it is.
+		val across = across(dir)
+		val path = steerPath(here.subtract(linePoint).dotProduct(across), dir, lane.target.dotProduct(across), lane.lean,
+			distance - player.velocity.horizontalLength() * LEAN_TICKS, distance + DODGE_MARGIN, holdSpeed = true)
+		glidePathHit(linePoint, dir, path, distance - 1, hop, progress)?.let { hit ->
+			val text = "Gliding over it, $what %.1f ahead, not over to ${lane.target.describe(dir)} meanwhile, $hit".format(distance)
+			if (text != glideLaneRefused) ElytraFly.debug { text }
+			glideLaneRefused = text
+			return null
+		}
+		glideLaneRefused = ""
 		ElytraFly.debug { "Gliding over it, $what %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(distance) }
 		commitLane("laneFromGlide", lane, progress + distance)
 		return hop.with(lane = lane.target).also { commitHop("laneFromGlide", it) }
+	}
+
+	/** The last lane [laneFromGlide] turned down, for logging it once. */
+	private var glideLaneRefused = ""
+
+	/**
+	 * What's in the way of the box steering along [path] from [linePoint] until [until] along the line, like
+	 * [steerPathHit], at the height it's at there: gliding over [hop], from where it's held or its start to its end, from
+	 * where the feet are now or held, the lower, up to the higher, above what's glided over. Bouncing before and after
+	 * it as high as [steerPathHit] looks. Null when it's free.
+	 */
+	private fun SafeContext.glidePathHit(linePoint: Vec3d, dir: Vec3d, path: List<SteerState>, until: Double, hop: Hop, progress: Double): String? {
+		val across = across(dir)
+		val floorBottom = linePoint.y + passerConfig.minObstacleHeight
+		val floorTop = linePoint.y + if (passerConfig.headHitters) 1.99 else passerConfig.minObstacleHeight + WIDTH_MARGIN
+		val glideBottom = min(player.y, hop.targetY)
+		val glideTop = max(player.y, hop.targetY) + GLIDE_SIZE
+		fun gliding(along: Double) = progress + along <= hop.end && (hop.held || progress + along >= hop.start)
+		fun free(x: Double, z: Double, along: Double): Boolean {
+			val bottom = if (gliding(along)) glideBottom else floorBottom
+			val top = if (gliding(along)) glideTop else floorTop
+			return spaceEmpty(Box(x - GLIDE_SIZE / 2, bottom, z - GLIDE_SIZE / 2, x + GLIDE_SIZE / 2, top, z + GLIDE_SIZE / 2)
+				.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
+		}
+		fun point(state: SteerState) = linePoint.add(dir.multiply(state.along)).add(across.multiply(state.offset))
+		for (i in 0 until path.lastIndex) {
+			if (path[i].along >= until) break
+			val from = point(path[i])
+			val to = point(path[i + 1])
+			val along = path[i + 1].along
+			if (!free(to.x, from.z, along) || !free(from.x, to.z, along) || !free(to.x, to.z, along))
+				return "in the way %.1f ahead on the way over at y %.2f".format(along, if (gliding(along)) glideBottom else floorBottom)
+		}
+		return null
 	}
 
 	/**
