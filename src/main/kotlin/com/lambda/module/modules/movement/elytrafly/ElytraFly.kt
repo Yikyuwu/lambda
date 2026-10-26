@@ -86,6 +86,8 @@ object ElytraFly : Module(
 ) {
     @JvmStatic val mode by setting("Fly Mode", FlyMode.Bounce)
         .onValueChange { from, to ->
+            // Switched while off, neither mode is running: e.g. cancelling Baritone's path would stop someone else's.
+            if (!isEnabled) return@onValueChange
             from.elytraFly.onDisableListeners.forEach { it() }
             to.elytraFly.onEnableListeners.forEach { it() }
         }
