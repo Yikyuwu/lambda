@@ -450,10 +450,10 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val BOUNCE_SPEED_GAIN = 0.2
 		/**
-		 * How many ticks before coming down at most it's looked at whether to bounce on without the sprint jump's push, see
-		 * [slowJumpsAhead]: close to the floor the simulation is the most exact.
+		 * How many of the next bounces [threadHold] looks at holding from: the next one may be too far off still, gliding
+		 * that far it'd stall, while one after it gets there.
 		 */
-		private const val SLOW_JUMP_LEAD_TICKS = 3
+		private const val THREAD_HOLD_RISES = 3
 		/** The pitch the jump tick of a bounce is flown at, level, see BounceElytraFly. */
 		private const val JUMP_PITCH = 0.0
 		/** How high a bounce takes your feet off the floor where nothing else caps it. */
@@ -818,7 +818,7 @@ abstract class ObstaclePassingMode(
 	/** The speed a tick [canHop] found the glide gets to the obstacle at, when it makes it. */
 	private var hopWallSpeed = 0.0
 	/**
-	 * Bouncing without sprinting for the opening of the [Thread] that starts there along the line, see [slowJumpsAhead]:
+	 * Bouncing without sprinting for the opening of the [Thread] that starts there along the line, see [threadHold]:
 	 * each jump then leaves the speed as it is, and bouncing slows down on its own.
 	 */
 	private var slowJumpsFor: Double? = null
@@ -5147,30 +5147,47 @@ abstract class ObstaclePassingMode(
 			// Over a block or a wall, or through an opening in one: one more bounce while from it it still gets over,
 			// taking off from the floor up there faster than pulling up gliding. Through one that only fits slower, from
 			// the last bounce on that still gets there slow enough.
-			else -> threadHold(hop, progress) || hop.start - progress <= speed * leadTicks(hop) && !fromNextBounce(hop, progress)
+			else -> threadHold(hop, progress) ?: (hop.start - progress <= speed * leadTicks(hop) && !fromNextBounce(hop, progress))
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
 	}
 
 	/**
-	 * Whether to hold the height for [hop] through an opening that only fits slower than you may get there, see [Thread]:
-	 * holding it the glide slows down, sprint jumps speed you up, and slowing down while bouncing doesn't, each sprint
-	 * jump gives back more than looking up takes. Bounces without the sprint do slow down, about half as fast a block as
-	 * holding, so from the bounce it'd be held from otherwise it bounces on without, see [slowJumpsAhead], and holds from a
-	 * later one: in the simulator 25 instead of 68 blocks held, there as soon. Held from now when from the next bounce
-	 * on it'd get there too fast. Too fast even so, e.g. sped up a lot after it was planned, it lands before it while
-	 * there's room.
+	 * Whether to hold the height for [hop] through an opening that only fits slower than you may get there, see [Thread],
+	 * null when it's no such opening. Holding it the glide slows down, about 0.013 a block, sprint jumps speed you up,
+	 * bounces without the sprint slow down about half as fast as holding. So bouncing on as long as holding from one of
+	 * the next few bounces still gets there slow enough, with the sprint while that does, else without it, and held from
+	 * the latest bounce, rising, arriving close to as fast as it fits: in the simulator from 0.8 to 1.7 a tick always
+	 * through, at 0.84 instead of 0.60 to 0.83 on average, held up to 12 blocks shorter. Without the sprint only when a
+	 * later bounce then still makes it, else held from now. Too fast even so, e.g. sped up a lot after it was planned,
+	 * it lands before it while there's room.
 	 */
-	private fun SafeContext.threadHold(hop: Hop, progress: Double): Boolean {
-		val thread = thread?.takeIf { it.hopStart == hop.start && it.maxSpeed.isFinite() } ?: return false
-		// From a bounce only, rising: held from coming down it'd pull up from low, that costs the most speed.
+	private fun SafeContext.threadHold(hop: Hop, progress: Double): Boolean? {
+		val thread = thread?.takeIf { it.hopStart == hop.start && it.maxSpeed.isFinite() } ?: return null
+		val slow = slowJumpsFor == thread.hopStart
+		val rises = risesAhead(progress, hop, THREAD_HOLD_RISES)
+		// Once held no sprint jump pushes you on bouncing off the floor on the way.
+		fun now() = canHop(hop, progress, 0, gain = 0.0)
+		// Coming down: held from a bounce only, rising, pulling up from low costs the most speed. Unless from none of the
+		// next bounces it gets over at all any more.
 		if (!player.isOnGround && player.velocity.y <= 0) {
-			if (slowJumpsFor != thread.hopStart && slowJumpsAhead(hop, progress, thread)) slowJumpsFor = thread.hopStart
+			if (rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) }) return false
+			if (!now() && hop.start - progress > player.velocity.horizontalLength() * leadTicks(hop)) return false
+			ElytraFly.debug { "Holding the height %.1f before the opening at %.2f coming down, from no later bounce it gets up there".format(
+				thread.wallAt - progress, player.velocity.horizontalLength()) }
+			slowJumpsFor = thread.hopStart
+			return true
+		}
+		fun later(gain: Double) = rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, gain = gain) && hopWallSpeed <= thread.maxSpeed }
+		if (!slow && later(BOUNCE_SPEED_GAIN)) return false
+		if (later(0.0)) {
+			if (!slow) ElytraFly.debug { "Bouncing on without the sprint %.1f before the opening at %.2f, holding from a later bounce it gets there slow enough, it fits up to %.2f".format(
+				thread.wallAt - progress, player.velocity.horizontalLength(), thread.maxSpeed) }
+			slowJumpsFor = thread.hopStart
 			return false
 		}
-		val later = nextRise(progress, hop.lane)?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) && hopWallSpeed <= thread.maxSpeed } == true
-		if (later || !canHop(hop, progress, 0)) return false
+		if (!now()) return false
 		if (hopWallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN && thread.wallAt - progress > brakeDistance()) {
 			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, it fits up to %.2f".format(
 				thread.wallAt - progress, hopWallSpeed, thread.maxSpeed))
@@ -5178,23 +5195,7 @@ abstract class ObstaclePassingMode(
 		}
 		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f, to get there at %.2f, it fits up to %.2f".format(
 			thread.wallAt - progress, player.velocity.horizontalLength(), hopWallSpeed, thread.maxSpeed) }
-		// Bouncing off the floor on the way, not pushed on either.
 		slowJumpsFor = thread.hopStart
-		return true
-	}
-
-	/**
-	 * Whether to bounce on without the sprint jump's push from the next bounce, coming down for it within
-	 * [SLOW_JUMP_LEAD_TICKS]: when sprinting on, [threadHold] would hold from that bounce, holding from the one after it
-	 * would get there too fast. Not where that one would no longer get over at all, far off the glide is too long.
-	 */
-	private fun SafeContext.slowJumpsAhead(hop: Hop, progress: Double, thread: Thread): Boolean {
-		val rises = risesAhead(progress, hop, 2)
-		val next = rises.firstOrNull()?.takeIf { it <= SLOW_JUMP_LEAD_TICKS } ?: return false
-		val later = rises.getOrNull(1)?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, gain = BOUNCE_SPEED_GAIN) && hopWallSpeed <= thread.maxSpeed } == true
-		if (later || !canHop(hop, progress, next + NEXT_BOUNCE_MARGIN, gain = BOUNCE_SPEED_GAIN)) return false
-		ElytraFly.debug { "Bouncing on without the sprint %.1f before the opening at %.2f, sprinting it'd hold from the next bounce, it fits up to %.2f".format(
-			thread.wallAt - progress, player.velocity.horizontalLength(), thread.maxSpeed) }
 		return true
 	}
 
