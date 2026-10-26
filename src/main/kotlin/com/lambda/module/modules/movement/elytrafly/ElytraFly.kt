@@ -114,6 +114,10 @@ object ElytraFly : Module(
 
     private const val GRIM_ROCKET_BOOST_RESCALE = 1.65
     const val TRACE_TICKS = 10
+    /** The gliding bit of the entity flags (data 0). */
+    private const val GLIDING_FLAG = 0x80
+    /** How far around to list the mobs when the server ends the glide in the air. */
+    private const val GLIDE_END_RADIUS = 8.0
     /** This many setbacks within [SETBACK_WINDOW_MS] stop it, it's stuck. */
     private const val MAX_SETBACKS = 5
     private const val SETBACK_WINDOW_MS = 2000L
@@ -280,8 +284,19 @@ object ElytraFly : Module(
             if (!debugLog) return@listen
             // What the server says about you, e.g. that it ended your glide.
             when (val packet = event.packet) {
-                is EntityTrackerUpdateS2CPacket -> if (packet.id == player.id)
+                is EntityTrackerUpdateS2CPacket -> if (packet.id == player.id) {
                     traceLine("  received data ${packet.trackedValues.joinToString { "${it.id}=${it.value}" }}")
+                    // The glide ended by the server mid-flight, set back soon after. Whether mobs around have to do with it.
+                    val flags = packet.trackedValues.firstOrNull { it.id == 0 }?.value as? Byte
+                    if (flags != null && flags.toInt() and GLIDING_FLAG == 0) runGameScheduled {
+                        if (!player.isOnGround) debug {
+                            val near = world.getOtherEntities(player, player.boundingBox.expand(GLIDE_END_RADIUS)).joinToString {
+                                "${EntityType.getId(it.type).path} %.1f away".format(it.distanceTo(player))
+                            }
+                            "The server ended the glide in the air, mobs within $GLIDE_END_RADIUS: [$near]"
+                        }
+                    }
+                }
                 is EntityVelocityUpdateS2CPacket -> if (packet.entityId == player.id) traceLine("  received velocity")
                 else -> {}
             }
