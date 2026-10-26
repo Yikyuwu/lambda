@@ -1505,6 +1505,8 @@ abstract class ObstaclePassingMode(
 					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
 					return false
 				}
+				// Too fast for the opening, landing to come in slower just now, see [threadHold]: nothing commits another way.
+				brakeAt != null -> return false
 				// A magma cube isn't dodged, it's looked at again from the next bounce on until it's close.
 				!makesIt && hop.cube && hop.start - progress > player.velocity.horizontalLength() * HOP_LEAD_TICKS -> {
 					noLaneYet(hop.obstacle, "Can't get over the mob at %.1f from here ($hopMiss), bouncing on to look again".format(hop.start - progress))
