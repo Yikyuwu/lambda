@@ -2277,7 +2277,7 @@ abstract class ObstaclePassingMode(
 		val lane = across.multiply(thread.centre)
 		dodgeTo(Lane(lane, 0, thread.centre), over.end)
 		hop = over.with(lane = lane)
-		this.thread = thread
+		this@ObstaclePassingMode.thread = thread
 		return true
 	}
 
