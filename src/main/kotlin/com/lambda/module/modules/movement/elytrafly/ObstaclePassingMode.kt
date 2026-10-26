@@ -1574,15 +1574,16 @@ abstract class ObstaclePassingMode(
 								else "no floor at %.2f %.2f %.2f (${spot.blocksAround()})".format(spot.x, spot.y, spot.z)
 							}
 							// Down on the floor, a hole on the way there it'd fall into. A short one is glided over on the lane.
-							?: if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
+							// In brackets, else up on a layer the looks after it would be skipped too.
+							?: (if (onLayer) null else generateSequence(HOP_SCAN_STEP) { it + HOLE_SCAN_STEP }.takeWhile { it < distance }
 								.firstOrNull { !lane.add(dir.multiply(it)).let { spot -> !spot.isLoaded || spot.boxHasFloor() } }
 								?.takeUnless { hole -> lane.add(dir.multiply(hole)).floorWithin(dir, MAX_HOLE_LENGTH) }
-								?.let { "a hole %.1f ahead".format(it) }
+								?.let { "a hole %.1f ahead".format(it) })
 							// The lanes crossed on the way over, during the swing. Before [lead], where nothing's in the way.
-							?: if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
+							?: (if (lead > 0) null else (minOf(offset, currentOffset) + 1 until maxOf(offset, currentOffset)).firstNotNullOfOrNull {
 								linePoint.add(across.multiply(it * laneStep)).obstacleHit(dir, DODGE_STEER_AHEAD, mobs = mobs)
 									?.let { hit -> "${hit.what} ahead crossing over" }
-							}
+							})
 							// The way over itself until passing, farther than those look: the swing over to a lane a block or two off
 							// takes 20 or more, and from where it's as good as on it, it still closes in on it, short of where it passes.
 							?: if (lead > 0) null else steerPathHit(linePoint, dir, path, max(reached, distance - 1))
