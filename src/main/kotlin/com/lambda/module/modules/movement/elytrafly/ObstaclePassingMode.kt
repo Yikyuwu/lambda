@@ -283,8 +283,6 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val UNDER_HOLD_BLOCKS_PER_SPEED = 62.0
 		private const val UNDER_HOLD_END_SPEED = 0.4
-		/** Gliding under something this long is always looked at, slow the bounces before it may speed you up. */
-		private const val UNDER_MIN_LENGTH = 8.0
 		/**
 		 * The speed a tick gliding over a magma cube high in the room above it has to leave you with, else it's glided
 		 * over low. Gliding over it costs speed, too slow after it another cube right behind can't be got over.
@@ -4384,9 +4382,9 @@ abstract class ObstaclePassingMode(
 		var onFloor = step
 		// Carpets a few ticks apart are one: gliding over one ends low, coming down, too late to get up over the next.
 		val maxGap = if (carpets) max(HOP_GAP, player.velocity.horizontalLength() * CARPET_GAP_TICKS) else HOP_GAP
-		// Only overhead so far, glided under: as far as gliding in low gets before it's down on the floor, with the room
-		// after it. Short ones are left to [canGetOver], slow the bounces before it may still speed you up.
-		val underLength = max(UNDER_MIN_LENGTH, UNDER_HOLD_BLOCKS_PER_SPEED * (player.velocity.horizontalLength() - UNDER_HOLD_END_SPEED)) + maxGap
+		// Only overhead so far, glided under: fast, as far as gliding in low gets before it's down on the floor, with the
+		// room after it. Not less, slow the bounces before it may still speed you up, that's up to [canGetOver].
+		val underLength = max(MAX_HOLE_LENGTH, UNDER_HOLD_BLOCKS_PER_SPEED * (player.velocity.horizontalLength() - UNDER_HOLD_END_SPEED) + maxGap)
 		// Onto a layer to bounce on, only up to a bit onto it.
 		if (step) end = distance + length
 		else while (gap < maxGap) {
