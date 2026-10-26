@@ -545,10 +545,7 @@ class BounceElytraFly(
 	}
 
 	fun getModifiedVelocity(original: Vec3d) =
-		runSafe {
-			if (!yMotion) return@runSafe original
-			else Vec3d(original.x, 0.0, original.z)
-		} ?: original
+		runSafe { if (yMotion) Vec3d(original.x, 0.0, original.z) else original } ?: original
 
 	override fun isGliding() =
 		runSafe {

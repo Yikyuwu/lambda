@@ -5226,25 +5226,35 @@ abstract class ObstaclePassingMode(
 	 * last, from the one before it too with blocks in it to get up over like [holdingFor] holds. Like [canHop] bounces,
 	 * no floor ends it.
 	 */
-	private fun SafeContext.risesBefore(hop: Hop, progress: Double, from: Double = simSpeed()): List<Int> {
+	private fun SafeContext.risesBefore(hop: Hop, progress: Double, from: Double = simSpeed()): List<Int> =
+		bounceRises(hop, progress, simY(), simClimb(), from, bounceGain()).asReversed().take(if (hop.raised.isNotEmpty()) 2 else 1)
+
+	/**
+	 * In how many ticks the bounces off the floor before [hop] rise, bouncing on from [progress] from [startY] climbing
+	 * at [startClimb] at [startSpeed] like [canHop] does, each speeding you up by [gain]: the first [count] of them. Fewer
+	 * where there's no floor, down in a gap in the layer, or it gets there first.
+	 */
+	private fun SafeContext.bounceRises(
+		hop: Hop, progress: Double, startY: Double, startClimb: Double, startSpeed: Double, gain: Double, count: Int = Int.MAX_VALUE,
+	): List<Int> {
 		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
-		var y = simY()
-		var climb = simClimb()
-		var speed = from
+		var y = startY
+		var climb = startClimb
+		var speed = startSpeed
 		var along = progress
 		val rises = mutableListOf<Int>()
 		val fall = GapFall()
 		for (tick in 0 until CAN_HOP_SIM_TICKS) {
-			if (along >= hop.start) break
+			if (along >= hop.start || rises.size >= count) break
 			var jumped = false
 			if (y <= startPos.y && climb <= 0) {
 				val floor = floorAt(dir, along, hop.lane) ?: break
 				if (y <= floor) {
 					y = floor
 					climb = JUMP_VELOCITY
-					speed += bounceGain()
+					speed += gain
 					rises += tick
 					jumped = true
 				}
@@ -5260,7 +5270,7 @@ abstract class ObstaclePassingMode(
 			// Down in a gap in the layer there's no bounce off it, see [intoLayerSide].
 			if (intoLayerSide(fall, dir, hop.lane, from, fromY, along, y)) break
 		}
-		return rises.asReversed().take(if (hop.raised.isNotEmpty()) 2 else 1)
+		return rises
 	}
 
 	/**
@@ -5369,13 +5379,13 @@ abstract class ObstaclePassingMode(
 		var atWall = progress >= hop.obstacle
 		if (atWall) hopWallSpeed = from
 		// Where it started, for [hopMiss].
-		val startY = simY()
-		val startClimb = simClimb()
+		val startY = y
+		val startClimb = climb
 		val startSpeed = simSpeed()
 		// Bouncing on up on a layer, down in a gap in it, see [intoLayerSide].
 		val fall = GapFall()
+		val touch = hop.touch
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
-			val touch = hop.touch
 			var jumped = false
 			// Down on the top to touch down on, bounced off it like the floor. From then on it keeps the height it has.
 			if (touch != null && !touched && (onTopNow || along in touch.range && y <= touch.y && climb <= 0)) {
@@ -5410,7 +5420,7 @@ abstract class ObstaclePassingMode(
 			if (holding && hop.hole && (y >= hop.targetY - TOPPED_MARGIN || rose && climb <= 0)) topped = true
 			if (holding && climb > 0) rose = true
 			// Like the flight: skimming just above the top to touch down on until over it, then down onto it, see [hopPitch].
-			val overTop = hop.touch?.range?.contains(along) ?: true
+			val overTop = touch?.range?.contains(along) ?: true
 			val dive = hop.diving(along, speed, touched)
 			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, topped, touched, dive, overTop), gravity,
 				hop.sinkAt(dive && overTop)) else if (jumped) JUMP_PITCH else bounce(y, climb)
@@ -5418,7 +5428,7 @@ abstract class ObstaclePassingMode(
 				climb = c
 				speed = s
 			}
-			val wasOnTop = overTop && hop.touch != null
+			val wasOnTop = overTop && touch != null
 			val fromAlong = along
 			val fromY = y
 			// The move goes down first, at where the box is: over the top, coming down through its height lands on it, on
@@ -5442,12 +5452,12 @@ abstract class ObstaclePassingMode(
 				hopWallSpeed = speed
 			}
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
-			val onTop = hop.touch?.range?.contains(along) == true
+			val onTop = touch?.range?.contains(along) == true
 			// Coming over it lower than its top runs into its side.
-			if (onTop && !wasOnTop && !touched && y < hop.touch!!.y) {
+			if (onTop && !wasOnTop && !touched && y < touch!!.y) {
 				val atY = y
 				val ahead = along - progress
-				val topY = hop.touch.y
+				val topY = touch.y
 				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, below the top at y %.2f to touch down on"
 					.format(startY, startClimb, startSpeed, atY, ahead, topY) }
 				// Not a near miss to go for anyway, see [hopShort].
@@ -5774,7 +5784,7 @@ abstract class ObstaclePassingMode(
 	 * from 0.8 to 1.8 a tick with the opening first seen 57 to 64 ahead always through.
 	 */
 	private fun SafeContext.threadHold(hop: Hop, progress: Double): Boolean? {
-		val thread = thread?.takeIf { it.hopStart == hop.start && it.maxSpeed.isFinite() } ?: return null
+		val thread = thread?.takeIf { threaded(hop) } ?: return null
 		val slow = slowJumpsFor == thread.hopStart
 		val rises = risesAhead(progress, hop, THREAD_HOLD_RISES)
 		fun later(gain: Double) = rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, gain = gain) && hopWallSpeed <= thread.maxSpeed }
@@ -5835,8 +5845,9 @@ abstract class ObstaclePassingMode(
 		var speed = simSpeed()
 		var along = progress
 		repeat(CAN_HOP_SIM_TICKS) {
-			val pitch = fromChainStart(ChainStart(y, climb, speed)) { shedPitch(hop, maxSpeed, along) }
-				?: return fromChainStart(ChainStart(y, climb, speed)) { canHop(hop, along, 0, gain = 0.0, turn = true) && hopWallSpeed <= maxSpeed }
+			val here = ChainStart(y, climb, speed)
+			val pitch = fromChainStart(here) { shedPitch(hop, maxSpeed, along) }
+				?: return fromChainStart(here) { canHop(hop, along, 0, gain = 0.0, turn = true) && hopWallSpeed <= maxSpeed }
 			glide(climb, speed, pitch, gravity, turn = true).let { (c, s) ->
 				climb = c
 				speed = s
@@ -5860,10 +5871,11 @@ abstract class ObstaclePassingMode(
 		val speed = simSpeed()
 		val low = hop.targetY - SHED_BAND
 		val high = hop.targetY + SHED_BAND
+		val gravity = player.finalGravity
 		// Rising off the floor only just, the server may not glide yet and moves you like a jump: held plainly there.
-		val pitch = if (climb > 0 && y - startPos.y < SHED_RISE) holdPitch(y, climb, speed, hop.targetY, player.finalGravity)
-			else flapPitch(y, climb, speed, low, high, player.finalGravity)
-		val (nextClimb, nextSpeed) = glide(climb, speed, pitch, player.finalGravity, turn = true)
+		val pitch = if (climb > 0 && y - startPos.y < SHED_RISE) holdPitch(y, climb, speed, hop.targetY, gravity)
+			else flapPitch(y, climb, speed, low, high, gravity)
+		val (nextClimb, nextSpeed) = glide(climb, speed, pitch, gravity, turn = true)
 		if (along + nextSpeed * (1 + SHED_CLEAR_TICKS) >= hop.start) return null
 		val at = startPos.add(getSnappedDir().multiply(along + nextSpeed)).add(hop.lane)
 		val half = GLIDE_SIZE / 2
@@ -5887,42 +5899,8 @@ abstract class ObstaclePassingMode(
 	 * In how many ticks the next [count] bounces off the floor before [hop] rise, sprinting, bouncing on from here at
 	 * [progress] like [canHop] does. Fewer where there's no floor or it gets there first.
 	 */
-	private fun SafeContext.risesAhead(progress: Double, hop: Hop, count: Int): List<Int> {
-		val dir = getSnappedDir()
-		val gravity = player.finalGravity
-		val bounce = bouncePitch()
-		var y = player.y
-		var climb = player.velocity.y
-		var speed = player.velocity.horizontalLength()
-		var along = progress
-		val rises = mutableListOf<Int>()
-		val fall = GapFall()
-		for (tick in 0 until CAN_HOP_SIM_TICKS) {
-			if (along >= hop.start || rises.size >= count) break
-			var jumped = false
-			if (y <= startPos.y && climb <= 0) {
-				val floor = floorAt(dir, along, hop.lane) ?: break
-				if (y <= floor) {
-					y = floor
-					climb = JUMP_VELOCITY
-					speed += BOUNCE_SPEED_GAIN
-					rises += tick
-					jumped = true
-				}
-			}
-			val from = along
-			val fromY = y
-			glide(climb, speed, if (jumped) JUMP_PITCH else bounce(y, climb), gravity).let { (c, s) ->
-				climb = c
-				speed = s
-			}
-			y += climb
-			along += speed
-			// Down in a gap in the layer there's no bounce off it, see [intoLayerSide].
-			if (intoLayerSide(fall, dir, hop.lane, from, fromY, along, y)) break
-		}
-		return rises
-	}
+	private fun SafeContext.risesAhead(progress: Double, hop: Hop, count: Int) =
+		bounceRises(hop, progress, player.y, player.velocity.y, player.velocity.horizontalLength(), BOUNCE_SPEED_GAIN, count)
 
 	/** Not sprinting, see [noSprint], a bounce leaves the speed as it is. Else the sprint jump pushes you on. */
 	private fun sprintOff() = slowingToFit || slowJumpsFor != null && thread?.let { it.hopStart == slowJumpsFor && it.maxSpeed.isFinite() } == true
@@ -6642,24 +6620,30 @@ abstract class ObstaclePassingMode(
 	 * The yaw over [hop], onto its lane. Tilted the way the dodge is, the box swinging out touching down only to that
 	 * side, away from what's dodged.
 	 */
-	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double): Double = when {
-		thread.let { it != null && progress < it.wallAt + DODGE_MARGIN && it.hopStart == hop.start } && hop.lane == dodge -> threadYaw(linePoint, dir, progress, thread ?: return steerYaw(linePoint, hop.lane, dir))
-		// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].
-		// Steering out farther still if need be, not in.
-		hop.hole && hop.touch?.leans?.any { progress in it } == true &&
-			abs(player.pos.subtract(linePoint).dotProduct(across(dir)) - hop.lane.dotProduct(across(dir))) <= TOUCH_LANE_OFF -> {
-			val side = hop.lane.dotProduct(across(dir)).let { if (abs(it) < 1e-6) 0.0 else sign(it) }
-			val steer = steerYaw(linePoint, hop.lane, dir)
-			val lean = leanYaw(dir, side.toInt())
-			fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across(dir)) * side
-			if (out(steer) > out(lean)) steer else lean
-		}
+	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double): Double {
+		val threading = thread?.takeIf { progress < it.wallAt + DODGE_MARGIN && it.hopStart == hop.start && hop.lane == dodge }
+		return when {
+			threading != null -> threadYaw(linePoint, dir, progress, threading)
+			// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].
+			// Steering out farther still if need be, not in.
+			hop.hole && hop.touch?.leans?.any { progress in it } == true &&
+				abs(player.pos.subtract(linePoint).dotProduct(across(dir)) - hop.lane.dotProduct(across(dir))) <= TOUCH_LANE_OFF -> {
+				val side = hop.lane.dotProduct(across(dir)).let { if (abs(it) < 1e-6) 0.0 else sign(it) }
+				fartherOut(steerYaw(linePoint, hop.lane, dir), leanYaw(dir, side.toInt()), across(dir), side)
+			}
 		// On the lane with the top to touch down on until bounced off it, see [touchLane]. Beside an obstacle only shortly
 		// before it, see [laneTouch].
-		hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) ->
-			steerYaw(linePoint, if (progress < hop.touch.switchAt) hop.lane else hop.touch.lane, dir)
-		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
-		else -> steerYaw(linePoint, hop.lane, dir)
+			hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) ->
+				steerYaw(linePoint, if (progress < hop.touch.switchAt) hop.lane else hop.touch.lane, dir)
+			dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
+			else -> steerYaw(linePoint, hop.lane, dir)
+		}
+	}
+
+	/** Whichever of the yaws [a] and [b] heads farther out to [side] of the line, across it [across], [b] when even. */
+	private fun fartherOut(a: Double, b: Double, across: Vec3d, side: Double): Double {
+		fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across) * side
+		return if (out(a) > out(b)) a else b
 	}
 
 	/**
@@ -6684,9 +6668,7 @@ abstract class ObstaclePassingMode(
 		val target = centre - if (last) 0.0 else thread.lean * THREAD_PRE
 		val steer = steerYaw(linePoint, across.multiply(target), dir)
 		if (!last || thread.lean == 0) return steer
-		val tilted = leanYaw(dir, thread.lean, THREAD_TILT)
-		fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across) * thread.lean
-		return if (out(steer) > out(tilted)) steer else tilted
+		return fartherOut(steer, leanYaw(dir, thread.lean, THREAD_TILT), across, thread.lean.toDouble())
 	}
 
 	/**
@@ -6807,11 +6789,10 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.pathToValidPoint(startSearchPos: Vec3d, dir: Vec3d, guaranteeOneSkip: Boolean = true, carpets: Boolean = false): Boolean {
 		// Touching down between bounces you still glide. Walking off like that, packets are held back and the sprint is
 		// kept, the server takes your input and speed wrong and sets back every step. So land first, like for a brake.
-		if (!landed && player.getFlag(Entity.GLIDING_FLAG_INDEX))
-			return brake(progress(startSearchPos) + if (guaranteeOneSkip) 1.0 else 0.0, "Still gliding", carpets)
+		val first = if (guaranteeOneSkip) 1.0 else 0.0
+		if (!landed && player.getFlag(Entity.GLIDING_FLAG_INDEX)) return brake(progress(startSearchPos) + first, "Still gliding", carpets)
 		// Block by block. Best a spot with room to take off again after it, walking through all that's in the way at
 		// once. Else, among obstacles close together, the first spot to stand with a few free after it.
-		val first = if (guaranteeOneSkip) 1.0 else 0.0
 		// On the floor you started on, also from up on a layer. Layers are only bounced on, taking off is from the floor.
 		val spots = generateSequence(first) { it + 1 }
 			.takeWhile { it <= if (carpets) CARPET_WALK_REACH else MAX_PASS_STEPS * passerConfig.obstacleLookAhead.toDouble() }
@@ -6827,8 +6808,7 @@ abstract class ObstaclePassingMode(
 			// Room after it to take off and get up to speed short of more of them, else as far on through them as you can.
 			spots.firstOrNull { !it.isObstructed(dir, CARPET_TAKEOFF_CLEAR, true) } ?: spots.lastOrNull { !it.isObstructed(dir, WALK_GOAL_CLEAR) }
 		else spots.firstOrNull { !it.isObstructed(dir) } ?: spots.firstOrNull { !it.isObstructed(dir, WALK_GOAL_CLEAR) }
-		if (goal == null) return passFailed()
-		return passTo(goal)
+		return if (goal == null) passFailed() else passTo(goal)
 	}
 
 	/**
@@ -6889,11 +6869,8 @@ abstract class ObstaclePassingMode(
 
 	context(safeContext: SafeContext)
 	private fun Vec3d.isObstructed(direction: Vec3d, distance: Double = passerConfig.obstacleLookAhead.toDouble(), carpets: Boolean = false) =
-		if (!isLoaded) false
-		else {
-			!boxHasFloor(false) || blockedLow(direction, distance) || passerConfig.headHitters && blockedHigh(direction, distance) ||
-				carpets && alongWidth(direction, CARPET_RAY, distance)
-		}
+		isLoaded && (!boxHasFloor(false) || blockedLow(direction, distance) || passerConfig.headHitters && blockedHigh(direction, distance) ||
+			carpets && alongWidth(direction, CARPET_RAY, distance))
 
 	/**
 	 * Rays along both edges of your width as well, a block beside the middle one still hits you.
