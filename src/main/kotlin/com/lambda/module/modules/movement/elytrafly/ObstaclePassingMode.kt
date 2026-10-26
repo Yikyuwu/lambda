@@ -1489,6 +1489,8 @@ abstract class ObstaclePassingMode(
 						else -> ElytraFly.debug { "Over it" }
 					}
 					commitHop("passObstacles", null)
+					// Through the opening, the bounces on are sprinted again, see [sprintOff].
+					if (thread?.hopStart == hop.start) commitThread("passObstacles", null)
 					if (!hop.step && !hop.down) hop.then?.let { flyThen(it, snappedDir) }
 				}
 				// The hole after the layer, planned from up on it, not made any more before it's held, e.g. slower than
@@ -1862,8 +1864,8 @@ abstract class ObstaclePassingMode(
 		dodgeUpAt = at
 	}
 
-	/** Commits going through the opening [thread], on the lane committed to for it, by [owner]. */
-	private fun commitThread(owner: String, thread: Thread) {
+	/** Commits going through the opening [thread], on the lane committed to for it, none with null, by [owner]. */
+	private fun commitThread(owner: String, thread: Thread?) {
 		planOwners += owner
 		this.thread = thread
 	}
