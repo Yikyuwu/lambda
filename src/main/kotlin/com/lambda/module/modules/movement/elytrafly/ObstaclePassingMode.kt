@@ -2463,14 +2463,16 @@ abstract class ObstaclePassingMode(
 					height = top
 				}
 				start != null && top != height -> {
-					if (along - start >= MIN_TOUCH) return Touch(start..along - HOP_SCAN_STEP, height, lane)
+					// Its edges halfway between the steps looked at, where they really are about: cut off at the last
+					// step, a tick at speed jumped over it all on a line along an axis.
+					if (along - start >= MIN_TOUCH) return Touch(start - HOP_SCAN_STEP / 2..along - HOP_SCAN_STEP / 2, height, lane)
 					start = if (top != null) along else null
 					top?.let { height = it }
 				}
 			}
 			along += HOP_SCAN_STEP
 		}
-		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it..to, height, lane) }
+		return start?.takeIf { to - it >= MIN_TOUCH }?.let { Touch(it - HOP_SCAN_STEP / 2..to, height, lane) }
 	}
 
 	/**
