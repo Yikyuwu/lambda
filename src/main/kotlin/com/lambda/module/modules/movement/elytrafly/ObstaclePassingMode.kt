@@ -21,6 +21,7 @@ import baritone.api.pathing.goals.GoalBlock
 import com.lambda.config.Config
 import com.lambda.config.ConfigBlock
 import com.lambda.context.SafeContext
+import com.lambda.event.events.PacketEvent
 import com.lambda.event.events.TickEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
@@ -46,12 +47,16 @@ import com.lambda.util.world.raycast.RayCastUtils.rayCast
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import net.minecraft.block.BlockState
+import net.minecraft.block.CampfireBlock
 import net.minecraft.block.Blocks
 import net.minecraft.block.ShapeContext
 import net.minecraft.client.MinecraftClient
 import net.minecraft.entity.Entity
+import net.minecraft.entity.effect.StatusEffects
 import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
+import net.minecraft.network.packet.s2c.play.EntityVelocityUpdateS2CPacket
+import net.minecraft.network.packet.s2c.play.ExplosionS2CPacket
 import net.minecraft.registry.Registries
 import net.minecraft.registry.tag.FluidTags
 import net.minecraft.util.math.BlockPos
@@ -304,7 +309,7 @@ abstract class ObstaclePassingMode(
 		/** How far before a dip bounced on down into its start may be seen from another spot, the same dip, see [dipAt]. */
 		private const val DIP_AGAIN = 1.5
 		/** Blocks besides lava that hurt or hold you without stopping you, see [isHazard]. */
-		private val HAZARDS = setOf(Blocks.FIRE, Blocks.SOUL_FIRE, Blocks.COBWEB, Blocks.SWEET_BERRY_BUSH, Blocks.WITHER_ROSE, Blocks.POWDER_SNOW)
+		private val HAZARDS = setOf(Blocks.FIRE, Blocks.SOUL_FIRE, Blocks.COBWEB, Blocks.SWEET_BERRY_BUSH, Blocks.WITHER_ROSE, Blocks.POWDER_SNOW, Blocks.CACTUS)
 		/** How many ticks before the box comes over the top it skims down to just above it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM_TICKS = 4
 		/** How far before and past where the lane planned crosses the top it may come over it, see [hopPitch]. */
@@ -416,6 +421,17 @@ abstract class ObstaclePassingMode(
 		private const val LEAN_TICKS = 20
 		/** How far apart the rays across the way are, close enough that no block corner slips between them. */
 		private const val RAY_SPACING = 0.25
+		/**
+		 * How much wider across the way a block narrower than a whole one is to the rays, e.g. a glass pane, iron bars, a
+		 * chain or bamboo standing alone: a post that thin fits between two of them, see [blockRay].
+		 */
+		private const val POST_MARGIN = RAY_SPACING / 2
+		/** How long after a knockback a bump into a wall is taken for the knockback's, not walked on from, see [knockedBack]. */
+		private const val KNOCKBACK_GRACE_TICKS = 5
+		/** How much the server has to change your speed for it to be a knockback, not just your speed told back. */
+		private const val KNOCKBACK_MIN_CHANGE = 0.1
+		/** Slower than this after a bump, you're stopped against the wall, knocked back or not. */
+		private const val STOPPED_SPEED = 0.05
 		/** How far above two blocks over the floor the top of a bounce goes, bumping a roof there. */
 		private const val ROOF_BUMP = 0.1
 		/** How far around you entities as solid as blocks, e.g. boats, are looked for, as far as the planner looks. */
@@ -972,6 +988,30 @@ abstract class ObstaclePassingMode(
 		}
 		// Setbacks come in on the network thread, what's planned is changed on the game thread only.
 		onFlag { runGameScheduled { flagged(); logPlan() } }
+		// Knockback, e.g. a mob's hit or an explosion, also on the network thread. A setback comes as a position instead.
+		listen<PacketEvent.Receive.Pre> { event ->
+			val pushed = when (val packet = event.packet) {
+				is EntityVelocityUpdateS2CPacket -> packet.velocity.takeIf { packet.entityId == player.id && it.distanceTo(player.velocity) > KNOCKBACK_MIN_CHANGE }
+				is ExplosionS2CPacket -> packet.playerKnockback.orElse(null)?.takeIf { it.length() > KNOCKBACK_MIN_CHANGE }
+				else -> null
+			} ?: return@listen
+			runGameScheduled { runSafe { knockedBack(pushed); logPlan() } }
+		}
+	}
+
+	/** Since when you were knocked back last, see [knockedBack]. */
+	private var knockedBackAt = Int.MIN_VALUE / 2
+
+	/**
+	 * Knocked off the way [pushed], e.g. hit by a mob or thrown by an explosion: the glide or lane planned was from where
+	 * you were, it's planned again from where it throws you. Bumping a wall meanwhile is the knockback's, see [passObstacles].
+	 */
+	private fun SafeContext.knockedBack(pushed: Vec3d) {
+		if (!passerConfig.passObstacles || !player.isGliding) return
+		knockedBackAt = player.age
+		ElytraFly.debug { "Knocked back %.2f %.2f %.2f, planning again".format(pushed.x, pushed.y, pushed.z) }
+		commitHop("knockedBack", null)
+		if (dodge != null) commitNoLane("knockedBack")
 	}
 
 	/**
@@ -1140,8 +1180,12 @@ abstract class ObstaclePassingMode(
 
 		// Bumped into something after all, the hit turns the flight sideways into the next wall. Walking on is safer.
 		// Not a carpet's edge coming down onto the floor right before it, it's bounced on like the floor.
-		if (passerConfig.dodge && player.isGliding && player.horizontalCollision && !bumpedLowEdge(snappedDir))
-			return brake(progress(playerPos) + 1, "Hit a wall")
+		// Knocked back into it, the plan's made again from where it threw you, unless it stopped you.
+		if (passerConfig.dodge && player.isGliding && player.horizontalCollision && !bumpedLowEdge(snappedDir)) {
+			if (player.age - knockedBackAt in 0..KNOCKBACK_GRACE_TICKS && player.velocity.horizontalLength() > STOPPED_SPEED)
+				ElytraFly.debug { "Bumped into a wall right after a knockback, flying on" }
+			else return brake(progress(playerPos) + 1, "Hit a wall")
+		}
 		hop?.let { hop ->
 			val progress = progress(playerPos)
 			// Off the end of the layer the hole after it was planned from, the line goes down like gliding off it, see
@@ -1402,7 +1446,12 @@ abstract class ObstaclePassingMode(
 			commitHop("passCube", Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, anyway = true))
 			return true
 		}
-		ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), flying on through it".format(distance) }
+		// No room over or under it, e.g. under a low roof: past it on a lane out of its reach, the rays see it that big.
+		if (passerConfig.dodge && distance >= MIN_DODGE_DISTANCE) freeLane(from, linePoint, dir, distance, Vec3d.ZERO)?.let { lane ->
+			ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), dodging out of its reach ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
+			return commitLane("passCube", lane, at)
+		}
+		ElytraFly.debug { "Mob %.1f ahead ($block), not gliding over it ($hopRejection), no lane out of its reach ($laneMiss), flying on through it".format(distance) }
 		return false
 	}
 
@@ -3407,7 +3456,8 @@ abstract class ObstaclePassingMode(
 
 	/** Whether there's a top at [y] at [x], [z]: a whole block ending there with air above it. */
 	private fun SafeContext.topAt(x: Double, z: Double, y: Double) =
-		shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && wayShape(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
+		shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && wayShape(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty &&
+			!hotFloor(BlockPos.ofFloored(x, y - 0.5, z))
 
 	/**
 	 * The first top along [line] from [from] to [to] along the line to touch down on: one or two blocks above its floor,
@@ -4428,7 +4478,7 @@ abstract class ObstaclePassingMode(
 		fun roomAt(spot: Vec3d) = spaceEmpty(Box(spot.x - GLIDE_SIZE / 2 - swing, player.y, spot.z - GLIDE_SIZE / 2 - swing,
 			spot.x + GLIDE_SIZE / 2 + swing, player.y + GLIDE_SIZE, spot.z + GLIDE_SIZE / 2 + swing))
 		fun fits(offset: Double) = ahead.add(across.multiply(offset)).let { spot ->
-			spot.isLoaded && (spot.boxHasFloor() || spot.add(0.0, 1.0, 0.0).let { up -> up.boxHasFloor() && up.canStand() }) &&
+			spot.isLoaded && (spot.boxHasFloor(false) || spot.add(0.0, 1.0, 0.0).let { up -> up.boxHasFloor(false) && up.canStand() }) &&
 				roomAt(spot) && roomAt(linePoint.add(dir.multiply(player.velocity.horizontalLength() * LAND_AHEAD_TICKS / 2)).add(across.multiply((here + offset) / 2)))
 		}
 		// The one picked before while it still fits, picking again each tick it'd swing from side to side.
@@ -4442,7 +4492,7 @@ abstract class ObstaclePassingMode(
 
 	/** Floor under you, or a layer a block up, to land on, see [landBeside]. */
 	private fun SafeContext.floorBelowYou() = Vec3d(player.x, startPos.y, player.z).let { feet ->
-		feet.boxHasFloor() || feet.add(0.0, 1.0, 0.0).let { up -> player.y >= up.y && up.boxHasFloor() }
+		feet.boxHasFloor(false) || feet.add(0.0, 1.0, 0.0).let { up -> player.y >= up.y && up.boxHasFloor(false) }
 	}
 
 	/** Gliding above the floor's height over a hole. Fallen into it, it walks out. */
@@ -4510,7 +4560,9 @@ abstract class ObstaclePassingMode(
 			for (start in starts) {
 				// Not back the other way, from inside one it's right there.
 				val range = nearest?.distance ?: within
-				if (range > 0) safeContext.blockRay(start, direction, range)?.let { hit ->
+				// The world border, as far as a block there would be.
+				with(safeContext) { borderAhead(start, direction) }?.takeIf { it < range }?.let { nearest = Obstacle(it) { "world border" } }
+				if (range > 0) safeContext.blockRay(start, direction, nearest?.distance ?: range)?.let { hit ->
 						val distance = hit.pos.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
 							nearest = Obstacle(distance) { "${Registries.BLOCK.getId(safeContext.blockState(hit.blockPos).block).path} ${hit.blockPos.toShortString()}" }
@@ -4572,16 +4624,33 @@ abstract class ObstaclePassingMode(
 		return shapes.get(key) ?: world.getBlockState(pos).let { state ->
 			state.getCollisionShape(world, pos, shapeContext).also {
 				shapes.put(key, it)
-				if (it.isEmpty && state.isHazard()) hazardCells.add(key)
+				if (state.isHazard()) hazardCells.add(key)
 			}
 		}
 	}
 
 	/**
 	 * Lava, fire, cobwebs and the like: nothing stops you there, but touching it burns, hurts or holds you nearly still.
-	 * Kept out of like a block, never stood on, see [hazardAt].
+	 * Cactus and a lit campfire stop you, and hurt too. Kept out of like a block, never stood on, see [hazardAt].
 	 */
-	private fun BlockState.isHazard() = fluidState.isIn(FluidTags.LAVA) || block in HAZARDS
+	private fun BlockState.isHazard() = fluidState.isIn(FluidTags.LAVA) || block in HAZARDS ||
+		block is CampfireBlock && get(CampfireBlock.LIT)
+
+	/**
+	 * Whether there's magma under your box at [y]: each bounce on it touches it a tick, it hurts more often than that
+	 * from a bounce to the next. Glided over like a hole, not with Fire Resistance, see [Vec3d.boxHasFloor].
+	 */
+	private fun SafeContext.hotFloorUnder(x: Double, y: Double, z: Double): Boolean {
+		val below = floor(y - 0.05).toInt()
+		for (bx in floor(x - 0.29).toInt()..floor(x + 0.29).toInt())
+			for (bz in floor(z - 0.29).toInt()..floor(z + 0.29).toInt())
+				if (hotFloor(BlockPos(bx, below, bz))) return true
+		return false
+	}
+
+	/** Whether the block at [pos] is magma that hurts you standing on it, see [hotFloorUnder]. */
+	private fun SafeContext.hotFloor(pos: BlockPos) =
+		blockState(pos).isOf(Blocks.MAGMA_BLOCK) && !player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
 
 	/** Whether there's one of [isHazard] at [pos]. */
 	private fun SafeContext.hazardAt(pos: BlockPos): Boolean {
@@ -4601,15 +4670,15 @@ abstract class ObstaclePassingMode(
 
 	/** The shape that's in your way at [pos]: its collision shape, a whole block where there's one of [isHazard]. */
 	private fun SafeContext.wayShape(pos: BlockPos): VoxelShape =
-		shapeAt(pos).let { if (it.isEmpty && hazardCells.contains(pos.asLong())) VoxelShapes.fullCube() else it }
+		shapeAt(pos).let { if (hazardCells.contains(pos.asLong())) VoxelShapes.fullCube() else it }
 
 	/**
 	 * Like [World.isSpaceEmpty] for you: no block, entity as solid as one or the world border in [box]. From one below,
 	 * a fence reaches up into it.
 	 */
-	private fun SafeContext.spaceEmpty(box: Box, hazards: Boolean = true): Boolean {
+	private fun SafeContext.spaceEmpty(box: Box, hazards: Boolean = true, border: Boolean = true): Boolean {
 		freshShapes()
-		if (!world.worldBorder.contains(box) || solidEntities.any { it.intersects(box) }) return false
+		if (border && !world.worldBorder.contains(box) || solidEntities.any { it.intersects(box) }) return false
 		val pos = BlockPos.Mutable()
 		for (x in floor(box.minX).toInt()..floor(box.maxX).toInt())
 			for (z in floor(box.minZ).toInt()..floor(box.maxZ).toInt())
@@ -4623,10 +4692,47 @@ abstract class ObstaclePassingMode(
 		return true
 	}
 
-	/** Where a ray from [start] along [direction] first hits a block's collision shape within [reach], like [rayCast]. */
+	/**
+	 * Where a ray from [start] along [direction] first hits a block's collision shape within [reach], like [rayCast]. One
+	 * narrower than a whole block across the way, e.g. a post, [POST_MARGIN] wider to either side across it: the rays are
+	 * [RAY_SPACING] apart, a post that thin would fit between two of them.
+	 */
 	private fun SafeContext.blockRay(start: Vec3d, direction: Vec3d, reach: Double): BlockHitResult? {
 		val end = start.add(direction.multiply(reach))
-		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos -> wayShape(pos).raycast(start, end, pos) }, { null })
+		val across = across(direction)
+		val wideX = abs(across.x) * POST_MARGIN
+		val wideZ = abs(across.z) * POST_MARGIN
+		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos ->
+			val shape = wayShape(pos)
+			if (shape.isEmpty || shape === VoxelShapes.fullCube()) return@raycast shape.raycast(start, end, pos)
+			val bounds = shape.boundingBox
+			val growX = if (bounds.lengthX < 1 - 1e-6) wideX else 0.0
+			val growZ = if (bounds.lengthZ < 1 - 1e-6) wideZ else 0.0
+			if (growX < 1e-6 && growZ < 1e-6) shape.raycast(start, end, pos)
+			else bounds.expand(growX, 0.0, growZ).offset(pos).raycast(start, end).orElse(null)
+				?.let { BlockHitResult(it, Direction.getFacing(direction.x, direction.y, direction.z).opposite, pos.toImmutable(), false) }
+		}, { null })
+	}
+
+	/**
+	 * How far along [direction] from [start] the world border is, a wall to you. Null from outside it, or running along
+	 * it: there it's [spaceEmpty] that keeps you in.
+	 */
+	private fun SafeContext.borderAhead(start: Vec3d, direction: Vec3d): Double? {
+		val border = world.worldBorder
+		if (!border.contains(start.x, start.z)) return null
+		val dir = direction.normalize()
+		val toX = when {
+			dir.x > 1e-6 -> (border.boundEast - start.x) / dir.x
+			dir.x < -1e-6 -> (border.boundWest - start.x) / dir.x
+			else -> Double.POSITIVE_INFINITY
+		}
+		val toZ = when {
+			dir.z > 1e-6 -> (border.boundSouth - start.z) / dir.z
+			dir.z < -1e-6 -> (border.boundNorth - start.z) / dir.z
+			else -> Double.POSITIVE_INFINITY
+		}
+		return min(toX, toZ).takeIf { it.isFinite() }
 	}
 
 	/**
@@ -4651,12 +4757,15 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Whether anything under your box here holds you up. A block's corner does, as where a layer's edge runs askew. Not
-	 * with lava or fire on it, see [isHazard]: bounced off, that's touched, it's no floor like a hole.
+	 * with lava or fire on it, see [isHazard]: bounced off, that's touched, it's no floor like a hole. Nor past the world
+	 * border, that's a wall, not a floor. To [bounce] on, not magma either, see [hotFloorUnder]: walked on, it is.
 	 */
 	context(safeContext: SafeContext)
-	private fun Vec3d.boxHasFloor() =
-		!safeContext.spaceEmpty(Box(x - 0.29, y - 0.05, z - 0.29, x + 0.29, y, z + 0.29), hazards = false) &&
-			!safeContext.hazardIn(Box(x - 0.3, y, z - 0.3, x + 0.3, y + 1, z + 0.3))
+	private fun Vec3d.boxHasFloor(bounce: Boolean = true) =
+		Box(x - 0.29, y - 0.05, z - 0.29, x + 0.29, y, z + 0.29).let { under ->
+			safeContext.world.worldBorder.contains(under) && !safeContext.spaceEmpty(under, hazards = false, border = false)
+		} && !safeContext.hazardIn(Box(x - 0.3, y, z - 0.3, x + 0.3, y + 1, z + 0.3)) &&
+			!(bounce && safeContext.hotFloorUnder(x, y, z))
 
 	/** The blocks a block below to one above under your box here, for the debug log. */
 	context(safeContext: SafeContext)
@@ -4918,7 +5027,7 @@ abstract class ObstaclePassingMode(
 	private fun Vec3d.isObstructed(direction: Vec3d, distance: Double = passerConfig.obstacleLookAhead.toDouble(), carpets: Boolean = false) =
 		if (!isLoaded) false
 		else {
-			!boxHasFloor() || blockedLow(direction, distance) || passerConfig.headHitters && blockedHigh(direction, distance) ||
+			!boxHasFloor(false) || blockedLow(direction, distance) || passerConfig.headHitters && blockedHigh(direction, distance) ||
 				carpets && alongWidth(direction, CARPET_RAY, distance)
 		}
 
@@ -4944,7 +5053,7 @@ abstract class ObstaclePassingMode(
 	/** Which check of [isObstructed] failed, for the debug log. */
 	context(safeContext: SafeContext)
 	private fun Vec3d.obstruction(direction: Vec3d, distance: Double = passerConfig.obstacleLookAhead.toDouble()) = when {
-		!boxHasFloor() -> "not above solid ground"
+		!boxHasFloor(false) -> "not above solid ground"
 		blockedLow(direction, distance) -> "blocked low"
 		passerConfig.headHitters && blockedHigh(direction, distance) -> "blocked at head height"
 		else -> "no room to stand"
