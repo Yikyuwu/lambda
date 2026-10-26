@@ -437,6 +437,15 @@ abstract class ObstaclePassingMode(
 		private const val TOP_WAY_PAST = 1.5
 		/** Skimming just above a top already, how many ticks ahead of it is enough to drop onto it, see [topWay]. */
 		private const val TOP_WAY_SKIM_TICKS = 1.5
+		/**
+		 * How far below what it needs the glide over what follows a way may come out and still count, see [continuation]:
+		 * it's planned again from where it really is then, e.g. a bounce off a top a bit higher than simulated.
+		 */
+		private const val CHAIN_SHORT = 0.1
+		/** The exit counted for a way followed by braking for what's next, a way past at a crawl, see [continuation]. */
+		private const val CHAIN_BRAKE_EXIT = 0.05
+		/** How far apart across the line two ways through an opening the chooser looks at are at least, see [blockWays]. */
+		private const val THREAD_CENTRES_APART = 0.15
 		/** The pitch braking is flown at, see [brakeLandingHit] and the mode's [isBraking]. */
 		private const val BRAKE_PITCH = 90.0
 		/** How tall you stand once the server ends the glide after landing. */
@@ -650,6 +659,7 @@ abstract class ObstaclePassingMode(
 				it.intoDip = intoDip
 				it.fromLayer = fromLayer
 				it.chosen = chosen
+				it.then = then
 			}
 		/** Not making it yet, logged once. */
 		var waiting = false
@@ -672,6 +682,8 @@ abstract class ObstaclePassingMode(
 		var fromLayer = false
 		/** Picked by the chooser over a hole, looked at again for a much faster way until it's held, see [chooseAtHole]. */
 		var chosen = false
+		/** What it was judged with past it, flown right after it, see [continuation] and [flyThen]. */
+		var then: Continuation? = null
 		/** The tick it touched down on [touch], -1 before. */
 		var touchedAt = -1
 		val touched get() = touchedAt >= 0
@@ -842,6 +854,17 @@ abstract class ObstaclePassingMode(
 	private var hopShort = Double.POSITIVE_INFINITY
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
 	private var hopExitSpeed = 0.0
+	/** Where along the line, how high and climbing how fast [canHop] found the glide right past the hop, when it makes it. */
+	private var hopExitAt = 0.0
+	private var hopExitY = 0.0
+	private var hopExitClimb = 0.0
+	/**
+	 * Simulated from this state instead of yours, the feet that high climbing that fast at that speed, see [fromChainStart]:
+	 * what follows a way past, from where that way ends, see [continuation].
+	 */
+	private var chainStart: ChainStart? = null
+	/** Holding this height gliding on, no way past found and braking would come down into blocks, see [brake]. */
+	private var levelHoldY: Double? = null
 	/** The speed a tick [canHop] found the glide gets to the obstacle at, when it makes it. */
 	private var hopWallSpeed = 0.0
 	/**
@@ -952,7 +975,8 @@ abstract class ObstaclePassingMode(
 
 	/** The pitch holding you above the obstacle you glide over instead of bouncing, null when there's none. */
 	protected fun SafeContext.hopPitch(): Double? = timed {
-		val hop = hop ?: return@timed null
+		// No way past, braking would come down into blocks: the height held gliding on, not dived into them, see [stayUp].
+		val hop = hop ?: return@timed levelHoldY?.let { holdPitch(player.y, player.velocity.y, player.velocity.horizontalLength(), it, player.finalGravity) }
 		// Down on the top to touch down on, the bounce jumps off it level like off the floor.
 		hop.touch?.let { touch ->
 			if (player.isOnGround && abs(player.y - touch.y) < 0.01) {
@@ -1059,6 +1083,7 @@ abstract class ObstaclePassingMode(
 			layerHoleAgain = null
 			commitDip("enable", null)
 			noLaneAt = null
+			levelHoldY = null
 			landedTicks = 0
 			lastGoal = null
 			sameGoals = 0
@@ -1232,6 +1257,8 @@ abstract class ObstaclePassingMode(
 		// Past it, or on a lane or landing for it.
 		// Not each tick on the lane it was found from, that'd log it again each tick, only once on another or off it.
 		if (noLaneAt?.let { progress(player.pos) > it } == true || dodge != noLaneDodge || brakeAt != null || !player.isGliding) noLaneAt = null
+		// Held only while there's still no way past, see [stayUp].
+		if (noLaneAt == null || hop != null || player.isOnGround) levelHoldY = null
 		if (!BaritoneHandler.baritoneAvailable) {
 			logError("Obstacle passing requires baritone to be installed!")
 			ElytraFly.disable()
@@ -1443,6 +1470,7 @@ abstract class ObstaclePassingMode(
 						else -> ElytraFly.debug { "Over it" }
 					}
 					commitHop("passObstacles", null)
+					if (!hop.step && !hop.down) hop.then?.let { flyThen(it, snappedDir) }
 				}
 				// The hole after the layer, planned from up on it, not made any more before it's held, e.g. slower than
 				// planned: planned again from up here, another lane or top may, see [layerHole]. Held from up here, as high
@@ -1587,7 +1615,8 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 		// Too close to steer over to a lane: a top right on the way to bounce on may still be, see [rescueBeforeBrake].
-		if (distance < MIN_DODGE_DISTANCE) return rescueBeforeBrake(from, linePoint, dir, distance, at, block)
+		if (distance < MIN_DODGE_DISTANCE)
+			return rescueBeforeBrake(from, linePoint, dir, distance, at, block) || stayUp(at, "Obstacle %.1f ahead ($block), too close to steer past".format(distance)) == true
 		if (skipAt.near(at)) return false
 		// Slow still, e.g. right after taking off. Faster a few bounces on it may get over after all, a lane is
 		// left for close enough to still steer over to it.
@@ -1976,6 +2005,9 @@ abstract class ObstaclePassingMode(
 		val miss = hopMissText
 		val short = hopShort
 		val exit = hopExitSpeed
+		val exitAt = hopExitAt
+		val exitY = hopExitY
+		val exitClimb = hopExitClimb
 		val wall = hopWallSpeed
 		val ticks = hopTicks
 		val noDip = dipMiss
@@ -2008,6 +2040,9 @@ abstract class ObstaclePassingMode(
 			hopMissText = miss
 			hopShort = short
 			hopExitSpeed = exit
+			hopExitAt = exitAt
+			hopExitY = exitY
+			hopExitClimb = exitClimb
 			hopWallSpeed = wall
 			hopTicks = ticks
 			dipMiss = noDip
@@ -2296,6 +2331,8 @@ abstract class ObstaclePassingMode(
 	 */
 	private class HoleWay(val kind: String, val hop: Hop?, val lane: Lane?, val text: String, val thread: Thread? = null) {
 		var exit = 0.0
+		/** What follows it from where it ends, from the first start, flown once it's past, see [continuation]. */
+		var then: Continuation? = null
 		/** From how many of [CHOOSER_STARTS] it got past. */
 		var made = 0
 		override fun toString() = "$kind $text (exit %.2f, %d/%d)".format(exit, made, CHOOSER_STARTS.size)
@@ -2730,9 +2767,19 @@ abstract class ObstaclePassingMode(
 				ways += HoleWay("stone", chain, null, "y%.0f %.1f ahead, then over at y %.2f ${text(lane)}".format(stone.y, stone.middle - progress, target.targetY))
 			}
 		}
-		// Through an opening in it on the line, see [throughOpening].
-		if (lineHop == null) planHop(linePoint, dir, distance, swings = false, anyway = true)?.let { over ->
-			threadPlan(linePoint, dir, 0.0, over, off)?.takeIf { exitBlocked(linePoint.add(across.multiply(it.centre)), dir, over) == null }?.let { thread ->
+		// Through an opening in it, around the line and a lane or two to either side, see [throughOpening]: what's past each
+		// differs, e.g. in a field of floating blocks one gets out above a top to bounce on, the next right into a block's
+		// side. Which one gets past what follows too is up to the simulation, see [continuation].
+		if (lineHop == null) {
+			val centres = mutableListOf<Double>()
+			for (offset in listOf(0.0, -step, step, -2 * step, 2 * step)) {
+				if (abs(offset) > passerConfig.maxDodge + 1e-6) continue
+				val lanePoint = linePoint.add(across.multiply(offset))
+				val wall = lanePoint.obstacleHit(dir, distance + DODGE_MARGIN, speed = 0.0, mobs = false)?.distance ?: continue
+				val over = planHop(lanePoint, dir, wall, swings = false, anyway = true) ?: continue
+				val thread = threadPlan(linePoint, dir, offset, over, off) ?: continue
+				if (centres.any { abs(it - thread.centre) < THREAD_CENTRES_APART }) continue
+				centres += thread.centre
 				ways += HoleWay("thread", over.with(lane = across.multiply(thread.centre)), null, "%+.2f across".format(thread.centre), thread)
 			}
 		}
@@ -2779,9 +2826,14 @@ abstract class ObstaclePassingMode(
 		val at = progress(player.pos) + later
 		way.hop?.let { hop ->
 			// The deciders' plan judged as they judge it, see [touchedExit].
-			val exit = blockHopExit(hop, at, speed, strict = way.kind != "plan") ?: return null
+			val end = blockHopRun(hop, at, speed, strict = way.kind != "plan") ?: return null
 			// Through an opening only as slow as it fits.
-			return exit.takeUnless { way.thread != null && hopWallSpeed > way.thread.maxSpeed }
+			if (way.thread != null && hopWallSpeed > way.thread.maxSpeed) return null
+			// Together with what follows it from where it ends: through an opening into a block past it too close to get over
+			// from there at that speed and height is no way past, see [continuation].
+			val then = continuation(hop.lane, dir, end) ?: return null
+			if (start == 0) way.then = then
+			return then.exit
 		}
 		val lane = way.lane ?: return null
 		if (faster != 0.0 && freeLane(from, linePoint, dir, dodgePast, Vec3d.ZERO, speed = speed,
@@ -2794,16 +2846,89 @@ abstract class ObstaclePassingMode(
 	 * null when it doesn't get past: let through like [canGetOver] does, held from the last bounce before it like
 	 * [holdingFor] mostly holds it, else as let through.
 	 */
-	private fun SafeContext.blockHopExit(hop: Hop, progress: Double, from: Double, strict: Boolean = true): Double? {
+	private fun SafeContext.blockHopExit(hop: Hop, progress: Double, from: Double, strict: Boolean = true): Double? =
+		blockHopRun(hop, progress, from, strict)?.speed
+
+	/** Where a glide simulated by [canHop] is right past the hop: [at] along the line, the feet at [y] climbing at [climb], at [speed]. */
+	private class HopEnd(val speed: Double, val at: Double, val y: Double, val climb: Double)
+
+	/** Where the last [canHop] that got over ended, see [HopEnd]. */
+	private fun hopEnd() = HopEnd(hopExitSpeed, hopExitAt, hopExitY, hopExitClimb)
+
+	/** [blockHopExit], where the run it takes the exit from ends. */
+	private fun SafeContext.blockHopRun(hop: Hop, progress: Double, from: Double, strict: Boolean = true): HopEnd? {
 		if (!canGetOver(hop, progress, from)) return null
-		val admitted = touchedExit(hop, strict) ?: return null
+		touchedExit(hop, strict) ?: return null
+		val admitted = hopEnd()
 		if (hop.held) return admitted
 		// The run flown, not whichever [canGetOver] let it through by last, e.g. the next bounce's with its margin: held
 		// from the last bounce before it, else from the lead [holdingFor] holds from.
 		val last = risesBefore(hop, progress, from).firstOrNull()
-		if (last != null && canHop(hop, progress, last, from)) touchedExit(hop, strict)?.let { return it }
-		if (canHop(hop, progress, from = from)) touchedExit(hop, strict)?.let { return it }
+		if (last != null && canHop(hop, progress, last, from)) touchedExit(hop, strict)?.let { return hopEnd() }
+		if (canHop(hop, progress, from = from)) touchedExit(hop, strict)?.let { return hopEnd() }
 		return admitted
+	}
+
+	/**
+	 * What follows a way past from where it ends: [exit], how fast past what's next on its lane too, and how, a [hop] or a
+	 * [lane] to dodge to past [at] along the line, neither when there's nothing to get past within reach or it's braked for.
+	 */
+	private class Continuation(val exit: Double, val hop: Hop?, val lane: Lane?, val at: Double, val text: String)
+
+	/** What [continuation] found from where, while the chooser looks, see [withHopMemo]. */
+	private data class ContinuationKey(val lane: Vec3d, val at: Long, val y: Long, val climb: Long, val speed: Long, val floor: Double)
+	private var continuationMemo: HashMap<ContinuationKey, Continuation?>? = null
+
+	/**
+	 * What follows a way past on [lane] from where it ends, [end]: the first thing on that lane within braking and
+	 * [DODGE_STEER_AHEAD] more from there, at the speed and height it's at then, glided over (a near miss of [CHAIN_SHORT]
+	 * counts, it's planned again from where it really is), else touched down on a top on the way to it (on its middle,
+	 * not a corner the box grazes), else dodged, else braked for with the way down clear. Null when none of those does:
+	 * that way runs into it, e.g. through an opening right into a block past it, too close to get up over from there at
+	 * the speed it's down to. One level, what follows that isn't looked at.
+	 */
+	private fun SafeContext.continuation(lane: Vec3d, dir: Vec3d, end: HopEnd): Continuation? {
+		val key = ContinuationKey(lane, (end.at * 10).roundToLong(), (end.y * 100).roundToLong(), (end.climb * 100).roundToLong(),
+			(end.speed * 100).roundToLong(), startPos.y)
+		continuationMemo?.let { memo -> if (memo.containsKey(key)) return memo[key] }
+		val forward = dir.normalize()
+		val point = startPos.add(forward.multiply(end.at)).add(lane)
+		val speed = end.speed
+		val start = ChainStart(end.y, end.climb, speed)
+		val stop = speed * (fallTicks(end.y, end.climb) + LANDING_TICKS) + BRAKE_MARGIN
+		val found = run {
+			val next = point.obstacleHit(forward, stop + DODGE_STEER_AHEAD, speed = speed, mobs = false)
+				?: return@run Continuation(speed, null, null, end.at, "nothing in reach")
+			fromChainStart(start) {
+				planHop(point, forward, next.distance, anyway = true)?.let { over ->
+					val made = canGetOver(over, end.at, speed)
+					if (made || hopShort <= CHAIN_SHORT)
+						return@run Continuation(if (made) hopExitSpeed else speed, over.with(lane = lane), null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
+				}
+				// Skimming just above it already a tick or two is enough to drop onto it, else the dive's ticks, see [topWay].
+				laneSurfaces(point, forward, end.at + speed, end.at + next.distance + TOP_WAY_PAST, surfaceRises(point)).firstOrNull { touch ->
+					val middle = point.add(forward.multiply(touch.middle - end.at))
+					val skimming = end.y >= touch.y && end.y - touch.y <= TOUCH_ABOVE + TOUCH_SKIM && end.climb <= TOUCH_SKIM
+					touch.middle > end.at + speed * (if (skimming) TOP_WAY_SKIM_TICKS else (TOUCH_DIVE_TICKS + 1).toDouble()) &&
+						topAt(middle.x, middle.z, touch.y) && roomOffTop(touch, point, forward, speed)
+				}?.let { top ->
+					val hop = Hop(top.range.start - HOP_SCAN_STEP, top.range.endInclusive, point.y + passerConfig.minObstacleHeight, maxHopY(),
+						top.range.start, false, lane = lane, touch = top)
+					blockHopRun(hop, end.at, speed)?.let { return@run Continuation(it.speed, hop, null, end.at + next.distance, "onto the top at y %.0f %.1f on".format(top.y, top.middle - end.at)) }
+				}
+			}
+			if (next.distance >= MIN_DODGE_DISTANCE) {
+				val linePoint = startPos.add(forward.multiply(end.at))
+				freeLane(point, linePoint, forward, next.distance, lane, speed = speed, mobs = false)?.let {
+					return@run Continuation(speed, null, it, end.at + next.distance, "to %+.2f past ${next.what}".format(it.offset))
+				}
+			}
+			if (next.distance > stop && flownHit(BRAKE_PITCH, stop, Vec3d(point.x, end.y, point.z), end.climb, speed, forward) == null)
+				return@run Continuation(CHAIN_BRAKE_EXIT, null, null, end.at + next.distance, "braking for ${next.what}")
+			null
+		}
+		continuationMemo?.put(key, found)
+		return found
 	}
 
 	/**
@@ -2821,6 +2946,8 @@ abstract class ObstaclePassingMode(
 		}
 		val hop = way.hop ?: return
 		hop.chosen = true
+		// What it was picked with past it, flown once it's past, see [flyThen].
+		hop.then = way.then?.takeIf { it.hop != null || it.lane != null }
 		val across = hop.lane.dotProduct(across(dir))
 		way.thread?.let { thread ->
 			commitLane(owner, Lane(hop.lane, 0, across), hop.end)
@@ -3784,15 +3911,17 @@ abstract class ObstaclePassingMode(
 			looked += offset to over.targetY
 			val thread = threadPlan(linePoint, dir, offset, over, here)
 				?: return@mapNotNull null.also { if (closestThrough == null) closestThrough = "%+.2f across: $threadMiss".format(offset) }
-			// Through it into something right after it on that lane, too close to steer past or brake for, and nothing to
-			// glide over it from there: not that way.
-			val exit = lanePoint.add(across.multiply(thread.centre - offset))
-			exitBlocked(exit, dir, over)?.let { what ->
-				if (closestThrough == null) closestThrough = "%+.2f across: $what".format(thread.centre)
+			// Through it into something right after it on that lane that nothing gets past from where and how fast it's
+			// through, e.g. too close to get up over from there: not that way, see [continuation].
+			val then = threadThen(over.with(lane = across.multiply(thread.centre)), dir) ?: run {
+				if (closestThrough == null) closestThrough = "%+.2f across: $threadMiss".format(thread.centre)
 				return@mapNotNull null
 			}
+			Triple(thread, over, then)
+		}.firstOrNull()?.let { (thread, over, then) ->
+			over.then = then.takeIf { it.hop != null || it.lane != null }
 			thread to over
-		}.firstOrNull() ?: run {
+		} ?: run {
 			openingMiss = closestThrough ?: closest ?: "none"
 			return false
 		}
@@ -3810,15 +3939,49 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * What's right past the end of [over] along [lanePoint]'s lane, within [brakeDistance] and [DODGE_STEER_AHEAD] more,
-	 * that can't be glided over from there either, null when there's none: past an opening there's no lane to dodge to,
-	 * e.g. a block on the floor right behind a gap in a field of floating ones was run into at full speed.
+	 * Past a way, on to what it was judged with past it, see [continuation]: the glide over or the top to touch down on
+	 * after it, still made from where you are as you are, or the lane to dodge to. Else the planners look again.
 	 */
-	private fun SafeContext.exitBlocked(lanePoint: Vec3d, dir: Vec3d, over: Hop): String? {
-		val past = over.end - progress(lanePoint)
-		val next = lanePoint.add(dir.multiply(past)).obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD, mobs = false) ?: return null
-		if (planHop(lanePoint, dir, past + next.distance, anyway = true) != null) return null
-		return "${next.what} %.1f past it, nothing to glide over it from there".format(next.distance)
+	private fun SafeContext.flyThen(then: Continuation, dir: Vec3d) {
+		val progress = progress(player.pos)
+		val across = across(dir)
+		then.hop?.let { next ->
+			if (progress >= next.end) return
+			if (!canGetOver(next, progress) && hopShort > CHAIN_SHORT) {
+				ElytraFly.debug { "Past it, ${then.text} not made from here any more ($hopMiss), looking again" }
+				return
+			}
+			ElytraFly.debug { "Past it, on to what it was judged with after it: ${then.text}" }
+			val offset = next.lane.dotProduct(across)
+			if (next.lane != Vec3d.ZERO) commitLane("chain", Lane(next.lane, 0, offset), next.end + TOUCH_PAST)
+			commitHop("chain", next)
+			return
+		}
+		then.lane?.let { lane ->
+			if (progress >= then.at) return
+			ElytraFly.debug { "Past it, on to what it was judged with after it: ${then.text}" }
+			commitLane("chain", lane, then.at)
+		}
+	}
+
+	/**
+	 * What follows going through an opening on [hop], its lane, from where the glide through it ends, at the speed and
+	 * height it's at then, see [continuation]; null with why in [threadMiss] when nothing gets past what's right past it:
+	 * past an opening there's no lane to dodge to, e.g. a block on the floor right behind a gap in a field of floating ones
+	 * was run into at full speed, and one glided over from there when planned was too high for the 0.8 it was down to.
+	 */
+	private fun SafeContext.threadThen(hop: Hop, dir: Vec3d): Continuation? {
+		val progress = progress(player.pos)
+		val (then, miss) = sandboxed {
+			withHopMemo {
+				val end = blockHopRun(hop, progress, player.velocity.horizontalLength(), strict = false)
+					?: return@withHopMemo null to "not through it holding the height ($hopMiss)"
+				continuation(hop.lane, dir, end)?.let { it to "" }
+					?: (null to "at %.2f a tick at y %.2f past it, nothing gets past what's right after it from there".format(end.speed, end.y))
+			}
+		}
+		if (then == null) threadMiss = miss
+		return then
 	}
 
 	/**
@@ -4990,7 +5153,7 @@ abstract class ObstaclePassingMode(
 	 * Whether you get over [hop] from [progress] on. Over carpets bouncing on may well, else holding the height from now
 	 * on, at the last moment later. Else holding it from close by, or from the next bounce like [holdingFor] may.
 	 */
-	private fun SafeContext.canGetOver(hop: Hop, progress: Double, from: Double = player.velocity.horizontalLength()) = when {
+	private fun SafeContext.canGetOver(hop: Hop, progress: Double, from: Double = simSpeed()) = when {
 		hop.held -> canHop(hop, progress, from = from)
 		// Up on a layer before a hole, held from one of the last bounces before it like the flight does, see [holdingFor]:
 		// from up here now it glides too long, not held at all it comes down in it.
@@ -5008,12 +5171,12 @@ abstract class ObstaclePassingMode(
 	 * last, from the one before it too with blocks in it to get up over like [holdingFor] holds. Like [canHop] bounces,
 	 * no floor ends it.
 	 */
-	private fun SafeContext.risesBefore(hop: Hop, progress: Double, from: Double = player.velocity.horizontalLength()): List<Int> {
+	private fun SafeContext.risesBefore(hop: Hop, progress: Double, from: Double = simSpeed()): List<Int> {
 		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
-		var y = player.y
-		var climb = player.velocity.y
+		var y = simY()
+		var climb = simClimb()
 		var speed = from
 		var along = progress
 		val rises = mutableListOf<Int>()
@@ -5051,33 +5214,58 @@ abstract class ObstaclePassingMode(
 	 * tick by tick, at [from] a tick for now.
 	 */
 	private fun SafeContext.canHop(
-		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = player.velocity.horizontalLength(), margin: Double = 0.0,
+		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = simSpeed(), margin: Double = 0.0,
 		gain: Double = bounceGain(),
 	): Boolean {
 		val memo = hopRunMemo ?: return simulateHop(hop, progress, holdFrom, from, margin, gain)
-		val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, hop.held, hop.topped, hop.rose, hop.touchedAt)
+		val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, hop.held, hop.topped, hop.rose, hop.touchedAt, chainStart)
 		memo[key]?.let { run ->
 			hopMiss = run.miss
 			hopShort = run.short
 			hopExitSpeed = run.exit
+			hopExitAt = run.exitAt
+			hopExitY = run.exitY
+			hopExitClimb = run.exitClimb
 			hopTicks = run.ticks
 			hopWallSpeed = run.wall
 			hopTouched = run.touched
 			return run.made
 		}
 		return simulateHop(hop, progress, holdFrom, from, margin, gain).also {
-			memo[key] = HopRun(it, hopMiss, hopShort, hopExitSpeed, hopTicks, hopWallSpeed, hopTouched)
+			memo[key] = HopRun(it, hopMiss, hopShort, hopExitSpeed, hopExitAt, hopExitY, hopExitClimb, hopTicks, hopWallSpeed, hopTouched)
 		}
 	}
 
 	/** How [canHop] went for a glide simulated already, while the chooser looks, see [hopRunMemo]. */
-	private class HopRun(val made: Boolean, val miss: String, val short: Double, val exit: Double, val ticks: Int, val wall: Double, val touched: Boolean)
+	private class HopRun(
+		val made: Boolean, val miss: String, val short: Double, val exit: Double, val exitAt: Double, val exitY: Double, val exitClimb: Double,
+		val ticks: Int, val wall: Double, val touched: Boolean,
+	)
 
 	/** A glide simulated by [canHop]: the [hop] itself, not one alike, from where with what, and how far it's flown already. */
 	private data class HopRunKey(
 		val hop: Hop, val progress: Double, val holdFrom: Int?, val from: Double, val margin: Double, val gain: Double,
-		val held: Boolean, val topped: Boolean, val rose: Boolean, val touchedAt: Int,
+		val held: Boolean, val topped: Boolean, val rose: Boolean, val touchedAt: Int, val start: ChainStart?,
 	)
+
+	/** A state to simulate from instead of yours: the feet at [y] climbing at [climb], at [speed] a tick, see [chainStart]. */
+	private data class ChainStart(val y: Double, val climb: Double, val speed: Double)
+
+	/** Runs [block] with the glides simulated from [start] instead of from you, see [chainStart]. */
+	private inline fun <T> fromChainStart(start: ChainStart, block: () -> T): T {
+		val outer = chainStart
+		chainStart = start
+		try {
+			return block()
+		} finally {
+			chainStart = outer
+		}
+	}
+
+	/** Where the glides are simulated from: you, or [chainStart]. */
+	private fun SafeContext.simY() = chainStart?.y ?: player.y
+	private fun SafeContext.simClimb() = chainStart?.climb ?: player.velocity.y
+	private fun SafeContext.simSpeed() = chainStart?.speed ?: player.velocity.horizontalLength()
 
 	/**
 	 * While the chooser looks, the glides [canHop] simulated already: the planners it asks for the ways and the ways'
@@ -5088,11 +5276,17 @@ abstract class ObstaclePassingMode(
 	/** Runs [block] with [canHop] remembering what it simulated, see [hopRunMemo]. */
 	private inline fun <T> withHopMemo(block: () -> T): T {
 		val outer = hopRunMemo
-		if (outer == null) hopRunMemo = HashMap()
+		if (outer == null) {
+			hopRunMemo = HashMap()
+			continuationMemo = HashMap()
+		}
 		try {
 			return block()
 		} finally {
-			if (outer == null) hopRunMemo = null
+			if (outer == null) {
+				hopRunMemo = null
+				continuationMemo = null
+			}
 		}
 	}
 
@@ -5103,8 +5297,8 @@ abstract class ObstaclePassingMode(
 		var topped = hop.topped
 		var rose = hop.rose
 		val bounce = bouncePitch()
-		var y = player.y
-		var climb = player.velocity.y
+		var y = simY()
+		var climb = simClimb()
 		var speed = from
 		var along = progress
 		// Held already like hopPitch does, it doesn't let go again as the speed drops a little.
@@ -5117,9 +5311,9 @@ abstract class ObstaclePassingMode(
 		var atWall = progress >= hop.obstacle
 		if (atWall) hopWallSpeed = from
 		// Where it started, for [hopMiss].
-		val startY = player.y
-		val startClimb = player.velocity.y
-		val startSpeed = player.velocity.horizontalLength()
+		val startY = simY()
+		val startClimb = simClimb()
+		val startSpeed = simSpeed()
 		// Bouncing on up on a layer, down in a gap in it, see [intoLayerSide].
 		val fall = GapFall()
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
@@ -5216,6 +5410,9 @@ abstract class ObstaclePassingMode(
 			}
 			if (along > hop.end) {
 				hopExitSpeed = speed
+				hopExitAt = along
+				hopExitY = y
+				hopExitClimb = climb
 				hopTicks = tick + 1
 				hopTouched = touched
 				return true
@@ -5632,7 +5829,7 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.nextRise(progress: Double, lane: Vec3d): Int? {
 		if (!planning) return findNextRise(progress, lane)
 		// All it depends on besides you, kept for the pass, see [planning].
-		val key = listOf(progress, lane, startPos, baseY, getSnappedDir(), bounceKey())
+		val key = listOf(progress, lane, startPos, baseY, getSnappedDir(), bounceKey(), chainStart)
 		return if (planningRises.containsKey(key)) planningRises[key] else findNextRise(progress, lane).also { planningRises[key] = it }
 	}
 
@@ -5640,9 +5837,9 @@ abstract class ObstaclePassingMode(
 		val dir = getSnappedDir()
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
-		var y = player.y
-		var climb = player.velocity.y
-		var speed = player.velocity.horizontalLength()
+		var y = simY()
+		var climb = simClimb()
+		var speed = simSpeed()
 		var along = progress
 		val fall = GapFall()
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
@@ -5803,18 +6000,23 @@ abstract class ObstaclePassingMode(
 	/** What gliding on level at this height runs into within [brakeDistance], null when nothing, see [brakeLandingHit]. */
 	private fun SafeContext.levelGlideHit(): String? = flownHit(null, brakeDistance())
 
-	/** The glide at [pitch], else held level, from here on the heading you have for [distance], see [brakeLandingHit]. */
-	private fun SafeContext.flownHit(pitch: Double?, distance: Double): String? {
-		val velocity = player.velocity
-		var speed = velocity.horizontalLength()
+	/**
+	 * The glide at [pitch], else held level, from here on the heading you have for [distance], see [brakeLandingHit]. Or
+	 * from [at] climbing at [startClimb] at [startSpeed] on [startHeading], e.g. where a way past ends, see [continuation].
+	 */
+	private fun SafeContext.flownHit(
+		pitch: Double?, distance: Double, at: Vec3d = player.pos, startClimb: Double = player.velocity.y,
+		startSpeed: Double = player.velocity.horizontalLength(), startHeading: Vec3d = Vec3d(player.velocity.x, 0.0, player.velocity.z),
+	): String? {
+		var speed = startSpeed
 		if (speed < 1e-3) return null
-		val heading = Vec3d(velocity.x, 0.0, velocity.z).normalize()
+		val heading = Vec3d(startHeading.x, 0.0, startHeading.z).normalize()
 		val half = GLIDE_SIZE / 2
-		val holdAt = player.y
-		var y = player.y
-		var climb = velocity.y
-		var x = player.x
-		var z = player.z
+		val holdAt = at.y
+		var y = at.y
+		var climb = startClimb
+		var x = at.x
+		var z = at.z
 		var gone = 0.0
 		fun clear(atX: Double, atZ: Double, bottom: Double, top: Double) =
 			spaceEmpty(Box(atX - half, bottom, atZ - half, atX + half, top, atZ + half), hazards = false)
@@ -5907,14 +6109,8 @@ abstract class ObstaclePassingMode(
 			if (runSafe { landBeside(at, reason) } == true) return false
 			return noLaneYet(at, "$reason, over a hole, gliding on")
 		}
-		// Coming down into blocks on the way, e.g. a field of floating ones: gliding on at this height is no worse while it's
-		// free, looked at again next tick, a lane or a top may come up. Not free either, landing as before.
-		if (ahead) runSafe {
-			if (!player.isGliding || player.isOnGround) return@runSafe null
-			val into = brakeLandingHit() ?: return@runSafe null
-			if (levelGlideHit() != null) return@runSafe null
-			noLaneYet(at, "$reason, landing would come down into $into, gliding on at this height for now")
-		}?.let { return false }
+		// Coming down into blocks on the way, e.g. a field of floating ones: up and on instead, see [stayUp].
+		if (ahead && runSafe { stayUp(at, reason) } != null) return false
 		ElytraFly.debug { "$reason, landing to walk around it" }
 		landedTicks = 0
 		commitNoLane("brake")
@@ -5925,6 +6121,53 @@ abstract class ObstaclePassingMode(
 		brakeCarpets = carpets
 		brakeY = startPos.y
 		return false
+	}
+
+	/**
+	 * No way past what's at [at] along the line, landing would come down into blocks on the way, e.g. in a field of
+	 * floating ones, and gliding on into it at the bounce's pitch dives into a side: touching down on a top on the way on
+	 * the lane flown that's made from here (on its middle), else up over it from about this height, else this height
+	 * held while gliding on level is free, looked at again next tick, a lane or a top may come up. Whatever follows those
+	 * isn't asked: anything is better than a side. True with a way committed, false holding the height, null with neither
+	 * or the way down clear, landing then.
+	 */
+	private fun SafeContext.stayUp(at: Double, reason: String): Boolean? {
+		if (!player.isGliding || player.isOnGround) return null
+		val into = brakeLandingHit() ?: return null
+		val dir = getSnappedDir()
+		val linePoint = player.pos.findClosestPointOnLine(dir)
+		val across = across(dir)
+		val offset = Vec3d(player.x, linePoint.y, player.z).subtract(linePoint).dotProduct(across)
+		val lane = across.multiply(offset)
+		val point = linePoint.add(lane)
+		val progress = progress(player.pos)
+		val speed = player.velocity.horizontalLength()
+		val (way, how) = sandboxed {
+			withHopMemo {
+				laneSurfaces(point, dir, progress + speed * TOP_WAY_SKIM_TICKS, max(at, progress + speed * TOP_WAY_SKIM_TICKS) + TOP_WAY_PAST, surfaceRises(point))
+					.firstOrNull { touch ->
+						val middle = point.add(dir.multiply(touch.middle - progress))
+						topAt(middle.x, middle.z, touch.y) && roomOffTop(touch, point, dir, speed)
+					}?.let { top ->
+						Hop(top.range.start - HOP_SCAN_STEP, top.range.endInclusive, point.y + passerConfig.minObstacleHeight, maxHopY(), top.range.start,
+							false, lane = lane, touch = top).takeIf { blockHopRun(it, progress, speed) != null }
+							?.let { return@withHopMemo it to "touching down on the top at y %.0f %.1f ahead".format(top.y, top.middle - progress) }
+					}
+				planHop(point, dir, max(at - progress, 0.0), anyway = true, above = player.y - HOP_MARGIN)?.with(lane = lane)
+					?.takeIf { !it.under && blockHopRun(it, progress, speed) != null }
+					?.let { it to "up over it from here at y %.2f".format(it.targetY) }
+					?: (null to "")
+			}
+		}
+		if (way != null) {
+			ElytraFly.debug { "$reason, landing would come down into $into, $how instead" }
+			if (lane != Vec3d.ZERO) commitLane("stayUp", Lane(lane, 0, offset), way.end + TOUCH_PAST)
+			commitHop("stayUp", way)
+			return true
+		}
+		if (levelGlideHit() != null) return null
+		levelHoldY = player.y
+		return noLaneYet(at, "$reason, landing would come down into $into, holding this height for now")
 	}
 
 	/**
