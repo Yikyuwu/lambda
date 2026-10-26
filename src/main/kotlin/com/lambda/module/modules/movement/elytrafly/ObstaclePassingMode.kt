@@ -1301,12 +1301,13 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.dodgePastOnLayer(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String, over: Hop): Boolean {
 		val look = passerConfig.dodgeLookAhead - distance
 		if (look < MIN_DODGE_DISTANCE) return false
-		// From the layer's start up there, the lanes and the floor along them looked at from its height.
+		// From the layer's start up there.
 		val up = Vec3d(0.0, over.stepHeight, 0.0)
 		val start = linePoint.add(dir.multiply(distance)).add(up)
 		val next = start.obstacleHit(dir, look) ?: return false
 		if (!tooHighToGlideOver(start, dir, next.distance)) return false
-		val lane = freeLane(from.add(dir.multiply(distance)).add(up), start, dir, next.distance, Vec3d.ZERO) ?: run {
+		// Steering over from where you are, at its height on the way there: the layer starts within reach of a glide.
+		val lane = freeLane(from.add(up), linePoint.add(up), dir, distance + next.distance, Vec3d.ZERO) ?: run {
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, no free lane past it from here ($laneMiss)".format(distance, next.distance) }
 			return false
 		}
