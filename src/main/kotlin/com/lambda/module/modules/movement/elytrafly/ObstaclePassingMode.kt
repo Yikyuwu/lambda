@@ -422,6 +422,12 @@ abstract class ObstaclePassingMode(
 		private const val CHOOSER_TOUCH_PLANS = 6
 		/** How often a way over a hole the chooser picked is looked at again before it's held, for a much faster one. */
 		private const val CHOOSER_RELOOK_TICKS = 8
+		/** No way past found, not looked for again for this many ticks unless the lane, speed band or floor changes, see [chooserMissed]. */
+		private const val CHOOSER_MISS_TICKS = 10
+		/** Likewise with no way to look at at all, e.g. a wall too long to glide over with no lane past it. */
+		private const val CHOOSER_NONE_TICKS = 20
+		/** How wide a speed band is that a miss is remembered for, see [chooserMissed]. */
+		private const val CHOOSER_MISS_BAND = 0.05
 		/** How many blocks above its floor a top is looked for at most, see [laneSurfaces]. */
 		private const val MAX_SURFACE_RISE = 4
 		/** How high a bounce off the floor or a top takes the feet, about, see [roomOffTop]. */
@@ -679,11 +685,13 @@ abstract class ObstaclePassingMode(
 		/** How fast it may sink: down onto the top to touch down on fast once over it, see [holdY]. */
 		fun sinkAt(dive: Boolean) = if (dive) TOUCH_SINK else HOLD_SINK
 		/**
-		 * When the glide simulation has the top to touch down on coming, from [TOUCH_DIVE_TICKS] before its middle at
-		 * [speed], see [canHop]. The flight goes by where the box really is, see [hopPitch].
+		 * When the glide simulation has the top to touch down on coming: like the flight, from [TOUCH_SKIM_TICKS] before
+		 * the box comes over it at [speed], see [canHop] and [hopPitch]. From only [TOUCH_DIVE_TICKS] before its middle the
+		 * skim down to just above it hadn't started yet where the flight's had, a short top, e.g. a block beside a pillar,
+		 * was glided past a cm too high in the simulation and touched down on in the flight.
 		 */
 		fun diving(along: Double, speed: Double, touched: Boolean = this.touched) =
-			touch != null && !touched && along >= touch.middle - speed * TOUCH_DIVE_TICKS && along <= touch.range.endInclusive
+			touch != null && !touched && along >= touch.range.start - speed * TOUCH_SKIM_TICKS && along <= touch.range.endInclusive
 		/** How high the feet have to be at [along] the line. Over the top to touch down on, down on it. */
 		fun feetAt(along: Double) = if (touch != null && along in touch.range) touch.y
 			else raised.filter { along in it.first }.maxOfOrNull { it.second }?.let { max(feetY, it) } ?: feetY
@@ -950,7 +958,12 @@ abstract class ObstaclePassingMode(
 		val along = progress(player.pos)
 		val near = touch != null && along >= touch.range.start - player.velocity.horizontalLength() * (TOUCH_SKIM_TICKS + 1) - TOUCH_NEAR &&
 			along <= touch.range.endInclusive + TOUCH_NEAR
-		val dive = near && topUnderSoon(touch!!.y)
+		// Steering in toward the top's lane, the straight look ahead from the heading it has finds it a tick or two late, the
+		// skim then hasn't come down far enough to drop onto it: from where the plan's lane comes over it, like [Hop.diving].
+		val steeringIn = touch != null && along >= touch.switchAt && along <= touch.range.endInclusive &&
+			along >= touch.range.start - player.velocity.horizontalLength() * TOUCH_SKIM_TICKS &&
+			abs(player.pos.subtract(startPos).dotProduct(across(getSnappedDir())) - touch.lane.dotProduct(across(getSnappedDir()))) > TOUCH_LANE_OFF
+		val dive = near && (steeringIn || topUnderSoon(touch!!.y))
 		// Down onto it as near its middle as it gets: on the tick the box is over it the most, unless the next is more. Off
 		// to the side of its middle that's halfway across it along the way, as far from where it came onto it as from where
 		// it'd leave it. On its edge it'd slide off it in the same tick, a move goes down first, then across. Once down, it
@@ -2284,17 +2297,27 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.chooseAtHole(
 		glideLine: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>, layerAt: Double?, lane: Vec3d, planned: Hop?, sideStep: Lane?,
 	): HoleWay? {
+		val across = across(dir)
+		// None got past a moment ago, nothing's changed since: the deciders go on, nothing to simulate again.
+		if (chooserMissed("hole", hole.endInclusive, lane.dotProduct(across))) return null
 		val started = System.nanoTime()
 		val progress = progress(player.pos)
 		val speed = player.velocity.horizontalLength()
-		val across = across(dir)
 		val (best, current, count) = sandboxed {
 			withHopMemo {
 				val ways = mutableListOf<HoleWay>()
 				val (plain, blocked) = holeHop(glideLine, dir, hole, layerAt, touch = false)
-				val glide = plain.with(lane = lane)
-				// The line's rays only see what's in the way along it: the box and where it swings out to, like touchLane's.
-				if (blocked == null && glideLaneClear(glide)) ways += HoleWay("glide", glide, null, "on %+.2f".format(lane.dotProduct(across)))
+				// On a lane beside it, e.g. the one dodged to past a column on the line in it, as high as it has to be along
+				// that lane: what can't be glided over on the line may be beside it. Was left out, the deciders' plain glide
+				// on that lane was the only way past and judged a miss.
+				val glide = if (lane == Vec3d.ZERO) plain.takeIf { blocked == null } else {
+					val lanePoint = glideLine.subtract(across.multiply(glideLine.subtract(startPos).dotProduct(across))).add(lane)
+					holeHop(lanePoint, dir, hole, layerAt, touch = false).let { (onLane, laneBlocked) -> onLane.takeIf { laneBlocked == null } }
+				}?.with(lane = lane)
+				// The line's rays only see what's in the way along it: the box and where it swings out to, like touchLane's,
+				// tilted past what's dodged only to that side.
+				val lean = if (lane != Vec3d.ZERO && lane == dodge) dodgeLean else 0
+				if (glide != null && glideLaneClear(glide, lean)) ways += HoleWay("glide", glide, null, "on %+.2f".format(lane.dotProduct(across)))
 				val touches = mutableListOf<Hop>()
 				touchLane(plain, glideLine, dir, plainFine = false, collect = touches)
 				touches.forEach { touching ->
@@ -2317,6 +2340,7 @@ abstract class ObstaclePassingMode(
 		chosenRuns++
 		chosenNanos += nanos
 		val keep = best == null || planned != null && best.hop?.let { sameWay(it, planned) } == true || !switches(best, current)
+		if (best == null) rememberChooserMiss("hole", hole.endInclusive, lane.dotProduct(across), count, hole.start - progress)
 		ElytraFly.debug {
 			val was = when {
 				current == null -> "the deciders had none"
@@ -2327,6 +2351,42 @@ abstract class ObstaclePassingMode(
 			"Chooser decides: hole %.1f ahead, $how; $was; %.2f ms, %.2f on average".format(hole.start - progress, nanos / 1e6, chosenNanos / 1e6 / chosenRuns)
 		}
 		return best.takeUnless { keep }
+	}
+
+	/**
+	 * Where Chooser Decides found no way past from enough starts a moment ago, see [chooserMissed]: a hole by its end or a
+	 * block, along the line, on the lane that far across, at that speed band, from a floor that high, until that tick.
+	 */
+	private class ChooserMiss(val kind: String, val at: Double, val lane: Double, val band: Int, val floorY: Double, val until: Int)
+	private val chooserMisses = mutableListOf<ChooserMiss>()
+	private var chooserMissSkips = 0
+
+	private fun SafeContext.speedBand() = (player.velocity.horizontalLength() / CHOOSER_MISS_BAND).toInt()
+
+	/**
+	 * Whether the [kind] of thing at [at] along the line found no way past a moment ago with nothing changed since: the
+	 * same lane, speed band and floor. Simulating every way again then finds none again, at a few ms each relook.
+	 */
+	private fun SafeContext.chooserMissed(kind: String, at: Double, lane: Double): Boolean {
+		chooserMisses.removeIf { passTicks >= it.until || passTicks < it.until - CHOOSER_NONE_TICKS }
+		val band = speedBand()
+		val missed = chooserMisses.any { it.kind == kind && abs(it.at - at) < 1.5 && abs(it.lane - lane) < 0.01 && it.band == band && it.floorY == startPos.y }
+		if (missed) chooserMissSkips++
+		return missed
+	}
+
+	/**
+	 * Remembers that no way past the [kind] at [at] got past, see [chooserMissed]: with none to look at at all, for
+	 * [CHOOSER_NONE_TICKS], else [CHOOSER_MISS_TICKS], close by within [RELOOK_TICKS] only, where it matters most.
+	 */
+	private fun SafeContext.rememberChooserMiss(kind: String, at: Double, lane: Double, ways: Int, distance: Double) {
+		val ticks = when {
+			distance <= brakeDistance() + DODGE_STEER_AHEAD -> RELOOK_TICKS
+			ways == 0 -> CHOOSER_NONE_TICKS
+			else -> CHOOSER_MISS_TICKS
+		}
+		chooserMisses.removeIf { it.kind == kind }
+		chooserMisses += ChooserMiss(kind, at, lane, speedBand(), startPos.y, passTicks + ticks)
 	}
 
 	/** How fast [way] is past the hole ending at [holeEnd] from the [start] in [CHOOSER_STARTS], null when it doesn't get past. */
@@ -2372,16 +2432,23 @@ abstract class ObstaclePassingMode(
 	 * its end, the box from as low as it has to be up to the height it's held at, and where a tick's move swings it out to,
 	 * one axis and then the other. The line's rays see only what's right along it.
 	 */
-	private fun SafeContext.glideLaneClear(hop: Hop): Boolean {
+	private fun SafeContext.glideLaneClear(hop: Hop, lean: Int = 0): Boolean {
 		val forward = getSnappedDir().normalize()
+		val across = across(forward)
 		val steer = max(player.velocity.horizontalLength(), TOUCH_STEER_SPEED)
 		val top = hop.targetY + GLIDE_SIZE
+		// Past its end as high as at its end: a layer right after it is landed on, not glided into.
+		fun feet(along: Double) = hop.feetAt(min(along, hop.end))
 		var along = max(hop.obstacle, progress(player.pos))
 		while (along <= hop.end + TOUCH_PAST) {
-			val bottom = hop.feetAt(along)
+			// Where the tick's move takes it, as high as it has to be there too, e.g. coming up to a block in it.
+			val bottom = max(feet(along), feet(along + steer))
 			val from = startPos.add(forward.multiply(along)).add(hop.lane)
 			val to = startPos.add(forward.multiply(along + steer)).add(hop.lane)
 			for (corner in listOf(from, Vec3d(to.x, from.y, from.z), Vec3d(from.x, from.y, to.z))) {
+				// Tilted past what's dodged, it swings out only that side, like [touchLane]'s lanes.
+				val off = corner.subtract(from).dotProduct(across)
+				if (lean != 0 && abs(off) > 1e-6 && sign(off) != lean.toDouble()) continue
 				if (!spaceEmpty(Box(corner.x - GLIDE_SIZE / 2, bottom, corner.z - GLIDE_SIZE / 2, corner.x + GLIDE_SIZE / 2, top, corner.z + GLIDE_SIZE / 2)
 					.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))) return false
 			}
@@ -2467,8 +2534,8 @@ abstract class ObstaclePassingMode(
 
 	/** Where along the line the block is a way past the chooser picked was picked for, see [relookBlock]. */
 	private var chosenBlockAt: Double? = null
-	/** Where along the line a block was the chooser found no way past from every start for, and when, see [chooseBlock]. */
-	private var blockChooserMiss: Pair<Double, Int>? = null
+	/** The lane flown, the one dodged to or the line, for [chooserMissed]. */
+	private fun chooserLaneNow() = if (dodge.let { it != null && it != Vec3d.ZERO }) dodgeOffset else 0.0
 
 	/**
 	 * Chooser Decides at the block [distance] ahead of [from], [startDodge]'s: the way past it the deciders would take is
@@ -2477,8 +2544,8 @@ abstract class ObstaclePassingMode(
 	 * as it was.
 	 */
 	private fun SafeContext.chooseBlock(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
-		// Found none from every start a moment ago, looked at again only every few ticks.
-		if (blockChooserMiss?.let { (missAt, tick) -> abs(missAt - at) < 1.5 && passTicks - tick < RELOOK_TICKS } == true) return false
+		// Found none from enough starts a moment ago with nothing changed since, see [chooserMissed].
+		if (chooserMissed("block", at, chooserLaneNow())) return false
 		val (planned, plannedLane) = sandboxed {
 			withHopMemo {
 				val toward = touchSide?.takeIf { (_, until) -> at < until }?.first
@@ -2539,7 +2606,7 @@ abstract class ObstaclePassingMode(
 		val same = best != null && (planned != null && best.hop?.let { sameWay(it, planned) } == true ||
 			plannedLane != null && best.lane?.let { abs(it.offset - plannedLane.offset) < 1e-6 } == true)
 		val keep = best == null || same || !switches(best, current)
-		blockChooserMiss = if (best == null) at to passTicks else null
+		if (best == null) rememberChooserMiss("block", at, chooserLaneNow(), count, distance)
 		ElytraFly.debug {
 			val was = when {
 				current == null -> "the deciders had none"
