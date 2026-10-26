@@ -2783,8 +2783,12 @@ abstract class ObstaclePassingMode(
 		if (!canGetOver(hop, progress, from)) return null
 		val admitted = touchedExit(hop, strict) ?: return null
 		if (hop.held) return admitted
-		val last = risesBefore(hop, progress, from).firstOrNull() ?: return admitted
-		return if (canHop(hop, progress, last, from)) touchedExit(hop, strict) ?: admitted else admitted
+		// The run flown, not whichever [canGetOver] let it through by last, e.g. the next bounce's with its margin: held
+		// from the last bounce before it, else from the lead [holdingFor] holds from.
+		val last = risesBefore(hop, progress, from).firstOrNull()
+		if (last != null && canHop(hop, progress, last, from)) touchedExit(hop, strict)?.let { return it }
+		if (canHop(hop, progress, from = from)) touchedExit(hop, strict)?.let { return it }
+		return admitted
 	}
 
 	/**
