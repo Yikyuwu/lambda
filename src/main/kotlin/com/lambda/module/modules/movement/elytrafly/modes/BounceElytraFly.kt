@@ -80,6 +80,8 @@ class BounceElytraFly(
 		private const val MAX_TAKEOFF_WAIT_TICKS = 10
 		/** The server ignored starts up to 0.67 above the ground and took them from 0.83. */
 		private const val MIN_TAKEOFF_HEIGHT = 0.75
+		/** How far below the box a floor counts as stood on. */
+		private const val FLOOR_CHECK = 0.01
 
 		/** Level, so you keep bouncing but don't speed up. */
 		private const val COAST_PITCH = 0.0
@@ -281,6 +283,9 @@ class BounceElytraFly(
 						// Right after the jump the server still takes you for on the ground and ignores the start,
 						// so the client would glide alone and be set back. Unless a ceiling ends the jump early.
 						if (player.y - groundY < MIN_TAKEOFF_HEIGHT && player.velocity.y > 0) return@listen
+						// Still on the floor, though the client doesn't take you for on it for a tick, e.g. landing fast to
+						// walk after a setback. The server ignores the start, then the jump after it is set back 3 times.
+						if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, -FLOOR_CHECK, 0.0))) return@listen
 						GlideHandler.onGlide()
 						wantJump = jump
 					} else {
