@@ -234,6 +234,9 @@ class BounceElytraFly(
 					slowingForChunks || slowingToFit -> eased(holdHeightPitch(SLOW_PITCH))
 					// Just enough up to keep the height, gliding long without bounces pushing you on.
 					coasting -> eased(holdHeightPitch(COAST_PITCH_UP))
+					// Up over a layer just now: down onto it to bounce on from its start, flying level it'd glide half across it
+					// first. Not while still rising, a swing down then is set back.
+					stepLanding && player.isGliding && player.velocity.y <= 0 -> pacer.throttled(90.0, coastPitch())
 					// Level, so you keep bouncing but don't speed up. Starting again from a stop gets set back.
 					isDodging -> coastPitch()
 					!smartPitch -> pacer.throttled(pitch, coastPitch())
@@ -435,6 +438,8 @@ class BounceElytraFly(
 		return { y, climb ->
 			val level = coastPitch(ceiling - y, climb)
 			when {
+				// Diving onto a layer just climbed up over, like the flight, see [stepLanding].
+				stepLanding && climb <= 0 -> pacer.throttled(90.0, level)
 				// Slowing down climbs at first, flying level is the lower one to plan with.
 				slowingForChunks || slowingToFit || coasting || isDodging -> level
 				!smartPitch -> pacer.throttled(pitch, level)
