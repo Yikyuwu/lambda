@@ -1045,6 +1045,7 @@ abstract class ObstaclePassingMode(
 			skipAt = dodgeEnd
 			commitNoLane("flagged")
 		}
+		commitDip("flagged", null)
 		if (!passerConfig.passObstacles || !passerConfig.walkWhenFlagged || passCooldown > 0) return
 		// Landing first like for an obstacle, walking off still gliding gets set back again and again.
 		brake(progress(player.pos) + passerConfig.obstacleLookAhead + 1, "Flagged")
@@ -1323,14 +1324,16 @@ abstract class ObstaclePassingMode(
 			val (low, block) = here.obstacleHits(snappedDir, passerConfig.dodgeLookAhead.toDouble(), carpets = carpetsCount)
 			val ahead = block?.distance
 			// A hole before anything in the way, carpets too. Up on a layer its end is looked for instead.
-			if (!onLayer && glideOverHole(here, closestLinePoint, snappedDir, low?.distance)) return false
+			// The closest mob in the way, a dip planned on before it ends is no reason to look past it, see [glideOverHole].
+			val mob = listOfNotNull(low, block).filter { it.mob }.minOfOrNull { it.distance }
+			if (!onLayer && glideOverHole(here, closestLinePoint, snappedDir, low?.distance, mob = mob)) return false
 			ahead?.let { distance ->
 				if (startDodge(here, closestLinePoint, snappedDir, distance, block.mob)) return false
 			}
 			// A hole right ahead was left to dodging what's after it, which didn't happen, e.g. no lane yet: over the
 			// hole anyway rather than into it, what's after it is looked at again from there.
 			if (!onLayer && dodge == null && hop == null && brakeAt == null &&
-				glideOverHole(here, closestLinePoint, snappedDir, low?.distance, within = brakeDistance() + DODGE_STEER_AHEAD)) return false
+				glideOverHole(here, closestLinePoint, snappedDir, low?.distance, within = brakeDistance() + DODGE_STEER_AHEAD, mob = mob)) return false
 			if (ahead == null && low != null && dodgeCarpets(here, closestLinePoint, snappedDir, low)) return false
 			// Holding the yaw alone drifts off the line, half a block over a couple hundred, into blocks beside it.
 			dodgeYaw = steerYaw(closestLinePoint, Vec3d.ZERO, snappedDir)
@@ -1629,10 +1632,11 @@ abstract class ObstaclePassingMode(
 		touchHoleStart = holeStart
 	}
 
-	/** Commits the dip [at] to bounce on down in, none with null, by [owner]. */
-	private fun commitDip(owner: String, at: ClosedFloatingPointRange<Double>?) {
-		if (at != dipAt) planOwners += owner
+	/** Commits the dip [at] to bounce on down in on [lane], none with null, by [owner]. */
+	private fun commitDip(owner: String, at: ClosedFloatingPointRange<Double>?, lane: Vec3d = Vec3d.ZERO) {
+		if (at != dipAt || laneVec(lane) != dipLaneAt) planOwners += owner
 		dipAt = at
+		dipLaneAt = laneVec(lane)
 	}
 
 	/** Commits landing before what's [at] along the line, none with null, by [owner]. */
@@ -1774,6 +1778,7 @@ abstract class ObstaclePassingMode(
 		val planThread = thread
 		val planSlowFor = slowFor
 		val planDip = dipAt
+		val planDipLane = dipLaneAt
 		val planBrake = brakeAt
 		try {
 			return block()
@@ -1797,7 +1802,7 @@ abstract class ObstaclePassingMode(
 			planOwners.clear()
 			planOwners += owners
 			if (hop !== planHop || dodge != planDodge || dodgeOffset != planOffset || dodgeLean != planLean || dodgeEnd != planEnd ||
-				dodgeUpAt != planUpAt || thread !== planThread || slowFor != planSlowFor || dipAt != planDip || brakeAt != planBrake) {
+				dodgeUpAt != planUpAt || thread !== planThread || slowFor != planSlowFor || dipAt != planDip || dipLaneAt != planDipLane || brakeAt != planBrake) {
 				ElytraFly.debug { "Chooser: changed the plan looking, put back" }
 				hop = planHop
 				dodge = planDodge
@@ -1808,6 +1813,7 @@ abstract class ObstaclePassingMode(
 				thread = planThread
 				slowFor = planSlowFor
 				dipAt = planDip
+				dipLaneAt = planDipLane
 				brakeAt = planBrake
 			}
 		}
@@ -2574,7 +2580,7 @@ abstract class ObstaclePassingMode(
 	 * over in time. Whether it's past it in the air. With [within] only one starting that close, whatever's after it.
 	 */
 	private fun SafeContext.glideOverHole(
-		from: Vec3d, linePoint: Vec3d, dir: Vec3d, before: Double?, dodging: Boolean = false, within: Double? = null,
+		from: Vec3d, linePoint: Vec3d, dir: Vec3d, before: Double?, dodging: Boolean = false, within: Double? = null, mob: Double? = null,
 	): Boolean {
 		val along = generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }
 			.takeWhile { it <= (before ?: passerConfig.dodgeLookAhead.toDouble()) }
@@ -2585,9 +2591,14 @@ abstract class ObstaclePassingMode(
 		val at = progress(from)
 		// Bouncing on down into a dip, too slow to glide down into it, see [dipLane]: not looked at again on the way, from
 		// over it it'd look too short. Steered on to its lane, or along the line.
+		// Not on its lane any more, e.g. over to another for something else, it's looked at anew. A mob come into it before
+		// its end is left to [startDodge] like one on the floor.
 		if (hop == null && dipAt.let { it != null && at + start >= it.start - DIP_AGAIN && at + start <= it.endInclusive }) {
-			dodgeYaw = steerYaw(linePoint, dodge ?: Vec3d.ZERO, dir)
-			return true
+			if ((dodge ?: Vec3d.ZERO) != dipLaneAt) commitDip("glideOverHole", null)
+			else if (!(mob != null && at + mob <= (dipAt?.endInclusive ?: 0.0))) {
+				dodgeYaw = steerYaw(linePoint, dodge ?: Vec3d.ZERO, dir)
+				return true
+			}
 		}
 		if (lookedLately(at + start, start)) return false
 		if (skipHopAt.near(at + start)) return false
@@ -2769,7 +2780,7 @@ abstract class ObstaclePassingMode(
 				?: return@firstNotNullOfOrNull noDipLane("%+.2f the glide down into it: $hopRejection".format(offset))
 			// On the line itself exactly no lane, -0.0 across isn't [Vec3d.ZERO].
 			val lane = if (side == 0) Vec3d.ZERO else across.multiply(offset)
-			commitDip("dipLane", at + start..at + end)
+			commitDip("dipLane", at + start..at + end, lane)
 			// Too slow to glide down into it, bounced on down into it, the bounce off the floor up here comes down in it.
 			lane to glide.takeIf { canGetOver(it, at) }?.let { down ->
 				Hop(down.start, down.end, down.feetY, down.topY, down.obstacle, false, down = true, lane = lane, low = down.low).also { it.intoDip = true }
@@ -3798,6 +3809,8 @@ abstract class ObstaclePassingMode(
 	 * on down into it with no glide, see [glideOverHole].
 	 */
 	private var dipAt: ClosedFloatingPointRange<Double>? = null
+	/** The lane [dipAt] is bounced on down into on, the line itself with [Vec3d.ZERO]. */
+	private var dipLaneAt: Vec3d = Vec3d.ZERO
 
 	/**
 	 * Whether the layer climbed up onto ends within [STEP_LANDING_BOUNCES] bounces ahead of [linePoint] with a hole
