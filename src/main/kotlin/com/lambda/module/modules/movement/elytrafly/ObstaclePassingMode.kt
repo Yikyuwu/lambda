@@ -150,6 +150,8 @@ abstract class ObstaclePassingMode(
 		private const val THREAD_SPEED_MARGIN = 0.05
 		/** How far before an opening it has to land at least to take off again and come in slower, see [restartFor]. */
 		private const val RESTART_ROOM = 15.0
+		/** How long the glide over a hole [planSpeed] looks at is kept for it, the speed needed hardly changes meanwhile. */
+		private const val SPEED_HOP_TICKS = 20
 		/** As wide as this at the spot either axis may go first, the heading isn't held to one side, see [Thread.lean]. */
 		private const val THREAD_FREE_WIDTH = 0.25
 		/** How far above and below the height held the box is kept clear going through, holding it wavers a bit. */
@@ -3249,8 +3251,14 @@ abstract class ObstaclePassingMode(
 		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
 		// A dip bounced on down into isn't glided over, see [dipLane].
 		if (dipAt.let { it != null && hole.start >= it.start - DIP_AGAIN && hole.start <= it.endInclusive }) return forgetSpeedNeed()
-		// Like [glideOverHole] glides over it, over the blocks in it too.
-		val over = holeHop(lane, dir, hole, layerStart(lane, dir, hole)).first
+		// Like [glideOverHole] glides over it, over the blocks in it too. Planned once for the hole and lane a while, the
+		// touch-down lanes in it took up to 120 ms a time.
+		val key = SpeedHopKey(hole.start, hole.endInclusive, lane.subtract(linePoint).dotProduct(across(dir)), startPos.y)
+		val over = speedHop?.takeIf { (cachedKey, at) -> cachedKey == key && flightTicks - at < SPEED_HOP_TICKS }?.let { speedHopPlan }
+			?: holeHop(lane, dir, hole, layerStart(lane, dir, hole)).first.also {
+				speedHop = key to flightTicks
+				speedHopPlan = it
+			}
 		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
 		val speed = player.velocity.horizontalLength()
 		val wants = !makesIt(speed)
@@ -3272,6 +3280,11 @@ abstract class ObstaclePassingMode(
 		speedNeedAt = hole.start
 		wantsSpeed = wants
 	}
+
+	/** Which hole and lane [speedHopPlan] is planned for and when, see [planSpeed]. */
+	private data class SpeedHopKey(val start: Double, val end: Double, val lane: Double, val floor: Double)
+	private var speedHop: Pair<SpeedHopKey, Int>? = null
+	private var speedHopPlan: Hop? = null
 
 	private fun forgetSpeedNeed() {
 		wantsSpeed = false
