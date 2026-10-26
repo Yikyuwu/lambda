@@ -1041,10 +1041,11 @@ abstract class ObstaclePassingMode(
 		thread?.takeIf { it.shedding && it.hopStart == held.start && !player.isOnGround }?.let { through ->
 			shedPitch(held, through.maxSpeed, along)?.let { return@timed it }
 			through.shedding = false
+			// Simulated for the log only, how the last simulation went is put back.
 			ElytraFly.debug {
-				val made = canHop(held, along, 0, gain = 0.0, turn = true)
+				val wall = sandboxed { if (canHop(held, along, 0, gain = 0.0, turn = true)) hopWallSpeed else null }
 				"Done flapping %.1f before the opening at %.2f, holding the height %s".format(through.wallAt - along, speed,
-					if (made) "gets there at %.2f, it fits up to %.2f".format(hopWallSpeed, through.maxSpeed) else "doesn't get up there")
+					wall?.let { "gets there at %.2f, it fits up to %.2f".format(it, through.maxSpeed) } ?: "doesn't get up there")
 			}
 		}
 		holdPitch(player.y, climb, speed, held.holdY(player.y, along, dive = dive, overTop = overTop), player.finalGravity, held.sinkAt(dive && overTop))
@@ -2032,6 +2033,7 @@ abstract class ObstaclePassingMode(
 		val exitClimb = hopExitClimb
 		val wall = hopWallSpeed
 		val ticks = hopTicks
+		val touched = hopTouched
 		val noDip = dipMiss
 		val noTouch = touchMiss
 		val touchText = touchLaneText
@@ -2067,6 +2069,7 @@ abstract class ObstaclePassingMode(
 			hopExitClimb = exitClimb
 			hopWallSpeed = wall
 			hopTicks = ticks
+			hopTouched = touched
 			dipMiss = noDip
 			touchMiss = noTouch
 			touchLaneText = touchText
