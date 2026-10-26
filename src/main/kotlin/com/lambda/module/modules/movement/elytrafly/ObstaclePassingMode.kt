@@ -977,7 +977,7 @@ abstract class ObstaclePassingMode(
 
 	fun SafeContext.handlePassingObstacles() = timed { passObstacles() }.also {
 		logPlan()
-		if (ElytraFly.debugging) timed { shadowChoose() }
+		if (ElytraFly.choosing) timed { shadowChoose() }
 	}
 
 	private fun SafeContext.passObstacles(): Boolean {
