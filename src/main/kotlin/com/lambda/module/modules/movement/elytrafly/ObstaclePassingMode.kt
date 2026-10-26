@@ -33,7 +33,6 @@ import com.lambda.module.modules.movement.elytrafly.ElytraFly.FlyMode
 import com.lambda.threading.runGameScheduled
 import com.lambda.threading.runSafe
 import com.lambda.util.BlockUtils.blockState
-import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.SpeedUnit
@@ -112,8 +111,6 @@ abstract class ObstaclePassingMode(
 		private const val MIN_DODGE_DISTANCE = 4.0
 		/** How far along an obstacle is looked at for room over it as high as it may fly, a block askew diagonally. */
 		private const val TALL_SCAN = 1.5
-		/** How far off a single block missing from a diagonal wall per speed it goes through, see [Thread]. */
-		private const val THREAD_SHIFT = 0.25
 		/** How many ticks before the wall the heading is held to one side of the diagonal, see [threadYaw]. */
 		private const val THREAD_TICKS = 30
 		/** How far across short of where it goes through it steers before that, coming in from the side it leans from. */
@@ -121,12 +118,33 @@ abstract class ObstaclePassingMode(
 		/** How many degrees at least the heading leans off the diagonal then, enough for which axis goes first, hardly drifting. */
 		private const val THREAD_TILT = 0.05
 		/**
-		 * How fast at most to go through, the spot across it gets through at every tick from is 0.11 wide then, faster it
-		 * narrows down to none at 1.15. On the bounces before the glide through it slows down to it.
+		 * How wide across the spot an opening is gone through from has to be, at every tick of the way through it. A single
+		 * block missing diagonally is 0.07 wide up to 1.0 a tick, none from 1.1 on, see [passage].
 		 */
-		private const val THREAD_SPEED = 0.9
-		/** How many ticks before the wall braking down to [THREAD_SPEED] stops at the latest, to get to the height for it. */
-		private const val THREAD_BRAKE_TICKS = 15
+		private const val THREAD_MIN_WIDTH = 0.06
+		/** How far to either side of a lane an opening is looked for across, the spot gone through from may be off it. */
+		private const val THREAD_WINDOW = 1.0
+		/** How far to either side of the spot planned it's looked for again at the speed you have, see [centreAt]. */
+		private const val THREAD_RETARGET = 0.4
+		/** The speeds a spot is planned for, a step apart, see [centreAt]. */
+		private const val THREAD_SPEED_STEP = 0.02
+		/** The fastest that fits through an opening is looked for this much at a time, from a bit above the speed you have. */
+		private const val THREAD_SPEED_GRID = 0.05
+		/** Slower than this no opening is planned for, holding the height it'd stall. */
+		private const val THREAD_MIN_SPEED = 0.5
+		/** How much faster than you are it's looked for, the bounces before it speed you up. */
+		private const val THREAD_SPEED_ABOVE = 0.4
+		/**
+		 * How much slower than the fastest that fits it's held to arrive: the simulated glide loses a tenth more speed
+		 * than the game's, about 0.03 slower over a long hold.
+		 */
+		private const val THREAD_SPEED_MARGIN = 0.05
+		/** As wide as this at the spot either axis may go first, the heading isn't held to one side, see [Thread.lean]. */
+		private const val THREAD_FREE_WIDTH = 0.25
+		/** How far above and below the height held the box is kept clear going through, holding it wavers a bit. */
+		private const val THREAD_Y_MARGIN = 0.05
+		/** How far before and past what's glided over the way through it is looked at. */
+		private const val THREAD_RUN = 1.0
 		/** How often what's past the start of a layer is looked at while gliding up onto it, see [dodgePastOnLayer]. */
 		private const val LAYER_LOOK_TICKS = 5
 		/**
@@ -441,16 +459,25 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Through a single block missing from a wall across a diagonal way, its middle [middle] across the line, the wall
-	 * [wallAt] along it. Each tick moves along one axis and then the other, the box swings out across the way between
-	 * the two blocks beside it, which only touch its corners: centred it gets through only at some ticks. With the
-	 * heading held a little to [lean], which axis goes first is known, and [shift] across per speed off the middle the
-	 * swing is centred instead.
+	 * Through an opening in what's glided over, the wall [wallAt] along the line. Each tick moves along one axis and then
+	 * the other, diagonally the box swings out across the way, e.g. between the two blocks beside a single one missing,
+	 * which only touch its corners: centred it gets through only at some ticks. With the heading held a little to [lean]
+	 * across, which axis goes first is known, 0 when it doesn't matter there. Gone through from [centre] across the
+	 * line, the middle of the widest spot that gets through at every tick, see [passage], at [maxSpeed] at most. The way
+	 * through is looked at from [from] to [to] along the line from [origin], the box between [minY] and [maxY].
 	 */
-	private class Thread(val middle: Double, val wallAt: Double, val lean: Int, val shift: Double, val hopStart: Double = 0.0) {
+	private class Thread(
+		val origin: Vec3d, val dir: Vec3d, val from: Double, val to: Double, val minY: Double, val maxY: Double,
+		val centre: Double, val width: Double, val lean: Int, val maxSpeed: Double, val wallAt: Double, val hopStart: Double,
+	) {
 		/** Whether how it went through was logged. */
 		var logged = false
+		/** Where across it goes through at each speed, by [THREAD_SPEED_STEP]s, null where none is wide enough. */
+		val centres = HashMap<Int, Double?>()
 	}
+
+	/** The widest spot across the way that gets through at every tick, its middle [centre], with the heading held to [lean]. */
+	private class Passage(val centre: Double, val width: Double, val lean: Int)
 
 	/** In the way [distance] ahead. A [mob] is dodged, gliding over or under it the glide only sees blocks. */
 	private class Obstacle(val distance: Double, val mob: Boolean = false, describe: () -> String) {
@@ -671,6 +698,8 @@ abstract class ObstaclePassingMode(
 	private var hopShort = Double.POSITIVE_INFINITY
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
 	private var hopExitSpeed = 0.0
+	/** The speed a tick [canHop] found the glide gets to the obstacle at, when it makes it. */
+	private var hopWallSpeed = 0.0
 	/** How long you've been down after braking, waiting for the server to end the glide. */
 	private var landedTicks = 0
 	/** Where along the line an obstacle is that a lane gets past only slower, see [slowingToFit]. */
@@ -688,6 +717,8 @@ abstract class ObstaclePassingMode(
 	private var landing = false
 	/** Why [throughOpening] found no opening, for the log. */
 	private var openingMiss = ""
+	/** Why [threadPlan] found no way through an opening, for the log. */
+	private var threadMiss = ""
 	/** Where along the line an obstacle is that no lane gets past yet, for logging it once. */
 	private var noLaneAt: Double? = null
 	/** Where along the line obstacles and holes with no way past yet are, and the [passTicks] each was looked at. */
@@ -761,13 +792,6 @@ abstract class ObstaclePassingMode(
 				hop.topped = true
 				return@timed null
 			}
-		}
-		// Too fast to go through a single block missing diagonally, braking on, see [slowingToFit], not holding the height
-		// for it yet while there's room to get back up there. Holding it, no braking takes over.
-		thread?.let { thread ->
-			val speed = player.velocity.horizontalLength()
-			if (thread.hopStart == hop.start && speed > THREAD_SPEED && thread.wallAt - progress(player.pos) > speed * THREAD_BRAKE_TICKS)
-				return@timed null
 		}
 		if (!holdingFor(hop, progress(player.pos))) return@timed null
 		// A top coming, skimmed down to just above a few ticks early, see [Hop.holdY]: where the box really comes over it,
@@ -2211,7 +2235,8 @@ abstract class ObstaclePassingMode(
 	/**
 	 * No lane past the obstacle [distance] ahead at bounce height and nothing to glide over on the line: an opening in it
 	 * beside the line, e.g. a wall with a hole high up on one side. On that lane the obstacle is the first thing, it's
-	 * steered over to before it, and a glide fits through it there, at the opening's height. Whether it's on its way.
+	 * steered over to before it, and a glide fits through it there, at the opening's height, at every tick on the way
+	 * through, see [threadPlan]. Whether it's on its way.
 	 */
 	private fun SafeContext.throughOpening(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String): Boolean {
 		if (distance < MIN_DODGE_DISTANCE) return false
@@ -2220,56 +2245,183 @@ abstract class ObstaclePassingMode(
 		val step = laneStep(dir) / 4
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val here = from.subtract(linePoint).dotProduct(across)
-		// The closest lane to an opening that's too narrow, for the log. Diagonally each tick moves along one axis and
-		// then the other, the box swings out across the way, so a single block missing is too narrow at speed.
+		// The closest lane to an opening that's too narrow, for the log.
 		var closest: String? = null
-		val (offset, over) = (-sides..sides).sortedBy { abs(it) }.asSequence().mapNotNull { side ->
+		// Lanes the way through was looked for around already, at the height glided at there: close by it's no different.
+		val looked = mutableListOf<Pair<Double, Double>>()
+		val (thread, over) = (-sides..sides).sortedBy { abs(it) }.asSequence().mapNotNull { side ->
 			val offset = side * step
 			val lanePoint = linePoint.add(across.multiply(offset))
-			val wall = lanePoint.obstacleHit(dir, distance + DODGE_MARGIN, mobs = false)?.distance ?: return@mapNotNull null
+			// Not as wide as the box swings: diagonally that'd see the blocks beside a single one missing first, or a wall
+			// along the way beside it. What the swing hits is looked at going through, see [passage].
+			val wall = lanePoint.obstacleHit(dir, distance + DODGE_MARGIN, speed = 0.0, mobs = false)?.distance ?: return@mapNotNull null
 			if (wall < distance - 1) return@mapNotNull null
 			val reached = steerPath(here, dir, offset, 0, wall, wall).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
 			if (reached == null || reached > wall - 1) return@mapNotNull null
-			planHop(lanePoint, dir, wall)?.let { offset to it }
-				// A single block missing from a diagonal wall, the swing's gone through off its middle, see [threadYaw].
-				?: (if (abs(dir.x) < 0.1 || abs(dir.z) < 0.1) null
-					else planHop(lanePoint, dir, wall, swings = false)?.takeIf { narrowDiagonal(linePoint, dir, offset, it) != null }?.let { offset to it })
-				?: null.also { if (closest == null) closest = "%+.2f across: $hopRejection".format(offset) }
+			val over = planHop(lanePoint, dir, wall, swings = false)
+				?: return@mapNotNull null.also { if (closest == null) closest = "%+.2f across: $hopRejection".format(offset) }
+			if (looked.any { (at, y) -> abs(at - offset) < THREAD_WINDOW / 2 && abs(y - over.targetY) < 1e-6 }) return@mapNotNull null
+			looked += offset to over.targetY
+			threadPlan(linePoint, dir, offset, over, here)?.let { it to over }
+				?: null.also { if (closest == null) closest = "%+.2f across: $threadMiss".format(offset) }
 		}.firstOrNull() ?: run {
 			openingMiss = closest ?: "none"
 			return false
 		}
-		val narrow = narrowDiagonal(linePoint, dir, offset, over)
-		ElytraFly.debug { "Obstacle %.1f ahead ($block), no free lane, through the opening in it %+.2f across, gliding at y %.2f${narrow?.let { t -> ", a single block missing diagonally, its middle %+.2f, off it %+.2f a tick of speed".format(t.middle, t.shift) } ?: ""}".format(distance, offset, over.targetY) }
-		val lane = across.multiply(offset)
-		dodgeTo(Lane(lane, 0, offset), over.end)
+		ElytraFly.debug {
+			val slow = if (thread.maxSpeed.isFinite()) ", fits up to %.2f a tick, holding the height to get there slow enough".format(thread.maxSpeed) else ""
+			val lean = if (thread.lean == 0) "" else ", the heading held ${if (thread.lean > 0) "right" else "left"} of the line"
+			"Obstacle %.1f ahead ($block), no free lane, through the opening in it %+.2f across, %.2f wide there, gliding at y %.2f$slow$lean"
+				.format(distance, thread.centre, thread.width, over.targetY)
+		}
+		val lane = across.multiply(thread.centre)
+		dodgeTo(Lane(lane, 0, thread.centre), over.end)
 		hop = over.with(lane = lane)
-		thread = narrow?.let { Thread(it.middle, it.wallAt, it.lean, it.shift, over.start) }
+		this@ObstaclePassingMode.thread = thread
 		return true
 	}
 
 	/**
-	 * Through the opening [offset] across the line from [linePoint] with [over]: when it's a single block missing from a
-	 * wall across a diagonal way, the two beside it touching its corners, how to go through it, see [Thread]. Null else.
+	 * How to go through the opening [over] glides through, looked for around [offset] across the line from [linePoint],
+	 * see [Thread]. As slow as it gets there holding the height from now on, the bounces before only speed it up, it has
+	 * to fit through, else null and why in [threadMiss].
 	 */
-	private fun SafeContext.narrowDiagonal(linePoint: Vec3d, dir: Vec3d, offset: Double, over: Hop): Thread? {
-		if (abs(dir.x) < 0.1 || abs(dir.z) < 0.1) return null
+	private fun SafeContext.threadPlan(linePoint: Vec3d, dir: Vec3d, offset: Double, over: Hop, here: Double): Thread? {
+		val at = progress(linePoint)
+		val from = over.start - at - THREAD_RUN
+		val to = over.end - at + THREAD_RUN
+		val minY = max(over.feetY, over.targetY - THREAD_Y_MARGIN)
+		val maxY = min(over.topY, over.targetY + THREAD_Y_MARGIN) + GLIDE_SIZE
+		fun fitting(speed: Double) = passage(linePoint, dir, from, to, minY, maxY, speed, offset, THREAD_WINDOW)
+		val speed = player.velocity.horizontalLength()
+		// The fastest it fits through, from a bit faster than you are down.
+		val top = ceil((speed + THREAD_SPEED_ABOVE) / THREAD_SPEED_GRID) * THREAD_SPEED_GRID
+		val fastest = generateSequence(top) { it - THREAD_SPEED_GRID }.takeWhile { it >= THREAD_MIN_SPEED - 1e-9 }
+			.firstOrNull { (fitting(it)?.width ?: 0.0) >= THREAD_MIN_WIDTH }
+			?: return null.also { threadMiss = "no spot across gets through at every tick down to %.2f a tick".format(THREAD_MIN_SPEED) }
+		val maxSpeed = if (fastest > top - 1e-6) Double.POSITIVE_INFINITY else fastest - THREAD_SPEED_MARGIN
+		// Not getting there holding it from this far, it's held from closer by, see [threadHold].
+		if (maxSpeed.isFinite() && canHop(over.with(lane = across(dir).multiply(offset)), progress(player.pos), 0) && hopWallSpeed > maxSpeed)
+			return null.also { threadMiss = "it'd get there at %.2f a tick holding the height from now on, it fits up to %.2f".format(hopWallSpeed, maxSpeed) }
+		// Planned at about the speed it gets there at, the spot is looked for again at the speed it has, see [centreAt].
+		val plan = (if (maxSpeed.isFinite()) fitting(fastest) else fitting(speed)?.takeIf { it.width >= THREAD_MIN_WIDTH } ?: fitting(fastest))
+			?: return null.also { threadMiss = "no spot across gets through" }
+		val wall = over.obstacle - at
+		val reached = steerPath(here, dir, plan.centre, 0, wall, wall).firstOrNull { abs(it.offset - plan.centre) < LANE_REACHED }?.along
+		if (reached == null || reached > wall - 1)
+			return null.also { threadMiss = "%+.2f where it gets through, can't be steered over to in time".format(plan.centre) }
+		return Thread(linePoint, dir, from, to, minY, maxY, plan.centre, plan.width, plan.lean, maxSpeed, over.obstacle, over.start)
+	}
+
+	/**
+	 * The widest spot across the way, up to [window] to either side of [around] across the line from [origin], that
+	 * gliding along it at [speed] gets through from at every tick, the box between [minY] and [maxY], from [from] to [to]
+	 * along the line. Each tick moves along one axis and then the other, and over all ticks a tick starts anywhere along
+	 * the way: the first move sweeps the box over a parallelogram, that far along that axis from each spot along the way,
+	 * the second over one past it. A block, grown by half the box, is in the way of the spots across where one of them
+	 * meets it, an interval found by the separating axes x, z and across the way. With the heading held to one of
+	 * [leans], which axis goes first is known; 0, either may, is taken first when it's [THREAD_FREE_WIDTH] wide, there's
+	 * no holding the heading then. Null when there's none.
+	 */
+	private fun SafeContext.passage(
+		origin: Vec3d, dir: Vec3d, from: Double, to: Double, minY: Double, maxY: Double, speed: Double, around: Double, window: Double,
+		leans: List<Int> = listOf(0, 1, -1),
+	): Passage? {
+		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
 		val across = across(dir)
-		val feetY = over.feetY + GLIDE_SIZE / 2
-		val lane = linePoint.add(across.multiply(offset))
-		// The block it goes through, the first free one along the lane in the wall.
-		val wall = lane.obstacleHit(dir, over.end - progress(lane) + 1, mobs = false)?.distance ?: return null
-		val cell = generateSequence(wall + HOP_SCAN_STEP / 2) { it + HOP_SCAN_STEP / 2 }.takeWhile { it < wall + 2 }
-			.map { lane.add(dir.multiply(it)).let { at -> BlockPos.ofFloored(at.x, feetY, at.z) } }
-			.firstOrNull { isPassable(it) } ?: return null
-		val side = BlockPos(sign(across.x).toInt(), 0, sign(across.z).toInt())
-		if (isPassable(cell.add(side)) || isPassable(cell.subtract(side))) return null
-		val middle = Vec3d(cell.x + 0.5, linePoint.y, cell.z + 0.5).subtract(linePoint).dotProduct(across)
-		// Leaning to the right, which axis is the larger then goes first. Off the middle back along that one.
-		val lean = 1
-		val heading = dir.normalize().add(across.multiply(lean * Math.tan(Math.toRadians(THREAD_TILT))))
-		val back = if (abs(heading.x) >= abs(heading.z)) Vec3d(-sign(dir.x), 0.0, sign(dir.z)) else Vec3d(sign(dir.x), 0.0, -sign(dir.z))
-		return Thread(middle, progress(lane) + wall, lean, back.normalize().dotProduct(across) * THREAD_SHIFT)
+		val half = GLIDE_SIZE / 2
+		val moveX = d.x * speed
+		val moveZ = d.z * speed
+		// Where the way starts and ends right on the line.
+		val ax = origin.x + d.x * from
+		val az = origin.z + d.z * from
+		val bx = origin.x + d.x * to
+		val bz = origin.z + d.z * to
+		// Everything that may be in the way, as far out as any spot looked at puts the box.
+		val spread = abs(around) + window + half + speed + 1
+		freshShapes()
+		val boxes = ArrayList<Box>()
+		val pos = BlockPos.Mutable()
+		for (x in floor(min(ax, bx) - spread).toInt()..floor(max(ax, bx) + spread).toInt())
+			for (z in floor(min(az, bz) - spread).toInt()..floor(max(az, bz) + spread).toInt())
+				for (y in floor(minY).toInt() - 1..floor(maxY).toInt()) {
+					val shape = wayShape(pos.set(x, y, z))
+					if (shape.isEmpty) continue
+					shape.boundingBoxes.forEach { boxes += it.offset(x.toDouble(), y.toDouble(), z.toDouble()) }
+				}
+		boxes += solidEntities
+		boxes.removeAll { it.maxY <= minY + 1e-7 || it.minY >= maxY - 1e-7 }
+		// The spots across each box is in the way of, the first move along x or along z.
+		fun blocked(xFirst: Boolean): List<Pair<Double, Double>> {
+			val out = ArrayList<Pair<Double, Double>>()
+			var shiftX = 0.0
+			var shiftZ = 0.0
+			for (leg in 0..1) {
+				val alongX = (leg == 0) == xFirst
+				val legX = if (alongX) moveX else 0.0
+				val legZ = if (alongX) 0.0 else moveZ
+				val px = doubleArrayOf(ax + shiftX, bx + shiftX, ax + shiftX + legX, bx + shiftX + legX)
+				val pz = doubleArrayOf(az + shiftZ, bz + shiftZ, az + shiftZ + legZ, bz + shiftZ + legZ)
+				shiftX += legX
+				shiftZ += legZ
+				for (box in boxes) {
+					val qx = doubleArrayOf(box.minX - half, box.maxX + half, box.minX - half, box.maxX + half)
+					val qz = doubleArrayOf(box.minZ - half, box.minZ - half, box.maxZ + half, box.maxZ + half)
+					var low = Double.NEGATIVE_INFINITY
+					var high = Double.POSITIVE_INFINITY
+					for (axis in 0..2) {
+						val nx = when (axis) { 0 -> 1.0; 1 -> 0.0; else -> across.x }
+						val nz = when (axis) { 0 -> 0.0; 1 -> 1.0; else -> across.z }
+						val k = across.x * nx + across.z * nz
+						val pMin = (0..3).minOf { px[it] * nx + pz[it] * nz }
+						val pMax = (0..3).maxOf { px[it] * nx + pz[it] * nz }
+						val qMin = (0..3).minOf { qx[it] * nx + qz[it] * nz }
+						val qMax = (0..3).maxOf { qx[it] * nx + qz[it] * nz }
+						// Only touching it isn't hitting it, like the game's collisions.
+						if (abs(k) < 1e-9) {
+							if (pMin >= qMax - 1e-7 || pMax <= qMin + 1e-7) high = low
+						} else {
+							val first = (qMax - 1e-7 - pMin) / k
+							val second = (qMin + 1e-7 - pMax) / k
+							low = max(low, min(first, second))
+							high = min(high, max(first, second))
+						}
+						if (low >= high) break
+					}
+					if (low < high) out += low to high
+				}
+			}
+			return out
+		}
+		// The widest stretch of the window none of them is in the way of.
+		fun widest(blocked: List<Pair<Double, Double>>): Passage? {
+			val end = around + window
+			var at = around - window
+			var best: Pair<Double, Double>? = null
+			fun take(until: Double) {
+				val longest = best
+				if (until > at && (longest == null || until - at > longest.second - longest.first)) best = at to until
+			}
+			for ((low, high) in blocked.sortedBy { it.first }) {
+				if (high <= at) continue
+				if (low > at) take(min(low, end))
+				at = max(at, high)
+				if (at >= end) break
+			}
+			if (at < end) take(end)
+			return best?.let { (low, high) -> Passage((low + high) / 2, high - low, 0) }
+		}
+		// Straight along an axis the other one hardly moves, the first is the larger.
+		if (abs(d.x * d.z) < 1e-3) return widest(blocked(abs(d.x) >= abs(d.z)))
+		var best: Passage? = null
+		for (lean in leans) {
+			val heading = d.add(across.multiply(lean * Math.tan(Math.toRadians(THREAD_TILT))))
+			val blocks = if (lean == 0) blocked(true) + blocked(false) else blocked(abs(heading.x) >= abs(heading.z))
+			val stretch = widest(blocks)?.let { Passage(it.centre, it.width, lean) } ?: continue
+			if (lean == 0 && (stretch.width >= THREAD_FREE_WIDTH || leans.size == 1)) return stretch
+			if (lean != 0 && (best == null || stretch.width > best.width)) best = stretch
+		}
+		return best
 	}
 
 	/**
@@ -3130,6 +3282,9 @@ abstract class ObstaclePassingMode(
 		var touched = hop.touched
 		// Came down on the top to touch down on last tick, bounced off it this one.
 		var onTopNow = false
+		// Got to the obstacle, for [hopWallSpeed].
+		var atWall = progress >= hop.obstacle
+		if (atWall) hopWallSpeed = from
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
 			val touch = hop.touch
 			var jumped = false
@@ -3182,6 +3337,10 @@ abstract class ObstaclePassingMode(
 				onTopNow = true
 			} else y += climb
 			along += speed
+			if (!atWall && along >= hop.obstacle) {
+				atWall = true
+				hopWallSpeed = speed
+			}
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = hop.touch?.range?.contains(along) == true
 			// Coming over it lower than its top runs into its side.
@@ -3334,11 +3493,34 @@ abstract class ObstaclePassingMode(
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
 			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
 			// Over a block or a wall, or through an opening in one: one more bounce while from it it still gets over,
-			// taking off from the floor up there faster than pulling up gliding.
-			else -> hop.start - progress <= speed * leadTicks(hop) && !fromNextBounce(hop, progress)
+			// taking off from the floor up there faster than pulling up gliding. Through one that only fits slower, from
+			// the last bounce on that still gets there slow enough.
+			else -> threadHold(hop, progress) || hop.start - progress <= speed * leadTicks(hop) && !fromNextBounce(hop, progress)
 		}
 		if (hop.held && hop.cube) ElytraFly.debug { "Gliding ${if (hop.under) "down under" else "up over"} the mob %.1f ahead at %.2f".format(hop.start - progress, speed) }
 		return hop.held
+	}
+
+	/**
+	 * Whether to hold the height for [hop] through an opening that only fits slower than you may get there, see [Thread]:
+	 * holding it the glide slows down, bouncing on speeds you up, and slowing down while bouncing doesn't, each bounce
+	 * gives back more than looking up takes. Held from now when from the next bounce on it'd get there too fast. Too fast
+	 * even so, e.g. sped up a lot after it was planned, it lands before it while there's room.
+	 */
+	private fun SafeContext.threadHold(hop: Hop, progress: Double): Boolean {
+		val thread = thread?.takeIf { it.hopStart == hop.start && it.maxSpeed.isFinite() } ?: return false
+		// From a bounce only, rising: held from coming down it'd pull up from low, that costs the most speed.
+		if (!player.isOnGround && player.velocity.y <= 0) return false
+		val later = nextRise(progress, hop.lane)?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) && hopWallSpeed <= thread.maxSpeed } == true
+		if (later || !canHop(hop, progress, 0)) return false
+		if (hopWallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN && thread.wallAt - progress > brakeDistance()) {
+			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, it fits up to %.2f".format(
+				thread.wallAt - progress, hopWallSpeed, thread.maxSpeed))
+			return false
+		}
+		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f, to get there at %.2f, it fits up to %.2f".format(
+			thread.wallAt - progress, player.velocity.horizontalLength(), hopWallSpeed, thread.maxSpeed) }
+		return true
 	}
 
 	/**
@@ -3832,28 +4014,43 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Through the single block missing from a diagonal wall, see [Thread]. From far, to a bit short of where it goes
-	 * through on the side the heading leans from, then in the last ticks onto it with the heading held at least
-	 * [THREAD_TILT] that way, so it never turns back across the diagonal: that'd swap which axis goes first. Simulated,
-	 * through every time up to about 1.0 a tick at the wall, centred about two in three at 0.9.
+	 * Through an opening, see [Thread], onto where it gets through at the speed you have, see [centreAt]. Holding the
+	 * heading to a side: from far to a bit short of it on the side the heading leans from, then in the last ticks onto
+	 * it with the heading held at least [THREAD_TILT] that way, so it never turns back across the diagonal: that'd swap
+	 * which axis goes first. Simulated, through a single block missing diagonally every time up to 1.0 a tick.
 	 */
 	private fun SafeContext.threadYaw(linePoint: Vec3d, dir: Vec3d, progress: Double, thread: Thread): Double {
 		val speed = player.velocity.horizontalLength()
 		val last = thread.wallAt - progress < speed * THREAD_TICKS
-		// Faster there's no spot across it goes through at every tick, slowing down while still bouncing, see [slowingToFit].
-		if (speed > THREAD_SPEED) slowFor = thread.wallAt
+		val centre = centreAt(thread, speed)
+		val across = across(dir)
 		if (!thread.logged && thread.wallAt - progress < speed) {
 			thread.logged = true
-			ElytraFly.debug { "Going through at %.2f a tick, %+.2f across, %+.2f off its middle, aiming %+.2f".format(speed,
-				player.pos.subtract(linePoint).dotProduct(across(dir)), player.pos.subtract(linePoint).dotProduct(across(dir)) - thread.middle, thread.shift * speed) }
+			ElytraFly.debug {
+				val fits = if (thread.maxSpeed.isFinite()) " (fits up to %.2f)".format(thread.maxSpeed) else ""
+				"Going through at %.2f a tick$fits, %+.2f across, aiming %+.2f, %+.2f off it".format(speed,
+					player.pos.subtract(linePoint).dotProduct(across), centre, player.pos.subtract(linePoint).dotProduct(across) - centre)
+			}
 		}
-		val target = thread.middle + thread.shift * speed - if (last) 0.0 else thread.lean * THREAD_PRE
-		val across = across(dir)
+		val target = centre - if (last) 0.0 else thread.lean * THREAD_PRE
 		val steer = steerYaw(linePoint, across.multiply(target), dir)
-		if (!last) return steer
+		if (!last || thread.lean == 0) return steer
 		val tilted = leanYaw(dir, thread.lean, THREAD_TILT)
 		fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across) * thread.lean
 		return if (out(steer) > out(tilted)) steer else tilted
+	}
+
+	/**
+	 * Where across [thread] goes through at [speed], see [passage], near the spot planned and with the heading held the
+	 * same way. Looked at again only once the speed's [THREAD_SPEED_STEP] off. The spot planned where none is wide
+	 * enough, e.g. still faster than it fits.
+	 */
+	private fun SafeContext.centreAt(thread: Thread, speed: Double): Double {
+		val step = (speed / THREAD_SPEED_STEP).roundToInt()
+		val centre = if (step in thread.centres) thread.centres[step] else
+			passage(thread.origin, thread.dir, thread.from, thread.to, thread.minY, thread.maxY, step * THREAD_SPEED_STEP, thread.centre,
+				THREAD_RETARGET, listOf(thread.lean))?.takeIf { it.width >= THREAD_MIN_WIDTH / 2 }?.centre.also { thread.centres[step] = it }
+		return centre ?: thread.centre
 	}
 
 	/**
