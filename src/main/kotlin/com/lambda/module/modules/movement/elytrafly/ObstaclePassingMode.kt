@@ -111,6 +111,14 @@ abstract class ObstaclePassingMode(
 		private const val MIN_DODGE_DISTANCE = 4.0
 		/** How far along an obstacle is looked at for room over it as high as it may fly, a block askew diagonally. */
 		private const val TALL_SCAN = 1.5
+		/** How far off a single block missing from a diagonal wall per speed it goes through, see [Thread]. */
+		private const val THREAD_SHIFT = 0.25
+		/** How many ticks before the wall the heading is held to one side of the diagonal, see [threadYaw]. */
+		private const val THREAD_TICKS = 30
+		/** How far short of where it goes through it steers before that, coming in from the side it leans from. */
+		private const val THREAD_PRE = 0.1
+		/** How far at least the heading leans off the diagonal then, enough for which axis goes first, hardly drifting. */
+		private const val THREAD_TILT = 0.05
 		/** How often what's past the start of a layer is looked at while gliding up onto it, see [dodgePastOnLayer]. */
 		private const val LAYER_LOOK_TICKS = 5
 		/**
@@ -423,6 +431,15 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** In the way [distance] ahead. A [mob] is dodged, gliding over or under it the glide only sees blocks. */
+	/**
+	 * Through a single block missing from a wall across a diagonal way, its middle [middle] across the line, the wall
+	 * [wallAt] along it. Each tick moves along one axis and then the other, the box swings out across the way between
+	 * the two blocks beside it, which only touch its corners: centred it gets through only at some ticks. With the
+	 * heading held a little to [lean], which axis goes first is known, and [shift] across per speed off the middle the
+	 * swing is centred instead.
+	 */
+	private class Thread(val middle: Double, val wallAt: Double, val lean: Int, val shift: Double)
+
 	private class Obstacle(val distance: Double, val mob: Boolean = false, describe: () -> String) {
 		/** Only put together for the debug log, there's a hit for each ray. */
 		val what by lazy(describe)
@@ -564,6 +581,8 @@ abstract class ObstaclePassingMode(
 	private var dodgeLean = 0
 	/** Where the layer starts that the lane was picked from down here to get onto, see [dodgePastOnLayer]. */
 	private var dodgeUpAt: Double? = null
+	/** Through a single block missing from a diagonal wall, see [Thread]. */
+	private var thread: Thread? = null
 	/** Dodging carpets, back onto the line only once it's free of them too. */
 	private var dodgeCarpets = false
 	/** How far across the line the lane is that's dodged to, [dodge] short of it by the drift of the tilt. */
@@ -1329,6 +1348,7 @@ abstract class ObstaclePassingMode(
 	/** Steers over to [lane], past the obstacle ending [at] along the line, or the [carpets]. Always true. */
 	private fun dodgeTo(lane: Lane, at: Double, carpets: Boolean = false): Boolean {
 		dodgeUpAt = null
+		thread = null
 		dodge = lane.target
 		dodgeLean = lane.lean
 		dodgeOffset = lane.offset
@@ -2101,11 +2121,38 @@ abstract class ObstaclePassingMode(
 			openingMiss = closest ?: "none"
 			return false
 		}
-		ElytraFly.debug { "Obstacle %.1f ahead ($block), no free lane, through the opening in it %+.2f across, gliding at y %.2f".format(distance, offset, over.targetY) }
+		val narrow = narrowDiagonal(linePoint, dir, offset, over)
+		ElytraFly.debug { "Obstacle %.1f ahead ($block), no free lane, through the opening in it %+.2f across, gliding at y %.2f${narrow?.let { t -> ", a single block missing diagonally, its middle %+.2f, off it %+.2f a tick of speed".format(t.middle, t.shift) } ?: ""}".format(distance, offset, over.targetY) }
 		val lane = across.multiply(offset)
 		dodgeTo(Lane(lane, 0, offset), over.end)
 		hop = over.with(lane = lane)
+		thread = narrow
 		return true
+	}
+
+	/**
+	 * Through the opening [offset] across the line from [linePoint] with [over]: when it's a single block missing from a
+	 * wall across a diagonal way, the two beside it touching its corners, how to go through it, see [Thread]. Null else.
+	 */
+	private fun SafeContext.narrowDiagonal(linePoint: Vec3d, dir: Vec3d, offset: Double, over: Hop): Thread? {
+		if (abs(dir.x) < 0.1 || abs(dir.z) < 0.1) return null
+		val across = across(dir)
+		val feetY = over.feetY + GLIDE_SIZE / 2
+		val lane = linePoint.add(across.multiply(offset))
+		// The block it goes through, the first free one along the lane in the wall.
+		val wall = lane.obstacleHit(dir, over.end - progress(lane) + 1, mobs = false)?.distance ?: return null
+		val cell = generateSequence(wall + HOP_SCAN_STEP / 2) { it + HOP_SCAN_STEP / 2 }.takeWhile { it < wall + 2 }
+			.map { BlockPos.ofFloored(lane.add(dir.multiply(it)).x, feetY, lane.add(dir.multiply(it)).z) }
+			.firstOrNull { blockState(it).getCollisionShape(world, it).isEmpty } ?: return null
+		val side = BlockPos(sign(across.x).toInt(), 0, sign(across.z).toInt())
+		fun solid(pos: BlockPos) = !blockState(pos).getCollisionShape(world, pos).isEmpty
+		if (!solid(cell.add(side)) || !solid(cell.subtract(side))) return null
+		val middle = Vec3d(cell.x + 0.5, linePoint.y, cell.z + 0.5).subtract(linePoint).dotProduct(across)
+		// Leaning to the right, which axis is the larger then goes first. Off the middle back along that one.
+		val lean = 1
+		val heading = dir.normalize().add(across.multiply(Math.tan(Math.toRadians(THREAD_TILT))))
+		val back = if (abs(heading.x) >= abs(heading.z)) Vec3d(-sign(dir.x), 0.0, sign(dir.z)) else Vec3d(sign(dir.x), 0.0, -sign(dir.z))
+		return Thread(middle, progress(lane) + wall, lean, back.normalize().dotProduct(across) * THREAD_SHIFT)
 	}
 
 	/**
@@ -3643,6 +3690,7 @@ abstract class ObstaclePassingMode(
 	 * side, away from what's dodged.
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double) = when {
+		thread.let { it != null && progress < it.wallAt + DODGE_MARGIN } && hop.lane == dodge -> threadYaw(linePoint, dir, progress, thread!!)
 		// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].
 		// Steering out farther still if need be, not in.
 		hop.hole && hop.touch?.leans?.any { progress in it } == true &&
@@ -3659,6 +3707,24 @@ abstract class ObstaclePassingMode(
 			steerYaw(linePoint, if (progress < hop.touch.switchAt) hop.lane else hop.touch.lane, dir)
 		dodge != null && hop.lane == dodge && leaning(progress) -> dodgeLeanYaw(linePoint, dir)
 		else -> steerYaw(linePoint, hop.lane, dir)
+	}
+
+	/**
+	 * Through the single block missing from a diagonal wall, see [Thread]. From far, to a bit short of where it goes
+	 * through on the side the heading leans from, then in the last ticks onto it with the heading held at least
+	 * [THREAD_TILT] that way, so it never turns back across the diagonal: that'd swap which axis goes first. Simulated,
+	 * through every time up to about 1.0 a tick at the wall, centred about two in three at 0.9.
+	 */
+	private fun SafeContext.threadYaw(linePoint: Vec3d, dir: Vec3d, progress: Double, thread: Thread): Double {
+		val speed = player.velocity.horizontalLength()
+		val last = thread.wallAt - progress < speed * THREAD_TICKS
+		val target = thread.middle + thread.shift * speed - if (last) 0.0 else thread.lean * THREAD_PRE
+		val across = across(dir)
+		val steer = steerYaw(linePoint, across.multiply(target), dir)
+		if (!last) return steer
+		val tilted = leanYaw(dir, thread.lean, THREAD_TILT)
+		fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across) * thread.lean
+		return if (out(steer) > out(tilted)) steer else tilted
 	}
 
 	/**
@@ -3688,6 +3754,7 @@ abstract class ObstaclePassingMode(
 	private fun swingBack() {
 		dodge = Vec3d.ZERO
 		dodgeUpAt = null
+		thread = null
 		onLane = false
 		fitDodge = false
 		atFitSpeed = false
@@ -3699,6 +3766,7 @@ abstract class ObstaclePassingMode(
 	private fun stopDodge(): Boolean {
 		dodge = null
 		dodgeUpAt = null
+		thread = null
 		onLane = false
 		dodgeAfterMob = false
 		slowFor = null
