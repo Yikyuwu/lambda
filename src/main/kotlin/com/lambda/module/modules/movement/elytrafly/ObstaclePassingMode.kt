@@ -1090,6 +1090,11 @@ abstract class ObstaclePassingMode(
 			// Off the end of the layer the hole after it was planned from, the line goes down like gliding off it, see
 			// [planGap]: over the hole it's glided over like one planned from the floor.
 			if (hop.fromLayer && onLayer && progress > hop.obstacle && !Vec3d(playerPos.x, startPos.y, playerPos.z).boxHasFloor()) offTheLayer()
+			// Any other glide that took it off the layer, e.g. through an opening planned from up on one: once over the floor
+			// down there, the line goes down too, else past it no floor's in sight at the layer's height. Not across a gap
+			// in the layer, that's glided over at its height, nor off its end, that goes down past it, see [Hop.down].
+			else if (!hop.fromLayer && !hop.step && !hop.down && onLayer && !Vec3d(playerPos.x, startPos.y, playerPos.z).boxHasFloor() &&
+				Vec3d(playerPos.x, baseY, playerPos.z).boxHasFloor()) offTheLayer()
 			// Gliding up onto a layer, what's past its start up there comes into sight on the way: onto a lane past it now,
 			// the way up onto the layer is planned again on it, see [dodgePastOnLayer].
 			if (hop.step && !onLayer && dodge == null && passerConfig.dodge && player.age % LAYER_LOOK_TICKS == 0 &&
