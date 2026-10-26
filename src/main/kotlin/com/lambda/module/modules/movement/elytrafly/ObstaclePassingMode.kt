@@ -438,7 +438,10 @@ abstract class ObstaclePassingMode(
 	 * heading held a little to [lean], which axis goes first is known, and [shift] across per speed off the middle the
 	 * swing is centred instead.
 	 */
-	private class Thread(val middle: Double, val wallAt: Double, val lean: Int, val shift: Double)
+	private class Thread(val middle: Double, val wallAt: Double, val lean: Int, val shift: Double) {
+		/** Whether how it went through was logged. */
+		var logged = false
+	}
 
 	private class Obstacle(val distance: Double, val mob: Boolean = false, describe: () -> String) {
 		/** Only put together for the debug log, there's a hit for each ray. */
@@ -2116,6 +2119,8 @@ abstract class ObstaclePassingMode(
 			val reached = steerPath(here, dir, offset, 0, wall, wall).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
 			if (reached == null || reached > wall - 1) return@mapNotNull null
 			planHop(lanePoint, dir, wall)?.let { offset to it }
+				// A single block missing from a diagonal wall, the swing's gone through off its middle, see [threadYaw].
+				?: planHop(lanePoint, dir, wall, swings = false)?.takeIf { narrowDiagonal(linePoint, dir, offset, it) != null }?.let { offset to it }
 				?: null.also { if (closest == null) closest = "%+.2f across: $hopRejection".format(offset) }
 		}.firstOrNull() ?: run {
 			openingMiss = closest ?: "none"
@@ -2860,7 +2865,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.planHop(
 		linePoint: Vec3d, dir: Vec3d, distance: Double, step: Boolean = false, length: Double = STEP_ON, carpets: Boolean = false, lean: Int = 0,
-		avoid: List<Box> = emptyList(), anyway: Boolean = false,
+		avoid: List<Box> = emptyList(), anyway: Boolean = false, swings: Boolean = true,
 	): Hop? {
 		// Blocks, and the [avoid] boxes, e.g. magma cubes the world's collisions don't count.
 		fun free(box: Box) = spaceEmpty(box) && avoid.none { it.intersects(box) }
@@ -2869,7 +2874,7 @@ abstract class ObstaclePassingMode(
 		// [lean], only to that side: half as far each way, moved over that way by as much. Diagonally the box reaches as far
 		// across only right at each spot looked at, a bit more covers in between them, as far as the rays look.
 		val between = HOP_SCAN_STEP / 2 * 2 * abs(dir.x * dir.z) / dir.horizontalLengthSquared()
-		val swing = sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (lean == 0) 1 else 2) + between
+		val swing = if (!swings) between else sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (lean == 0) 1 else 2) + between
 		val shift = across(dir).multiply(lean * sweep(dir) / 2)
 		fun box(along: Double, feetY: Double, height: Double = GLIDE_SIZE) = linePoint.add(dir.multiply(along)).add(shift).let {
 			Box(it.x - GLIDE_SIZE / 2, feetY, it.z - GLIDE_SIZE / 2, it.x + GLIDE_SIZE / 2, feetY + height, it.z + GLIDE_SIZE / 2)
@@ -3718,6 +3723,11 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.threadYaw(linePoint: Vec3d, dir: Vec3d, progress: Double, thread: Thread): Double {
 		val speed = player.velocity.horizontalLength()
 		val last = thread.wallAt - progress < speed * THREAD_TICKS
+		if (!thread.logged && thread.wallAt - progress < speed) {
+			thread.logged = true
+			ElytraFly.debug { "Going through at %.2f a tick, %+.2f across, %+.2f off its middle, aiming %+.2f".format(speed,
+				player.pos.subtract(linePoint).dotProduct(across(dir)), player.pos.subtract(linePoint).dotProduct(across(dir)) - thread.middle, thread.shift * speed) }
+		}
 		val target = thread.middle + thread.shift * speed - if (last) 0.0 else thread.lean * THREAD_PRE
 		val across = across(dir)
 		val steer = steerYaw(linePoint, across.multiply(target), dir)
