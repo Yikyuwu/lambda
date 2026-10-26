@@ -3599,8 +3599,9 @@ abstract class ObstaclePassingMode(
 		val step = laneStep(dir) / 4
 		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
 		val here = from.subtract(linePoint).dotProduct(across)
-		// The closest lane to an opening that's too narrow, for the log.
+		// The closest lane to an opening that's too narrow, for the log, one it glides through on first: why not on it.
 		var closest: String? = null
+		var closestThrough: String? = null
 		// Lanes the way through was looked for around already, at the height glided at there: close by it's no different.
 		val looked = mutableListOf<Pair<Double, Double>>()
 		val (thread, over) = (-sides..sides).sortedBy { abs(it) }.asSequence().mapNotNull { side ->
@@ -3617,9 +3618,9 @@ abstract class ObstaclePassingMode(
 			if (looked.any { (at, y) -> abs(at - offset) < THREAD_WINDOW / 2 && abs(y - over.targetY) < 1e-6 }) return@mapNotNull null
 			looked += offset to over.targetY
 			threadPlan(linePoint, dir, offset, over, here)?.let { it to over }
-				?: null.also { if (closest == null) closest = "%+.2f across: $threadMiss".format(offset) }
+				?: null.also { if (closestThrough == null) closestThrough = "%+.2f across: $threadMiss".format(offset) }
 		}.firstOrNull() ?: run {
-			openingMiss = closest ?: "none"
+			openingMiss = closestThrough ?: closest ?: "none"
 			return false
 		}
 		ElytraFly.debug {
@@ -3656,9 +3657,11 @@ abstract class ObstaclePassingMode(
 			.firstOrNull { (fitting(it)?.width ?: 0.0) >= THREAD_MIN_WIDTH }
 			?: return null.also { threadMiss = "no spot across gets through at every tick down to %.2f a tick".format(THREAD_MIN_SPEED) }
 		val maxSpeed = if (fastest > top - 1e-6) Double.POSITIVE_INFINITY else fastest - THREAD_SPEED_MARGIN
-		// Not getting there holding it from this far, it's held from closer by, see [threadHold].
-		if (maxSpeed.isFinite() && canHop(over.with(lane = across(dir).multiply(offset)), progress(player.pos), 0) && hopWallSpeed > maxSpeed)
-			return null.also { threadMiss = "it'd get there at %.2f a tick holding the height from now on, it fits up to %.2f".format(hopWallSpeed, maxSpeed) }
+		// Too fast for it even holding the height from now on, the hardest it slows down: only with room to land before it
+		// and take off again slower, see [threadHold].
+		if (maxSpeed.isFinite() && canHop(over.with(lane = across(dir).multiply(offset)), progress(player.pos), 0) && hopWallSpeed > maxSpeed &&
+			over.obstacle - progress(player.pos) <= landingDistance() + RESTART_ROOM)
+			return null.also { threadMiss = "it'd get there at %.2f a tick holding the height from now on, it fits up to %.2f, no room to land and take off again before it".format(hopWallSpeed, maxSpeed) }
 		// Planned at about the speed it gets there at, the spot is looked for again at the speed it has, see [centreAt].
 		val plan = (if (maxSpeed.isFinite()) fitting(fastest) else fitting(speed)?.takeIf { it.width >= THREAD_MIN_WIDTH } ?: fitting(fastest))
 			?: return null.also { threadMiss = "no spot across gets through" }
@@ -5172,25 +5175,17 @@ abstract class ObstaclePassingMode(
 	 * the next few bounces still gets there slow enough, with the sprint while that does, else without it, and held from
 	 * the latest bounce, rising, arriving close to as fast as it fits: in the simulator from 0.8 to 1.7 a tick always
 	 * through, at 0.84 instead of 0.60 to 0.83 on average, held up to 12 blocks shorter. Without the sprint only when a
-	 * later bounce then still makes it, else held from now. Too fast even so, e.g. sped up a lot after it was planned,
-	 * it lands before it while there's room.
+	 * later bounce then still makes it, else held from now, also coming down: bouncing on to the floor then only gets
+	 * there too fast. Holding is the hardest it slows down, bouncing without the sprint, looking straight down or up
+	 * like slowing for chunks, slows only 0.004 to 0.010 a block. Too fast even so, e.g. sped up a lot after it was
+	 * planned, it lands before it while there's room, and takes off again to come in slower when there's room for
+	 * that after landing, also when holding only just fits, the simulated glide is a bit off over a long hold: in the
+	 * simulator from 0.8 to 1.8 a tick with the opening first seen 57 to 64 ahead always through.
 	 */
 	private fun SafeContext.threadHold(hop: Hop, progress: Double): Boolean? {
 		val thread = thread?.takeIf { it.hopStart == hop.start && it.maxSpeed.isFinite() } ?: return null
 		val slow = slowJumpsFor == thread.hopStart
 		val rises = risesAhead(progress, hop, THREAD_HOLD_RISES)
-		// Once held no sprint jump pushes you on bouncing off the floor on the way.
-		fun now() = canHop(hop, progress, 0, gain = 0.0)
-		// Coming down: held from a bounce only, rising, pulling up from low costs the most speed. Unless from none of the
-		// next bounces it gets over at all any more.
-		if (!player.isOnGround && player.velocity.y <= 0) {
-			if (rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) }) return false
-			if (!now() && hop.start - progress > player.velocity.horizontalLength() * leadTicks(hop)) return false
-			ElytraFly.debug { "Holding the height %.1f before the opening at %.2f coming down, from no later bounce it gets up there".format(
-				thread.wallAt - progress, player.velocity.horizontalLength()) }
-			slowJumpsFor = thread.hopStart
-			return true
-		}
 		fun later(gain: Double) = rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, gain = gain) && hopWallSpeed <= thread.maxSpeed }
 		if (!slow && later(BOUNCE_SPEED_GAIN)) return false
 		if (later(0.0)) {
@@ -5199,18 +5194,32 @@ abstract class ObstaclePassingMode(
 			slowJumpsFor = thread.hopStart
 			return false
 		}
-		if (!now()) return false
-		if (hopWallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN && thread.wallAt - progress > brakeDistance()) {
+		// Once held no sprint jump pushes you on bouncing off the floor on the way.
+		val makesIt = canHop(hop, progress, 0, gain = 0.0)
+		val wallSpeed = hopWallSpeed
+		val falling = !player.isOnGround && player.velocity.y <= 0
+		if (!makesIt) {
+			// Coming down not up there holding from now, from a later bounce it may be, if too fast that one lands
+			// before it. Close by it's held anyway.
+			if (!falling || rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN) } ||
+				hop.start - progress > player.velocity.horizontalLength() * leadTicks(hop)) return false
+			ElytraFly.debug { "Holding the height %.1f before the opening at %.2f coming down, from no later bounce it gets up there".format(
+				thread.wallAt - progress, player.velocity.horizontalLength()) }
+			slowJumpsFor = thread.hopStart
+			return true
+		}
+		val wall = thread.wallAt - progress
+		val restart = wall > landingDistance() + RESTART_ROOM
+		if (wall > landingDistance() && (wallSpeed > thread.maxSpeed + THREAD_SPEED_MARGIN || restart && wallSpeed > thread.maxSpeed)) {
 			// Room to take off again before it: landing only to come in slower, lined up with it on the bounces up to
 			// speed again, not walking. Else walking on as before.
-			val restart = thread.wallAt - progress > brakeDistance() + RESTART_ROOM
 			brake(thread.wallAt, "Too fast for the opening %.1f ahead, it'd get there at %.2f, it fits up to %.2f, landing to %s".format(
-				thread.wallAt - progress, hopWallSpeed, thread.maxSpeed, if (restart) "take off again slower" else "walk around it"))
+				wall, wallSpeed, thread.maxSpeed, if (restart) "take off again slower" else "walk around it"))
 			if (restart) restartFor = thread.wallAt
 			return false
 		}
-		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f, to get there at %.2f, it fits up to %.2f".format(
-			thread.wallAt - progress, player.velocity.horizontalLength(), hopWallSpeed, thread.maxSpeed) }
+		ElytraFly.debug { "Holding the height %.1f before the opening at %.2f${if (falling) " coming down" else ""}, to get there at %.2f, it fits up to %.2f".format(
+			wall, player.velocity.horizontalLength(), wallSpeed, thread.maxSpeed) }
 		slowJumpsFor = thread.hopStart
 		return true
 	}
@@ -5422,10 +5431,16 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.brakeDistance(): Double {
 		val speed = player.velocity.horizontalLength()
-		val now = speed * (fallTicks(player.y, player.velocity.y) + LANDING_TICKS) + BRAKE_MARGIN
 		// Down now, braking takes least, but a tick later the bounce has you up again for the longest way down.
-		return if (!player.isOnGround) now else max(now, speed * (1 + fallTicks(startPos.y, JUMP_VELOCITY) + LANDING_TICKS) + BRAKE_MARGIN)
+		return if (!player.isOnGround) landingDistance() else max(landingDistance(), speed * (1 + fallTicks(startPos.y, JUMP_VELOCITY) + LANDING_TICKS) + BRAKE_MARGIN)
 	}
+
+	/**
+	 * How far you get braking right now until you stand, like [brakeDistance] without the bounce a tick later: braking
+	 * on the floor there's no jump off it any more, e.g. 45 before an opening at 1.65 it stood 3 blocks on.
+	 */
+	private fun SafeContext.landingDistance() =
+		player.velocity.horizontalLength() * (fallTicks(player.y, player.velocity.y) + LANDING_TICKS) + BRAKE_MARGIN
 
 	/** How many ticks it takes from [y] climbing at [climb] to come down on the line, falling straight. */
 	private fun SafeContext.fallTicks(y: Double, climb: Double): Int {
