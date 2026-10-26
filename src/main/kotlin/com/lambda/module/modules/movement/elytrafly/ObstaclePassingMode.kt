@@ -222,6 +222,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_SINK = 0.6
 		/** How high above the top to touch down on it skims, diving, until the box is over it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM = 0.02
+		/** How many ticks of a dip a block deep there has to be at least to bounce on down there, about a bounce, see [dipLane]. */
+		private const val DIP_BOUNCE_TICKS = 12
 		/** Blocks besides lava that hurt or hold you without stopping you, see [isHazard]. */
 		private val HAZARDS = setOf(Blocks.FIRE, Blocks.SOUL_FIRE, Blocks.COBWEB, Blocks.SWEET_BERRY_BUSH, Blocks.WITHER_ROSE, Blocks.POWDER_SNOW)
 		/** How many ticks before the box comes over the top it skims down to just above it, see [Hop.holdY]. */
@@ -431,6 +433,7 @@ abstract class ObstaclePassingMode(
 				it.topped = topped
 				it.rose = rose
 				it.touchedAt = touchedAt
+				it.intoDip = intoDip
 			}
 		/** Not making it yet, logged once. */
 		var waiting = false
@@ -447,6 +450,8 @@ abstract class ObstaclePassingMode(
 		var rose = false
 		/** Over [touch] once and diving onto it, it doesn't stop halfway, see [hopPitch]. */
 		var overTop = false
+		/** Gliding [down] into a dip a block deep to bounce on down there, see [dipLane]. */
+		var intoDip = false
 		/** The tick it touched down on [touch], -1 before. */
 		var touchedAt = -1
 		val touched get() = touchedAt >= 0
@@ -759,6 +764,7 @@ abstract class ObstaclePassingMode(
 			skipHopAt = null
 			noGapAt = null
 			layerHoleAgain = null
+			dipAt = null
 			noLaneAt = null
 			landedTicks = 0
 			lastGoal = null
@@ -869,6 +875,15 @@ abstract class ObstaclePassingMode(
 		val validDistanceFromStart = Vec3d(playerPos.x, startPos.y, playerPos.z) dist startPos > 0.1
 		if (!validDistanceFromStart) return false
 
+		// Over a dip planned to bounce on, coming down into it with the glide down into it dropped on the way: the line goes
+		// down there before landing all the same, see [intoDip].
+		dipAt?.let { dip ->
+			val along = progress(playerPos)
+			when {
+				along > dip.endInclusive || inDip || onLayer -> dipAt = null
+				hop == null && along in dip && player.isGliding && playerPos.y < baseY - 0.05 -> intoDip()
+			}
+		}
 		// Down on the floor or up on a layer of blocks on it, the line follows to where you bounce. Not while walking,
 		// the way there was picked on the line as it was.
 		if (player.isOnGround && passingToPos == null && hop == null)
@@ -969,7 +984,7 @@ abstract class ObstaclePassingMode(
 							startPos = Vec3d(startPos.x, baseY + hop.stepHeight, startPos.z)
 						}
 						// Past the edge, from the line up there the end of the layer would be ahead again and again.
-						hop.down -> offTheLayer()
+						hop.down -> if (hop.intoDip) intoDip() else offTheLayer()
 						else -> ElytraFly.debug { "Over it" }
 					}
 					this@ObstaclePassingMode.hop = null
@@ -1083,8 +1098,9 @@ abstract class ObstaclePassingMode(
 		hopTooSlow = false
 		if (!skipHopAt.near(at) && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
 			if (dodgePastNext(from, linePoint, dir, distance, block, it)) return true
-			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, gliding up onto it at y %.2f".format(distance, it.feetY) }
-			hop = it
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), ${if (inDip) "the end of the dip" else "a layer to bounce on"}, gliding up onto it at y %.2f".format(distance, it.feetY) }
+			// Up out of a dip that's the floor again, a block up from it.
+			hop = if (inDip) it.with(stepHeight = layerHeight + STEP_HEIGHT) else it
 			return true
 		}
 		if (!skipHopAt.near(at)) planHop(linePoint, dir, distance)?.let { planned ->
@@ -1590,7 +1606,8 @@ abstract class ObstaclePassingMode(
 						(lineUp ?: planHop(from, dir, distance, true, lean = tilt))?.let { up ->
 							ElytraFly.debug { "Obstacle %.1f ahead on the lane ($block), a layer to bounce on, gliding up onto it ${if (lineUp != null) "on the line " else ""}at y %.2f".format(distance, up.feetY) }
 							if (lineUp != null) swingBack()
-							hop = up.with(lane = dodge ?: Vec3d.ZERO)
+							// Up out of a dip that's the floor again, a block up from it, see [dipLane].
+							hop = up.with(lane = dodge ?: Vec3d.ZERO, stepHeight = layerHeight + STEP_HEIGHT)
 							dodgeYaw = steerYaw(linePoint, dodge ?: Vec3d.ZERO, dir)
 							return true
 						}
@@ -1766,6 +1783,14 @@ abstract class ObstaclePassingMode(
 		if (floorEnd == null) return glideOverOpenHole(from, dir, at, start)
 		var end: Double = floorEnd
 		while (true) end = holeFrom(end)?.let(::floorFrom) ?: break
+		// A block deep with nothing in the way down there, a lower layer: glided down into, bounced on, stepped up out of.
+		if (!dodging && !onLayer && !inDip) dipLane(from, linePoint, dir, start, end)?.let { (lane, down) ->
+			ElytraFly.debug { "Hole %.1f ahead, %.1f long, a block deep and clear${if (lane == Vec3d.ZERO) "" else " on the lane ${lane.describe(dir)}"}, gliding down into it to bounce on".format(start, end - start) }
+			if (lane != Vec3d.ZERO && lane != dodge) dodgeTo(Lane(lane, 0, lane.dotProduct(across(dir))), at + end + DODGE_MARGIN)
+			else if (lane == Vec3d.ZERO && dodge != null) stopDodge()
+			hop = down
+			return true
+		}
 		// Something in it or soon after it, once over the hole too close to steer past. Dodging, what's dodged is right
 		// beside the lane: the hole's glided over, the dodge goes on past the rest.
 		val next = if (dodging || within != null) null
@@ -1848,6 +1873,59 @@ abstract class ObstaclePassingMode(
 		dodgeTo(lane, at + past)
 		hop = hole.with(lane = lane.target)
 		return true
+	}
+
+	/**
+	 * Whether the hole [start] to [end] ahead of [from] is a dip a block deep that's bounced on like a layer, and on which
+	 * lane: floor a block down all along it, nothing down there in the way of bouncing on, long enough for a bounce, and
+	 * the floor up again right after it to step up onto. With the glide down into it off the floor up here. Null when it
+	 * isn't, e.g. something in it, deeper, or too short: a hole, glided over as before.
+	 */
+	private fun SafeContext.dipLane(from: Vec3d, linePoint: Vec3d, dir: Vec3d, start: Double, end: Double): Pair<Vec3d, Hop>? {
+		val speed = player.velocity.horizontalLength()
+		if (end - start < speed * DIP_BOUNCE_TICKS + DROP_BEFORE + STEP_ON) return null
+		val across = across(dir)
+		val step = laneStep(dir) / 4
+		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val here = from.subtract(linePoint).dotProduct(across)
+		val at = progress(from)
+		val low = startPos.y - STEP_HEIGHT
+		// Nothing in it anywhere across, e.g. a pillar beside the lane: blocks in it make it a hole as before.
+		fun lowBox(point: Vec3d) = Box(point.x - GLIDE_SIZE / 2, low + passerConfig.minObstacleHeight, point.z - GLIDE_SIZE / 2,
+			point.x + GLIDE_SIZE / 2, low + MAX_BOUNCE_RISE, point.z + GLIDE_SIZE / 2)
+		var whole: Box? = null
+		for (side in -sides..sides) for (along in generateSequence(start + HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it < end - HOP_SCAN_STEP }) {
+			val point = linePoint.add(across.multiply(side * step)).add(dir.multiply(along))
+			if (point.boxHasFloor()) continue
+			val box = lowBox(point)
+			if (!spaceEmpty(box)) return null
+			whole = whole?.union(box) ?: box
+		}
+		if (whole == null || world.getOtherEntities(player, whole) { it.glidedOver() }.isNotEmpty()) return null
+		return (-sides..sides).sortedBy { abs(it * step - here) }.firstNotNullOfOrNull { side ->
+			val offset = side * step
+			val lanePoint = linePoint.add(across.multiply(offset))
+			// Over on it before the glide down into it.
+			if (abs(offset - here) > TOUCH_LANE_OFF) {
+				val reached = steerPath(here, dir, offset, 0, start, start).firstOrNull { abs(it.offset - offset) < LANE_REACHED }?.along
+				if (reached == null || reached > start - DROP_BEFORE - DODGE_STEER_AHEAD) return@firstNotNullOfOrNull null
+			}
+			// Floor a block down all along it, none up here, and room to bounce on down there.
+			val clear = generateSequence(start + HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it < end - HOP_SCAN_STEP }.all { along ->
+				val point = lanePoint.add(dir.multiply(along))
+				!point.boxHasFloor() && Vec3d(point.x, low, point.z).boxHasFloor() && spaceEmpty(lowBox(point).expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
+			}
+			if (!clear) return@firstNotNullOfOrNull null
+			// Up out of it again at its end, like onto a layer.
+			if (!isStepUp(Vec3d(lanePoint.x, low, lanePoint.z), dir, end)) return@firstNotNullOfOrNull null
+			val down = planHop(lanePoint, dir, (start - DROP_BEFORE).coerceAtLeast(HOP_SCAN_STEP), true, DROP_BEFORE + STEP_ON)
+				?: return@firstNotNullOfOrNull null
+			// On the line itself exactly no lane, -0.0 across isn't [Vec3d.ZERO].
+			val lane = if (side == 0) Vec3d.ZERO else across.multiply(offset)
+			dipAt = at + start..at + end
+			lane to Hop(down.start, down.end, down.feetY, down.topY, down.obstacle, false, down = true, lane = lane, low = down.low)
+				.also { it.intoDip = true }
+		}
 	}
 
 	/**
@@ -2044,7 +2122,8 @@ abstract class ObstaclePassingMode(
 	 * resets the glide and speeds it up. As it was when there's none, or the glide doesn't get there.
 	 */
 	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
-		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down) return hop
+		// Down in a dip its walls, the floor you started on, would look like tops.
+		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down || inDip) return hop
 		if (hop.hole) return touchLane(hop, line, dir)
 		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
 		// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
@@ -2495,11 +2574,26 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * Over a dip a block deep glided down into, see [dipLane]: the line goes down there before landing, the landing's
+	 * held back like on the floor, see [touchFloor] and Fake Lag.
+	 */
+	private fun intoDip() {
+		ElytraFly.debug { "Into the dip, bouncing on at y %.2f".format(baseY - STEP_HEIGHT) }
+		startPos = Vec3d(startPos.x, baseY - STEP_HEIGHT, startPos.z)
+	}
+
+	/** Where along the line the dip planned to bounce on lies, see [dipLane]. */
+	private var dipAt: ClosedFloatingPointRange<Double>? = null
+
+	/** Bouncing in a dip a block below the floor you started on, see [dipLane]. */
+	protected val inDip get() = startPos.y < baseY - 0.01
+
+	/**
 	 * Whether the carpets [distance] ahead of [from] lie on with no gap for [CARPET_LAYER_MIN], nothing on top, to bounce
 	 * on like a layer. Only from down on the floor. A gap's edge stops you dead like a carpet's.
 	 */
 	private fun SafeContext.isCarpetLayer(from: Vec3d, dir: Vec3d, distance: Double): Boolean {
-		if (onLayer) return false
+		if (onLayer || inDip) return false
 		val up = from.add(0.0, CARPET_HEIGHT, 0.0)
 		// The floor up there first, a gap is quick to find. The rays for what's on top take long.
 		return generateSequence(distance + STEP_ON) { it + HOP_SCAN_STEP }.takeWhile { it <= distance + CARPET_LAYER_MIN }
@@ -3447,7 +3541,10 @@ abstract class ObstaclePassingMode(
 		// On the floor you started on, also from up on a layer. Layers are only bounced on, taking off is from the floor.
 		val spots = generateSequence(first) { it + 1 }
 			.takeWhile { it <= if (carpets) CARPET_WALK_REACH else MAX_PASS_STEPS * passerConfig.obstacleLookAhead.toDouble() }
-			.map { Vec3d(startSearchPos.x, baseY, startSearchPos.z).add(dir.multiply(it)) }
+			.map { along -> Vec3d(startSearchPos.x, baseY, startSearchPos.z).add(dir.multiply(along)).let { up ->
+				// In a dip down there, past its end up on the floor again.
+				if (inDip) Vec3d(up.x, startPos.y, up.z).takeIf { it.canStand() } ?: up else up
+			} }
 			.takeWhile { it.isLoaded && world.worldBorder.contains(it.flooredBlockPos) }
 			// Where you stand already Baritone is done at once, and it's picked again and again.
 			.filter { it.flooredBlockPos != player.blockPos && it.canStand() }
