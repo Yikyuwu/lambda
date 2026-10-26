@@ -221,7 +221,11 @@ abstract class ObstaclePassingMode(
 		private const val HOLD_SINK = 0.1
 		private const val TOUCH_SINK = 0.6
 		/** How high above the top to touch down on it skims, diving, until the box is over it, see [Hop.holdY]. */
-		private const val TOUCH_SKIM = 0.02
+		private const val TOUCH_SKIM = 0.05
+		/** How much faster after it gliding over a top has to be than touching down on it to glide instead, see [glidingFaster]. */
+		private const val TOUCH_MIN_GAIN = 0.02
+		/** How far before the end of a hole with a layer right after it the feet are above that layer already, see [holeHop]. */
+		private const val LAYER_AFTER_HOLE = 1.5
 		/** How many ticks of a dip a block deep there has to be at least to bounce on down there, about a bounce, see [dipLane]. */
 		private const val DIP_BOUNCE_TICKS = 12
 		/** Blocks besides lava that hurt or hold you without stopping you, see [isHazard]. */
@@ -294,10 +298,13 @@ abstract class ObstaclePassingMode(
 		private const val MAX_HOLD_CLIMB = 0.25
 		private const val JUMP_VELOCITY = 0.42
 		/**
-		 * The speed a bounce adds, the jump sprinting: 0.17 to 0.19 a tick seen. Left out, a glide simulated past a bounce
-		 * comes out too slow, e.g. over the rest of a hole after touching down on a pillar in it.
+		 * The speed a bounce adds, the sprint jump's push along the way, before that tick's glide at [JUMP_PITCH]. Left
+		 * out, a glide simulated past a bounce comes out too slow, e.g. over the rest of a hole after touching down on a
+		 * pillar in it. Like vanilla, the logged bounces match it to a hundredth of a block.
 		 */
-		private const val BOUNCE_SPEED_GAIN = 0.17
+		private const val BOUNCE_SPEED_GAIN = 0.2
+		/** The pitch the jump tick of a bounce is flown at, level, see BounceElytraFly. */
+		private const val JUMP_PITCH = 0.0
 		/** How high a bounce takes your feet off the floor where nothing else caps it. */
 		private const val MAX_BOUNCE_RISE = 2.0
 		/**
@@ -629,6 +636,12 @@ abstract class ObstaclePassingMode(
 	 * bouncing on. Not on the way to gliding over something, it's planned for bouncing on up to it.
 	 */
 	protected val isDodging get() = dodge != null && !dodgeCarpets && hop == null && (atFitSpeed || !onLane && !speedingUp)
+	/**
+	 * Up over a layer of blocks just now and not down on it yet: down onto it to bounce on from its start, see
+	 * [BounceElytraFly]. Flying level, e.g. dodging right after, it glided half across it first.
+	 */
+	protected var stepLanding = false
+		private set
 	/** Over on the lane dodged to and not tilting past what's dodged yet, see [steerDodge]. */
 	private var onLane = false
 	/** Ticks since what's ahead was last looked at, see [planSpeed]. */
@@ -773,6 +786,7 @@ abstract class ObstaclePassingMode(
 			noWayYet.clear()
 			touchSide = null
 			diveTop = null
+			stepLanding = false
 			slowFor = null
 			forgetSpeedNeed()
 		}
@@ -783,6 +797,7 @@ abstract class ObstaclePassingMode(
 			stopDodge()
 			brakeAt = null
 			hop = null
+			stepLanding = false
 			dropShapes()
 		}
 		// Left the world, e.g. disconnected and waiting in the queue: the shape caches hold on to it through you.
@@ -807,6 +822,7 @@ abstract class ObstaclePassingMode(
 
 	/** Set back, what it was at isn't tried again, and with [PasserSettings.walkWhenFlagged] it lands to walk on. */
 	private fun SafeContext.flagged() {
+		stepLanding = false
 		hop?.let {
 			ElytraFly.debug { "Set back while gliding over an obstacle" }
 			skipHopAt = it.start
@@ -825,6 +841,7 @@ abstract class ObstaclePassingMode(
 	fun SafeContext.handlePassingObstacles() = timed { passObstacles() }
 
 	private fun SafeContext.passObstacles(): Boolean {
+		if (player.isOnGround || !player.isGliding) stepLanding = false
 		passTicks++
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
@@ -976,11 +993,16 @@ abstract class ObstaclePassingMode(
 					ElytraFly.debug { "In the way %.1f ahead before the obstacle at this speed (${inTheWay.what}), not gliding over it".format(inTheWay.distance + skip) }
 					this@ObstaclePassingMode.hop = null
 				}
-				progress > hop.end -> {
+				// Onto a layer from below, up there as soon as all of the box is over it: down onto it from its start, not its
+				// middle, and well onto it, not on its edge.
+				progress > hop.end || hop.step && !onLayer && progress > hop.obstacle &&
+					topOverlap(playerPos, baseY + hop.stepHeight) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 -> {
 					// Above the layer now, from the line down on the floor it'd be in the way right where you are.
 					when {
 						hop.step -> {
 							ElytraFly.debug { "${if (onLayer) "Across the gap" else "Up on the blocks"}, bouncing on at y %.2f".format(baseY + hop.stepHeight) }
+							// Up from below only, not across a gap in a layer.
+							stepLanding = !onLayer && !player.isOnGround
 							startPos = Vec3d(startPos.x, baseY + hop.stepHeight, startPos.z)
 						}
 						// Past the edge, from the line up there the end of the layer would be ahead again and again.
@@ -1724,7 +1746,7 @@ abstract class ObstaclePassingMode(
 		val lane = if (dodge.let { it != null && it != Vec3d.ZERO }) dodgeLanePoint(linePoint, dir) else linePoint
 		val hole = holesAhead(lane, dir).firstOrNull { it.start > progress } ?: return forgetSpeedNeed()
 		// Like [glideOverHole] glides over it, over the blocks in it too.
-		val over = holeHop(lane, dir, hole).first
+		val over = holeHop(lane, dir, hole, layerRightAfter(lane, dir, hole.endInclusive - progress)).first
 		fun makesIt(speed: Double) = canHop(over, progress, NO_HOLD, speed) || canHop(over, progress, 0, speed)
 		val speed = player.velocity.horizontalLength()
 		val wants = !makesIt(speed)
@@ -1796,19 +1818,26 @@ abstract class ObstaclePassingMode(
 		val next = if (dodging || within != null) null
 			else from.add(dir.multiply(start)).obstacleHit(dir, end - start + brakeDistance() + DODGE_STEER_AHEAD)?.let { it.distance + start }
 		// Right after it both are glided over as one, from before the hole on at its height.
+		// A layer right after it to bounce on up there: the hole's glided over as usual, coming over its end above it.
+		var layerAfter = false
 		if (next != null && next >= end && next - end <= HOP_GAP) {
 			// Under it would mean coming down low over the hole, it's dodged instead.
 			val over = planHop(linePoint, dir, next)?.takeUnless { it.under }
 				?.let { Hop(min(it.start, at + start - HOP_SCAN_STEP), it.end, it.feetY, it.topY, at + start, false) }
-				?.takeIf { canGetOver(it, at) } ?: return false
-			ElytraFly.debug { "Hole %.1f ahead, %.1f long, something right after it, gliding over both at y %.2f".format(start, end - start, over.feetY) }
-			hop = over
-			return true
+				?.takeIf { canGetOver(it, at) }
+			if (over != null) {
+				ElytraFly.debug { "Hole %.1f ahead, %.1f long, something right after it, gliding over both at y %.2f".format(start, end - start, over.feetY) }
+				hop = over
+				return true
+			}
+			if (!isStepUp(from.add(dir.multiply(next - 1.0)), dir, 1.0)) return false
+			layerAfter = true
 		}
 		// Farther, or in it: glided over from the line, bouncing on up to it faster than on a lane, and steered over to a
 		// lane past it meanwhile. With none, that's what's dodged or glided over first.
 		// In it, glided over or touched down on with the hole, a lane only for one that can't be, see below.
-		val nextLane = next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: if (it < end) null else return false }
+		// A layer right after it is bounced onto, not dodged.
+		val nextLane = if (layerAfter) null else next?.let { freeLane(from, linePoint, dir, it, Vec3d.ZERO) ?: if (it < end) null else return false }
 		// High enough for the blocks in it that can be glided over. Dodging, on the lane flown along, not where you are
 		// steering over to it, from there what's dodged looks in the way. Steering over to one past what's after it, on
 		// that lane, e.g. touching down on a block on the way over there.
@@ -1817,7 +1846,7 @@ abstract class ObstaclePassingMode(
 			nextLane != null -> linePoint.add(nextLane.target)
 			else -> from
 		}
-		val (hole, blocked) = holeHop(glideLine, dir, at + start..at + end)
+		val (hole, blocked) = holeHop(glideLine, dir, at + start..at + end, layerAfter)
 		// Not gotten over, about to brake for it: past it on floor beside it instead, if there's a lane with floor all
 		// along it, still steered over to in time, see [floorLane]. Only in the last looks before braking, farther it may
 		// still get over it faster, see [noLaneYet].
@@ -2072,7 +2101,8 @@ abstract class ObstaclePassingMode(
 			touchSide = side
 			touchHoleStart = holeStart
 		}
-		val over = holeHop(holeLine.add(0.0, baseY - holeLine.y, 0.0), dir, hole).first
+		val floorLine = holeLine.add(0.0, baseY - holeLine.y, 0.0)
+		val over = holeHop(floorLine, dir, hole, layerRightAfter(floorLine, dir, hole.endInclusive - progress(floorLine))).first
 		if (!canGetOver(over, progress(linePoint))) {
 			val why = "$hopMiss${if (touchMiss.isEmpty()) "" else "; $touchMiss"}"
 			keep()
@@ -2098,40 +2128,80 @@ abstract class ObstaclePassingMode(
 		return false
 	}
 
+	/**
+	 * Whether a layer a block high starts right [end] ahead of [floorLine], down on the floor you started on, to bounce
+	 * on up there: with floor up there for a while and nothing on it, like [isStepUp] looks from the floor.
+	 */
+	private fun SafeContext.layerRightAfter(floorLine: Vec3d, dir: Vec3d, end: Double): Boolean {
+		val up = floorLine.add(0.0, STEP_HEIGHT, 0.0).add(dir.multiply(end))
+		return up.add(dir.multiply(STEP_ON)).boxHasFloor() && up.add(dir.multiply(STEP_CLEAR)).boxHasFloor() && up.obstacleDistance(dir, STEP_CLEAR) == null
+	}
+
 	/** Why [hole] right after the end of the layer isn't got over from bouncing on up here, null when it is. */
 	private fun SafeContext.holeAfterEdgeMiss(linePoint: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): String? =
-		if (canGetOver(holeHop(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir, hole).first, progress(linePoint))) null else hopMiss
+		linePoint.add(0.0, baseY - linePoint.y, 0.0).let { floorLine ->
+			if (canGetOver(holeHop(floorLine, dir, hole, layerRightAfter(floorLine, dir, hole.endInclusive - progress(floorLine))).first, progress(linePoint))) null
+			else hopMiss
+		}
 
 	/**
 	 * The glide along [line] over [hole], from where to where along the line, just above the floor there and higher over
 	 * the blocks in it, see [clearInside]. Partly over its edge the box stands, the rays found where it doesn't. With
 	 * where a block in it is that can't be glided over.
 	 */
-	private fun SafeContext.holeHop(line: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>): Pair<Hop, Double?> {
+	private fun SafeContext.holeHop(
+		line: Vec3d, dir: Vec3d, hole: ClosedFloatingPointRange<Double>, layerAfter: Boolean = false,
+	): Pair<Hop, Double?> {
 		val at = progress(line)
 		// Not lower than you already are, e.g. right off a layer above it.
 		val (raised, topY, aim, blocked) = clearInside(line, dir, hole.start - at, hole.endInclusive - at, min(maxHopY(), max(line.y + MAX_BOUNCE_RISE, player.y)))
+		// A layer right after it: over its last block above that, coming down on it, not into its edge.
+		val up = if (!layerAfter) raised
+			else raised + ((hole.endInclusive - LAYER_AFTER_HOLE)..hole.endInclusive to line.y + STEP_HEIGHT)
 		val over = Hop(hole.start - HOP_SCAN_STEP, hole.endInclusive, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
-			low = true, hole = true, aim = aim, raised = raised)
+			low = true, hole = true, aim = aim, raised = up)
 		// Also with none in it on this lane, beside it there may be one.
-		return withTouch(over, line, dir) to blocked
+		// Gliding over it instead may be faster, only with nothing in it on the line that can't be glided over.
+		return withTouch(over, line, dir, plainFine = blocked == null) to blocked
 	}
 
 	/**
 	 * [hop] touching down on the first top on its way that it can, e.g. a pillar or a block in a hole, bouncing off it
 	 * resets the glide and speeds it up. As it was when there's none, or the glide doesn't get there.
 	 */
-	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
+	private fun SafeContext.withTouch(hop: Hop, line: Vec3d, dir: Vec3d, plainFine: Boolean = true): Hop {
 		// Down in a dip its walls, the floor you started on, would look like tops.
 		if (hop.under || hop.low && !hop.hole || hop.cube || hop.step || hop.down || inDip) return hop
-		if (hop.hole) return touchLane(hop, line, dir)
+		if (hop.hole) return touchLane(hop, line, dir, plainFine)
 		val touch = touchSpot(line, dir, hop.start, hop.end) ?: laneTouch(hop, line, dir) ?: return hop.also { touchMiss = "no top to touch down on" }
 		// As high as there's room on the way to it, above what the glide would rather keep under: the bounce before it
 		// may take you higher than the top, sinking to just above it after.
 		val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
-		if (canGetOver(touching, progress(player.pos))) return touching.also { touchMiss = "" }
+		if (canGetOver(touching, progress(player.pos))) {
+			glidingFaster(hop, touching, progress(player.pos))?.let { return hop }
+			return touching.also { touchMiss = "" }
+		}
 		touchMiss = "touching down on the top at y %.2f %.1f ahead misses too, $hopMiss".format(touch.y, touch.range.start - progress(player.pos))
 		return hop
+	}
+
+	/**
+	 * Why gliding over [hop] without touching down is clearly faster than [touching] down, null when it isn't: touching
+	 * down when gliding over doesn't get over, isn't faster, or doesn't get past something. Kept in [touchMiss], and
+	 * [hopExitSpeed] as it was.
+	 */
+	private fun SafeContext.glidingFaster(hop: Hop, touching: Hop, progress: Double): String? {
+		val exit = hopExitSpeed
+		val miss = hopMiss
+		val short = hopShort
+		// Alike, both held from now: the one [canGetOver] found may be held a bounce later.
+		val touchExit = if (canHop(touching, progress, 0)) hopExitSpeed else null
+		val plainExit = if (canGetOver(hop, progress) && canHop(hop, progress, 0)) hopExitSpeed else null
+		hopExitSpeed = exit
+		hopMiss = miss
+		hopShort = short
+		if (touchExit == null || plainExit == null || plainExit < touchExit + TOUCH_MIN_GAIN) return null
+		return "gliding over it keeps as much speed, %.2f a tick after it, %.2f touching down".format(plainExit, touchExit).also { touchMiss = it }
 	}
 
 	/**
@@ -2141,7 +2211,7 @@ abstract class ObstaclePassingMode(
 	 * until the hole, e.g. past a pillar at its start, at the height held above the top until it, and up there after it
 	 * to past the hole's end, e.g. past a pillar there. Simulated with the bounce off the top. As it was when there's none.
 	 */
-	private fun SafeContext.touchLane(hop: Hop, line: Vec3d, dir: Vec3d): Hop {
+	private fun SafeContext.touchLane(hop: Hop, line: Vec3d, dir: Vec3d, plainFine: Boolean = true): Hop {
 		val across = across(dir)
 		val forward = dir.normalize()
 		val here = line.subtract(startPos).dotProduct(across)
@@ -2154,7 +2224,10 @@ abstract class ObstaclePassingMode(
 		// The box and a bit at [at], at bounce height before the hole, at the height held above the top in it. Bouncing on a
 		// layer of blocks before it, e.g. planned from up there, see [layerHole], at bounce height above that.
 		fun boxClear(at: Vec3d, along: Double, held: Double): Boolean {
-			val ground = if (onLayer && along < hop.obstacle && Vec3d(at.x, startPos.y, at.z).boxHasFloor()) startPos.y else floor
+			// Up there where any of the box and a bit is over the layer, at its edge too.
+			val ground = if (onLayer && along < hop.obstacle && !spaceEmpty(Box(at.x - GLIDE_SIZE / 2, startPos.y - 0.05, at.z - GLIDE_SIZE / 2,
+					at.x + GLIDE_SIZE / 2, startPos.y, at.z + GLIDE_SIZE / 2).expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN), hazards = false)) startPos.y
+				else floor
 			val (bottom, top) = if (along < hop.obstacle) ground + passerConfig.minObstacleHeight to ground + MAX_BOUNCE_RISE else held to held + GLIDE_SIZE
 			return spaceEmpty(Box(at.x - GLIDE_SIZE / 2, bottom, at.z - GLIDE_SIZE / 2, at.x + GLIDE_SIZE / 2, top, at.z + GLIDE_SIZE / 2)
 				.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
@@ -2295,6 +2368,8 @@ abstract class ObstaclePassingMode(
 		val free = plans.size
 		plans.removeAll { plan -> !reachable(plan).also { if (!it) tried += "${plan.text} (${plan.covered}/25) can't be steered over to in time" } }
 		val sorted = plans.sortedWith(compareByDescending<Plan> { it.covered }.thenBy { abs(it.lane - off) })
+		val keptSide = touchSide
+		val keptHoleStart = touchHoleStart
 		// Not making it yet, e.g. slow still: dodging before it stays on the side of the best way to touch down there,
 		// faster later it may.
 		sorted.firstOrNull()?.let {
@@ -2306,6 +2381,12 @@ abstract class ObstaclePassingMode(
 			// may take you higher than the top, sinking to just above it after.
 			val touching = hop.with(touch = plan.touch, lane = across.multiply(plan.lane), topY = max(hop.topY, maxHopY()))
 			if (canGetOver(touching, progress)) {
+				// Gliding over it on the line keeps as much speed: no touch-down needed, the side of the top not kept.
+				if (plainFine && glidingFaster(hop, touching, progress) != null) {
+					touchSide = keptSide
+					touchHoleStart = keptHoleStart
+					return hop
+				}
 				touchMiss = ""
 				touchSide = touching.lane to hop.end
 				touchLaneText = "%s, %d/25 of the box over it%s".format(plan.text, plan.covered, tried.joinToString("") { ", tried before: $it" })
@@ -2729,6 +2810,7 @@ abstract class ObstaclePassingMode(
 		val rises = mutableListOf<Int>()
 		for (tick in 0 until CAN_HOP_SIM_TICKS) {
 			if (along >= hop.start) break
+			var jumped = false
 			if (y <= startPos.y && climb <= 0) {
 				val floor = floorAt(dir, along, hop.lane) ?: break
 				if (y <= floor) {
@@ -2736,9 +2818,10 @@ abstract class ObstaclePassingMode(
 					climb = JUMP_VELOCITY
 					speed += BOUNCE_SPEED_GAIN
 					rises += tick
+					jumped = true
 				}
 			}
-			glide(climb, speed, bounce(y, climb), gravity).let { (c, s) ->
+			glide(climb, speed, if (jumped) JUMP_PITCH else bounce(y, climb), gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
@@ -2769,15 +2852,20 @@ abstract class ObstaclePassingMode(
 		var holding = hop.held
 		// From now on, not only once holding: slow right after taking off, it's held from close by with no time to rise.
 		var touched = hop.touched
+		// Came down on the top to touch down on last tick, bounced off it this one.
+		var onTopNow = false
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
 			val touch = hop.touch
+			var jumped = false
 			// Down on the top to touch down on, bounced off it like the floor. From then on it keeps the height it has.
-			if (touch != null && !touched && along in touch.range && y <= touch.y && climb <= 0) {
+			if (touch != null && !touched && (onTopNow || along in touch.range && y <= touch.y && climb <= 0)) {
 				y = touch.y
 				climb = JUMP_VELOCITY
 				speed += BOUNCE_SPEED_GAIN
 				touched = true
 				topped = true
+				jumped = true
+				onTopNow = false
 			}
 			// Only off floor that's there, e.g. not in a hole on the way.
 			else if (y <= startPos.y && climb <= 0) {
@@ -2793,6 +2881,7 @@ abstract class ObstaclePassingMode(
 					y = floor
 					climb = JUMP_VELOCITY
 					speed += BOUNCE_SPEED_GAIN
+					jumped = true
 				}
 			}
 			// Bouncing on until then.
@@ -2803,13 +2892,19 @@ abstract class ObstaclePassingMode(
 			val overTop = hop.touch?.range?.contains(along) ?: true
 			val dive = hop.diving(along, speed, touched)
 			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, topped, touched, dive, overTop), gravity,
-				hop.sinkAt(dive && overTop)) else bounce(y, climb)
+				hop.sinkAt(dive && overTop)) else if (jumped) JUMP_PITCH else bounce(y, climb)
 			glide(climb, speed, pitch, gravity).let { (c, s) ->
 				climb = c
 				speed = s
 			}
 			val wasOnTop = overTop && hop.touch != null
-			y += climb
+			// The move goes down first, at where the box is: over the top, coming down through its height lands on it, on
+			// the tick the box is over it at all, like the flight's.
+			if (touch != null && !touched && wasOnTop && y >= touch.y && y + climb <= touch.y) {
+				y = touch.y
+				climb = 0.0
+				onTopNow = true
+			} else y += climb
 			along += speed
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = hop.touch?.range?.contains(along) == true
@@ -2821,7 +2916,8 @@ abstract class ObstaclePassingMode(
 				hopShort = Double.POSITIVE_INFINITY
 				return false
 			}
-			val low = if (onTop && !touched) Double.NEGATIVE_INFINITY else hop.feetAt(along) + if (onTop) 0.0 else margin
+			// Landed on the top this tick, the move across goes on past it standing on it.
+			val low = if (onTopNow || onTop && !touched) Double.NEGATIVE_INFINITY else hop.feetAt(along) + if (onTop) 0.0 else margin
 			if (along >= hop.start && (y < low || y > hop.topY)) {
 				hopMiss = "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
 					.format(player.y, player.velocity.y, player.velocity.horizontalLength(), y, along - progress, hop.feetAt(along), hop.topY)
