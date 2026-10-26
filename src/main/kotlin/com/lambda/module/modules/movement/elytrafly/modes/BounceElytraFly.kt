@@ -507,6 +507,9 @@ class BounceElytraFly(
 		}
 	}
 
+	override fun SafeContext.bounceKey(): Any? =
+		listOf(ceilingY(), stepLanding, pacer.pace, pacer.throttle, slowingToFit, isDodging, smartPitch, pitch)
+
 	/** Over an obstacle in the nether up to [MAX_NETHER_HOP_Y], over two blocks too. */
 	override fun SafeContext.maxHopY() =
 		if (world.registryKey == World.NETHER) max(maxFlightY(), min(MAX_NETHER_HOP_Y, startPos.y + MAX_HOP_RISE))
@@ -517,7 +520,9 @@ class BounceElytraFly(
 		else startPos.y + MAX_COAST_RISE
 
 	/** The highest your feet may go while flying level: below a block roof, the nether roof, and not far above the flight line. */
-	private fun SafeContext.ceilingY(ceiling: Double = maxFlightY()): Double {
+	private fun SafeContext.ceilingY(ceiling: Double = maxFlightY()): Double = ceilingYIn(ceiling) { findCeilingY(ceiling) }
+
+	private fun SafeContext.findCeilingY(ceiling: Double): Double {
 		var rise = ROOF_SCAN_STEP
 		while (rise <= ROOF_SCAN_HEIGHT && player.y + rise - ROOF_SCAN_STEP < ceiling) {
 			if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, rise, 0.0)))

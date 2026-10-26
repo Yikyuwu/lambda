@@ -47,7 +47,8 @@ class FlightPacer {
     var pace = Pace.Free
         private set
     /** How much of the bounce pitch to use while [Pace.Throttled], from 0 for level to 1 for all of it. */
-    private var throttle = 1.0
+    var throttle = 1.0
+        private set
     /** How far ahead the chunks are usually loaded, forgotten slowly. */
     private var usualLoaded = 0.0
     private var lagging = false
