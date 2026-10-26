@@ -335,6 +335,9 @@ object ElytraFly : Module(
         }
     }
 
+    /** Whether [debug] writes anything, to skip work done only for the log. */
+    val debugging get() = debugLog
+
     /** Writes [message] to the game log with [debugLog]. */
     fun debug(message: () -> String) {
         if (debugLog) runSafe { LOG.info("[ElytraFly] at ${player.pos.short}: ${message()}") }
