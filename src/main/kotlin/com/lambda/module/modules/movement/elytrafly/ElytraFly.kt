@@ -46,8 +46,8 @@ import com.lambda.module.modules.movement.elytrafly.modes.GrimControlElytraFly
 import com.lambda.module.tag.ModuleTag
 import com.lambda.task.Task
 import com.lambda.threading.runGameScheduled
-import com.lambda.util.CommunicationUtils.warn
 import com.lambda.threading.runSafe
+import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.NamedEnum
 import com.lambda.util.Timer
 import com.lambda.util.extension.isElytraFlying
@@ -336,8 +336,6 @@ object ElytraFly : Module(
         }
     }
 
-    /** Whether [debug] writes anything, to skip work done only for the log. */
-    val debugging get() = debugLog
     /** Whether the chooser that only logs runs, see [ObstaclePassingMode]. */
     val choosing get() = debugLog && chooserLog
 
@@ -351,6 +349,9 @@ object ElytraFly : Module(
     private val stuckAt = ArrayList<Pair<Long, Vec3d>>()
     /** What [traceLine] kept back lately, written out at a setback to see what led up to it. */
     private val recent = ArrayDeque<String>()
+    private var lastSurroundings: Vec3d? = null
+    private var hitWall = false
+    private var lastHorizontalSpeed = 0.0
 
     /** [traceLine] for the modes, [line] only built with [debugLog]. */
     fun traceLine(line: () -> String) {
@@ -369,9 +370,6 @@ object ElytraFly : Module(
             if (recent.size > RECENT_LINES) recent.removeFirst()
         }
     }
-    private var lastSurroundings: Vec3d? = null
-    private var hitWall = false
-    private var lastHorizontalSpeed = 0.0
 
     /** What the client has in the way around [pos], to tell what only the server has from what both have. */
     private fun SafeContext.surroundings(pos: Vec3d): String {

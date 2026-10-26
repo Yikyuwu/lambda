@@ -471,8 +471,6 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_CLEARANCE = 0.2
 		/** How many touch-downs on a lane the chooser looks at at a block, first first, see [chooseAtBlock]. */
 		private const val CHOOSER_LANE_TOPS = 2
-		/** How far before a block the first top on the way to it may be to touch down on it first, see [chooseAtBlock]. */
-		private const val STONE_REACH = 24.0
 		/** How close below its height over a hole counts as up there, see [Hop.topped]. */
 		private const val TOPPED_MARGIN = 0.1
 		/** How often the holes ahead are looked at, see [planSpeed]. */
@@ -998,19 +996,20 @@ abstract class ObstaclePassingMode(
 				return@timed null
 			}
 		}
-		if (!holdingFor(hop, progress(player.pos))) return@timed null
+		val along = progress(player.pos)
+		if (!holdingFor(hop, along)) return@timed null
 		// A top coming, skimmed down to just above a few ticks early, see [Hop.holdY]: where the box really comes over it,
 		// not where the lane planned crosses it. Still steering over to that lane, e.g. from the line over a hole, it comes
 		// over it elsewhere along the way.
 		val touch = hop.touch?.takeIf { !hop.touched }
-		val along = progress(player.pos)
-		val near = touch != null && along >= touch.range.start - player.velocity.horizontalLength() * (TOUCH_SKIM_TICKS + 1) - TOUCH_NEAR &&
+		val speed = player.velocity.horizontalLength()
+		val near = touch != null && along >= touch.range.start - speed * (TOUCH_SKIM_TICKS + 1) - TOUCH_NEAR &&
 			along <= touch.range.endInclusive + TOUCH_NEAR
 		// Steering in toward the top's lane, the straight look ahead from the heading it has finds it a tick or two late, the
 		// skim then hasn't come down far enough to drop onto it: from where the plan's lane comes over it, like [Hop.diving].
 		val steeringIn = touch != null && along >= touch.switchAt && along <= touch.range.endInclusive &&
-			along >= touch.range.start - player.velocity.horizontalLength() * TOUCH_SKIM_TICKS &&
-			abs(player.pos.subtract(startPos).dotProduct(across(getSnappedDir())) - touch.lane.dotProduct(across(getSnappedDir()))) > TOUCH_LANE_OFF
+			along >= touch.range.start - speed * TOUCH_SKIM_TICKS &&
+			across(getSnappedDir()).let { side -> abs(player.pos.subtract(startPos).dotProduct(side) - touch.lane.dotProduct(side)) } > TOUCH_LANE_OFF
 		val dive = near && (steeringIn || topUnderSoon(touch!!.y))
 		// Down onto it as near its middle as it gets: on the tick the box is over it the most, unless the next is more. Off
 		// to the side of its middle that's halfway across it along the way, as far from where it came onto it as from where
@@ -1044,11 +1043,10 @@ abstract class ObstaclePassingMode(
 			through.shedding = false
 			ElytraFly.debug {
 				val made = canHop(held, along, 0, gain = 0.0, turn = true)
-				"Done flapping %.1f before the opening at %.2f, holding the height %s".format(through.wallAt - along, player.velocity.horizontalLength(),
+				"Done flapping %.1f before the opening at %.2f, holding the height %s".format(through.wallAt - along, speed,
 					if (made) "gets there at %.2f, it fits up to %.2f".format(hopWallSpeed, through.maxSpeed) else "doesn't get up there")
 			}
 		}
-		val speed = player.velocity.horizontalLength()
 		holdPitch(player.y, climb, speed, held.holdY(player.y, along, dive = dive, overTop = overTop), player.finalGravity, held.sinkAt(dive && overTop))
 	}
 
@@ -1065,17 +1063,17 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.topOverlap(at: Vec3d, y: Double): Double {
 		val half = GLIDE_SIZE / 2
 		// Summed right away, the positions iterated are one and the same, moved along: kept in a list, all would be the last.
-		return BlockPos.iterate(BlockPos.ofFloored(at.x - half, y - 0.5, at.z - half), BlockPos.ofFloored(at.x + half - 1e-6, y - 0.5, at.z + half - 1e-6))
-			.sumOf { if (!topAt(it.x + 0.5, it.z + 0.5, y)) 0.0
-				else (min(at.x + half, it.x + 1.0) - max(at.x - half, it.x.toDouble())) * (min(at.z + half, it.z + 1.0) - max(at.z - half, it.z.toDouble())) }
+		return blocksUnder(at, y, half).sumOf { if (!topAt(it.x + 0.5, it.z + 0.5, y)) 0.0
+			else (min(at.x + half, it.x + 1.0) - max(at.x - half, it.x.toDouble())) * (min(at.z + half, it.z + 1.0) - max(at.z - half, it.z.toDouble())) }
 	}
 
 	/** Whether the box at [at] is over a top at [y] by [overlap] at least each way, see [topUnderSoon]. */
-	private fun SafeContext.topUnder(at: Vec3d, y: Double, overlap: Double): Boolean {
-		val half = GLIDE_SIZE / 2 - overlap
-		return BlockPos.iterate(BlockPos.ofFloored(at.x - half, y - 0.5, at.z - half), BlockPos.ofFloored(at.x + half - 1e-6, y - 0.5, at.z + half - 1e-6))
-			.any { topAt(it.x + 0.5, it.z + 0.5, y) }
-	}
+	private fun SafeContext.topUnder(at: Vec3d, y: Double, overlap: Double) =
+		blocksUnder(at, y, GLIDE_SIZE / 2 - overlap).any { topAt(it.x + 0.5, it.z + 0.5, y) }
+
+	/** The blocks ending at [y] under the box at [at] reaching [half] each way, one position moved along, see [topOverlap]. */
+	private fun blocksUnder(at: Vec3d, y: Double, half: Double) =
+		BlockPos.iterate(BlockPos.ofFloored(at.x - half, y - 0.5, at.z - half), BlockPos.ofFloored(at.x + half - 1e-6, y - 0.5, at.z + half - 1e-6))
 
 	/** How long obstacle passing took this tick so far. */
 	private var passingNanos = 0L
@@ -1119,14 +1117,8 @@ abstract class ObstaclePassingMode(
 			forgetSpeedNeed()
 		}
 		onDisable {
-			passingToPos = null
-			pausedWalk = false
 			if (passerConfig.passObstacles) BaritoneHandler.cancel()
-			commitNoLane("disable")
-			commitBrake("disable", null)
-			commitHop("disable", null)
-			stepLanding = false
-			dropShapes()
+			dropPlan("disable")
 		}
 		// Left the world, e.g. disconnected and waiting in the queue: the shape caches hold on to it through you.
 		listenUnsafe<WorldEvent.Leave> { dropShapes() }
@@ -1187,16 +1179,21 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.newWorld() {
 		if (passingToPos != null) BaritoneHandler.cancel()
-		passingToPos = null
-		pausedWalk = false
-		commitNoLane("newWorld")
-		commitBrake("newWorld", null)
-		commitHop("newWorld", null)
-		stepLanding = false
-		dropShapes()
+		dropPlan("newWorld")
 		if (!world.isChunkLoaded(ChunkSectionPos.getSectionCoord(player.blockX), ChunkSectionPos.getSectionCoord(player.blockZ))) return
 		ElytraFly.debug { "Respawned or joined a world, planning anew" }
 		onEnableListeners.forEach { it() }
+	}
+
+	/** Drops the walk and all that's planned, and the shapes kept, by [owner]. */
+	private fun dropPlan(owner: String) {
+		passingToPos = null
+		pausedWalk = false
+		commitNoLane(owner)
+		commitBrake(owner, null)
+		commitHop(owner, null)
+		stepLanding = false
+		dropShapes()
 	}
 
 	/** Set back, what it was at isn't tried again, and with [PasserSettings.walkWhenFlagged] it lands to walk on. */
@@ -1602,9 +1599,7 @@ abstract class ObstaclePassingMode(
 			return pathToValidPoint(closestLinePoint.add(snappedDir.multiply(blocked)), snappedDir)
 		}
 
-		if (BaritoneHandler.isActive) return true
-
-		return false
+		return BaritoneHandler.isActive
 	}
 
 	/** Glides over to a free lane past the obstacle [distance] ahead, or lands to walk around it when there's none. */
@@ -1687,7 +1682,7 @@ abstract class ObstaclePassingMode(
 				"Mob %.1f ahead ($block), gliding ${if (over.under) "under" else "over"} it at y %.2f${highAim?.let { ", %.2f if fast enough".format(it) } ?: ""}, %.1f long"
 					.format(distance, over.targetY, over.end - over.start)
 			}
-			commitHop("passCube", Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, highAim = highAim))
+			commitHop("passCube", over.overCube(highAim = highAim))
 			return true
 		}
 		// Slow still, e.g. right after taking off. Faster a few bounces on, or from the next bounce, it may get over after
@@ -1698,7 +1693,7 @@ abstract class ObstaclePassingMode(
 		// Too slow only, it gets as close to the height as it can anyway. Maybe just past it, else bumping into it less.
 		if (hopTooSlow) plan(anyway = true)?.let { over ->
 			ElytraFly.debug { "Mob %.1f ahead ($block), can't get ${if (over.under) "under" else "over"} it in time ($hopRejection), going for it anyway".format(distance) }
-			commitHop("passCube", Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, under = over.under, cube = true, anyway = true))
+			commitHop("passCube", over.overCube(anyway = true))
 			return true
 		}
 		// No room over or under it, e.g. under a low roof: past it on a lane out of its reach, the rays see it that big.
@@ -1734,9 +1729,13 @@ abstract class ObstaclePassingMode(
 		ElytraFly.debug { "Mob %.1f ahead ($block), ${next.what} %.1f after it, over to ${lane.target.describe(dir)}${lane.leanText()} gliding over the mob there at y %.2f".format(distance, next.distance, over.targetY) }
 		commitLane("pastMobAndNext", lane, at + end)
 		dodgeAfterMob = true
-		commitHop("pastMobAndNext", Hop(over.start, over.end, over.feetY, over.topY, over.obstacle, over.step, lane = lane.target, under = over.under, cube = true))
+		commitHop("pastMobAndNext", over.overCube(lane = lane.target))
 		return true
 	}
+
+	/** [planHop]'s glide over or under a magma cube, as one over a mob, see [Hop.cube]. */
+	private fun Hop.overCube(lane: Vec3d = Vec3d.ZERO, anyway: Boolean = false, highAim: Double? = null) =
+		Hop(start, end, feetY, topY, obstacle, step, lane = lane, under = under, cube = true, anyway = anyway, highAim = highAim)
 
 	/**
 	 * Another obstacle right after [over], once over it it'd be too close to steer past. Steers onto a lane past both
