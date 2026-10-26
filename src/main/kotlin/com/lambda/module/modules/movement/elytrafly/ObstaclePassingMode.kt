@@ -130,6 +130,19 @@ abstract class ObstaclePassingMode(
 		 * its reach, room for it jumping too, see [holdCube].
 		 */
 		private const val CUBE_HOLD_MARGIN = 3.0
+		/**
+		 * The ticks before climbing up over (or sinking down under) a magma cube the height is held at most, besides the
+		 * climb itself, see [holdCube]: the simulation of the glide decides when, this is only a backstop. With the bounces
+		 * simulated like the flight the next bounce's landing is known to a few hundredths, at 10 it held 7 to 11 ticks too
+		 * early. Under [CUBE_HIGH_RISE] up 2 more, aimed lower its last bounces come later.
+		 */
+		private const val CUBE_LEAD_TICKS = 4
+		/** How high up over a magma cube is high, see [CUBE_LEAD_TICKS]. */
+		private const val CUBE_HIGH_RISE = 2.5
+		/** How many ticks later than the next bounce holding over a magma cube from then has to make it still, see [holdCube]. */
+		private const val CUBE_BOUNCE_MARGIN = 3
+		/** How much higher than its reach holding over a magma cube from the next bounce has to make it still, see [holdCube]. */
+		private const val CUBE_BOUNCE_HEIGHT_MARGIN = 0.3
 		/** How far up and down from you magma cubes are looked for, the biggest is about two blocks. */
 		private const val CUBE_SEARCH_HEIGHT = 4.0
 		/** How far ahead the line has to be free to swing back onto it, the swing takes about [DODGE_STEER_AHEAD]. */
@@ -3100,8 +3113,9 @@ abstract class ObstaclePassingMode(
 	 * rises and with a bit to spare: a bounce ahead the simulation is off by a little, a near miss would let that one and
 	 * this one both slip by.
 	 */
-	private fun SafeContext.fromNextBounce(hop: Hop, progress: Double) =
-		nextRise(progress, hop.lane)?.let { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, margin = NEXT_BOUNCE_HEIGHT_MARGIN) } == true
+	private fun SafeContext.fromNextBounce(
+		hop: Hop, progress: Double, ticks: Int = NEXT_BOUNCE_MARGIN, height: Double = NEXT_BOUNCE_HEIGHT_MARGIN,
+	) = nextRise(progress, hop.lane)?.let { canHop(hop, progress, it + ticks, margin = height) } == true
 
 	/**
 	 * In how many ticks the next bounce off the floor rises, bouncing on from here at [progress] along the line on [lane].
@@ -3166,14 +3180,16 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.holdCube(hop: Hop, progress: Double): Boolean {
 		// Not before the climb (or the sink, under it) up there takes, with a bit of room in front of its reach: its box
 		// and reach are already in [Hop.start], the room is for a jump of it too.
+		// Only a backstop: when, the simulation of the glide says, the next bounce is too late, see [CUBE_LEAD_TICKS].
 		val speed = player.velocity.horizontalLength()
-		val climbTicks = HOP_LEAD_TICKS + abs(hop.targetY - startPos.y) / MAX_HOLD_CLIMB
+		val rise = abs(hop.targetY - startPos.y)
+		val climbTicks = (if (rise < CUBE_HIGH_RISE) CUBE_LEAD_TICKS + 2 else CUBE_LEAD_TICKS) + rise / MAX_HOLD_CLIMB
 		if (hop.start - progress > speed * climbTicks + CUBE_HOLD_MARGIN) return false
 		val high = hop.highAim?.let { Hop(hop.start, hop.end, hop.feetY, hop.topY, hop.obstacle, hop.step, lane = hop.lane, cube = true, aim = it) }
 			?.takeIf { canHop(it, progress, 0) && hopExitSpeed >= HIGH_CUBE_EXIT_SPEED }
 			// Holding now has to make it too: far off, from the next bounce it glides too long as well, that's not too late.
-			?: return canHop(hop, progress, 0) && !fromNextBounce(hop, progress)
-		if (fromNextBounce(high, progress)) return false
+			?: return canHop(hop, progress, 0) && !fromNextBounce(hop, progress, CUBE_BOUNCE_MARGIN, CUBE_BOUNCE_HEIGHT_MARGIN)
+		if (fromNextBounce(high, progress, CUBE_BOUNCE_MARGIN, CUBE_BOUNCE_HEIGHT_MARGIN)) return false
 		high.held = true
 		high.heldCheckedAt = player.age
 		this@ObstaclePassingMode.hop = high
