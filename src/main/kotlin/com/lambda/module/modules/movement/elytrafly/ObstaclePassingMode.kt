@@ -266,9 +266,25 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val HOP_LEAD_TICKS = 10
 		/** How many ticks more it may glide in low before gliding under something, off the bounces. */
-		private const val UNDER_LEAD_TICKS = 30
+		private const val UNDER_LEAD_TICKS = 20
 		/** Gliding in low under something only once starting this many ticks later wouldn't make it anymore. */
-		private const val UNDER_HOLD_DELAY = 3
+		private const val UNDER_HOLD_DELAY = 1
+		/**
+		 * How much lower than the room under something allows the glide in low is simulated with when deciding to hold it:
+		 * held a bit early, not at the very last tick that just scrapes under it.
+		 */
+		private const val UNDER_TOP_MARGIN = 0.15
+		/** Up to how many ticks from now holding the height to glide under something is looked at, and how far apart. */
+		private const val UNDER_HOLD_SEARCH_TICKS = 120
+		private const val UNDER_HOLD_SEARCH_STEP = 6
+		/**
+		 * How far gliding in low under something gets a tick of speed, before it's down to [UNDER_HOLD_END_SPEED] and on
+		 * the floor: in a 1-high gap about 38 blocks from 1.0 a tick, 23 from 0.8, 53 from 1.2.
+		 */
+		private const val UNDER_HOLD_BLOCKS_PER_SPEED = 62.0
+		private const val UNDER_HOLD_END_SPEED = 0.4
+		/** Gliding under something this long is always looked at, slow the bounces before it may speed you up. */
+		private const val UNDER_MIN_LENGTH = 8.0
 		/**
 		 * The speed a tick gliding over a magma cube high in the room above it has to leave you with, else it's glided
 		 * over low. Gliding over it costs speed, too slow after it another cube right behind can't be got over.
@@ -3501,9 +3517,12 @@ abstract class ObstaclePassingMode(
 		// Higher over the block it starts with and the ones in it, over the rest just above the floor.
 		val (raised, topY, aim, blocked) = clearInside(linePoint, dir, over.end - at, hole.endInclusive - at, min(maxFlightY(), linePoint.y + MAX_BOUNCE_RISE), over)
 		// A block in it that can't be glided over, the hole's looked at on its own once over this one.
-		if (blocked != null || topY - raised.maxOf { it.second } < HOP_MARGIN) return null
-		val both = Hop(over.start, hole.endInclusive, linePoint.y + passerConfig.minObstacleHeight, topY, over.obstacle, false,
-			low = true, hole = true, aim = aim, raised = raised)
+		// Under a roof over the hole or right after it, e.g. a tunnel it leads into, not held up into that.
+		val feetY = linePoint.y + passerConfig.minObstacleHeight
+		val roof = roomUnder(linePoint, dir, hole.start - at, hole.endInclusive - at + player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS, feetY, topY)
+		if (blocked != null || roof - raised.maxOf { it.second } < HOP_MARGIN) return null
+		val both = Hop(over.start, hole.endInclusive, feetY, roof, over.obstacle, false,
+			low = true, hole = true, aim = aim?.let { min(it, roof - HOP_MARGIN) }, raised = raised)
 		return both.takeIf { canGetOver(it, at) }
 	}
 
@@ -3544,6 +3563,28 @@ abstract class ObstaclePassingMode(
 		val highest = raised.maxOfOrNull { it.second } ?: return Clearance(raised, topY, null, blocked)
 		if (highest + HOP_MARGIN <= min(topY, room)) return Clearance(raised, min(topY, room), null, blocked)
 		return Clearance(raised, room, min(room - HOP_MARGIN, highest + RAISED_HOLD), blocked)
+	}
+
+	/**
+	 * [topY] capped by a roof or something hanging over the way along [linePoint] from [from] to [to] ahead: the highest
+	 * the feet may be with the gliding box and its swing across the way free all the way, like [planHop] fits it. Where
+	 * no height above [feetY] is free it's something standing in the way, e.g. a column in a hole, not a roof: left to
+	 * what gets past that.
+	 */
+	private fun SafeContext.roomUnder(linePoint: Vec3d, dir: Vec3d, from: Double, to: Double, feetY: Double, topY: Double): Double {
+		val between = HOP_SCAN_STEP / 2 * 2 * abs(dir.x * dir.z) / dir.horizontalLengthSquared()
+		val swing = sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() + between
+		fun free(along: Double, y: Double) = linePoint.add(dir.multiply(along)).let {
+			spaceEmpty(Box(it.x - GLIDE_SIZE / 2, y, it.z - GLIDE_SIZE / 2, it.x + GLIDE_SIZE / 2, y + GLIDE_SIZE, it.z + GLIDE_SIZE / 2).expand(swing, 0.0, swing))
+		}
+		var top = topY
+		var along = from
+		while (along <= to) {
+			if (!free(along, top)) generateSequence(top - HOP_HEIGHT_STEP) { it - HOP_HEIGHT_STEP }.takeWhile { it >= feetY }
+				.firstOrNull { free(along, it) }?.let { top = it }
+			along += HOP_SCAN_STEP
+		}
+		return top
 	}
 
 	/** The hole right after the end of the layer [edge] ahead of [linePoint], down on the floor, null with none. */
@@ -3668,8 +3709,11 @@ abstract class ObstaclePassingMode(
 		val end = max(hole.endInclusive, layerAt ?: hole.endInclusive)
 		val up = if (layerAt == null) raised
 			else raised + ((hole.endInclusive - LAYER_AFTER_HOLE)..end to line.y + STEP_HEIGHT)
-		val over = Hop(hole.start - HOP_SCAN_STEP, end, line.y + passerConfig.minObstacleHeight, topY, hole.start, false,
-			low = true, hole = true, aim = aim, raised = up)
+		// Under a roof over it or right after it, e.g. a tunnel it leads into, not held up into that.
+		val feetY = line.y + passerConfig.minObstacleHeight
+		val roof = roomUnder(line, dir, hole.start - at, end - at + player.velocity.horizontalLength() * HOLE_TOUCHDOWN_TICKS, feetY, topY)
+		val over = Hop(hole.start - HOP_SCAN_STEP, end, feetY, roof, hole.start, false,
+			low = true, hole = true, aim = aim?.let { min(it, roof - HOP_MARGIN) }, raised = up)
 		if (!touch) return over to blocked
 		// Also with none in it on this lane, beside it there may be one.
 		// Gliding over it instead may be faster, only with nothing in it on the line that can't be glided over.
@@ -4340,11 +4384,14 @@ abstract class ObstaclePassingMode(
 		var onFloor = step
 		// Carpets a few ticks apart are one: gliding over one ends low, coming down, too late to get up over the next.
 		val maxGap = if (carpets) max(HOP_GAP, player.velocity.horizontalLength() * CARPET_GAP_TICKS) else HOP_GAP
+		// Only overhead so far, glided under: as far as gliding in low gets before it's down on the floor, with the room
+		// after it. Short ones are left to [canGetOver], slow the bounces before it may still speed you up.
+		val underLength = max(UNDER_MIN_LENGTH, UNDER_HOLD_BLOCKS_PER_SPEED * (player.velocity.horizontalLength() - UNDER_HOLD_END_SPEED)) + maxGap
 		// Onto a layer to bounce on, only up to a bit onto it.
 		if (step) end = distance + length
 		else while (gap < maxGap) {
 			along += HOP_SCAN_STEP
-			val maxLength = if (carpets) MAX_CARPET_HOP_LENGTH else MAX_HOLE_LENGTH
+			val maxLength = if (carpets) MAX_CARPET_HOP_LENGTH else if (onFloor) MAX_HOLE_LENGTH else underLength
 			if (along > distance + maxLength) return noHop("longer than ${maxLength.toInt()}")
 			if (free(box(along, floorY, bounceHeight).expand(swing, 0.0, swing))) gap += HOP_SCAN_STEP
 			else {
@@ -4401,6 +4448,9 @@ abstract class ObstaclePassingMode(
 		// from up here now it glides too long, not held at all it comes down in it.
 		hop.low -> canHop(hop, progress, NO_HOLD, from) || canHop(hop, progress, 0, from) ||
 			hop.hole && onLayer && risesBefore(hop, progress, from).any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, from, NEXT_BOUNCE_HEIGHT_MARGIN) }
+		// Under something, held from whenever it still makes it: [holdingFor] holds as late as it can, not from a set
+		// distance, the bounces before may take it up into it there.
+		hop.under -> (0 until UNDER_HOLD_SEARCH_TICKS step UNDER_HOLD_SEARCH_STEP).any { canHop(hop, progress, it, from) }
 		// The one from close by last, its miss is the one told and gone by, see [hopShort].
 		else -> !hop.hole && !hop.under && fromNextBounce(hop, progress) || canHop(hop, progress, from = from)
 	}
@@ -4754,7 +4804,9 @@ abstract class ObstaclePassingMode(
 			// the railing too, gliding low loses speed fast.
 			hop.cube -> holdCube(hop, progress)
 			// Gliding low loses speed, so it bounces on as long as coming down a bit later still gets it under.
-			hop.under -> hop.start - progress <= speed * leadTicks(hop) && !canHop(hop, progress, UNDER_HOLD_DELAY)
+			// Bounced on until holding a bit later wouldn't get under with a little less room, not only just scraping under.
+			hop.under -> hop.start - progress <= speed * UNDER_LEAD_TICKS &&
+				!canHop(hop.with(topY = hop.topY - UNDER_TOP_MARGIN), progress, UNDER_HOLD_DELAY)
 			// Over a block or a wall, or through an opening in one: one more bounce while from it it still gets over,
 			// taking off from the floor up there faster than pulling up gliding. Through one that only fits slower, from
 			// the last bounce on that still gets there slow enough.
