@@ -42,11 +42,15 @@ import com.lambda.util.world.raycast.InteractionMask
 import com.lambda.util.world.raycast.RayCastUtils.blockResult
 import com.lambda.util.world.raycast.RayCastUtils.rayCast
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
+import net.minecraft.block.BlockState
+import net.minecraft.block.Blocks
 import net.minecraft.block.ShapeContext
 import net.minecraft.entity.Entity
 import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
 import net.minecraft.registry.Registries
+import net.minecraft.registry.tag.FluidTags
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
 import net.minecraft.util.math.Box
@@ -211,6 +215,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_SINK = 0.6
 		/** How high above the top to touch down on it skims, diving, until the box is over it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM = 0.02
+		/** Blocks besides lava that hurt or hold you without stopping you, see [isHazard]. */
+		private val HAZARDS = setOf(Blocks.FIRE, Blocks.SOUL_FIRE, Blocks.COBWEB, Blocks.SWEET_BERRY_BUSH, Blocks.WITHER_ROSE, Blocks.POWDER_SNOW)
 		/** How many ticks before the box comes over the top it skims down to just above it, see [Hop.holdY]. */
 		private const val TOUCH_SKIM_TICKS = 4
 		/** How far before and past where the lane planned crosses the top it may come over it, see [hopPitch]. */
@@ -2185,7 +2191,7 @@ abstract class ObstaclePassingMode(
 
 	/** Whether there's a top at [y] at [x], [z]: a whole block ending there with air above it. */
 	private fun SafeContext.topAt(x: Double, z: Double, y: Double) =
-		shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && shapeAt(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
+		shapeAt(BlockPos.ofFloored(x, y - 0.5, z)) === VoxelShapes.fullCube() && wayShape(BlockPos.ofFloored(x, y + 0.5, z)).isEmpty
 
 	/**
 	 * The first top along [line] from [from] to [to] along the line to touch down on: one or two blocks above its floor,
@@ -3133,6 +3139,8 @@ abstract class ObstaclePassingMode(
 
 	/** Each block's collision shape this tick. The planner looks at the same blocks dozens of times a tick. */
 	private val shapes = Long2ObjectOpenHashMap<VoxelShape>()
+	/** The positions in [shapes] with one of [isHazard] there. */
+	private val hazardCells = LongOpenHashSet()
 	/** Entities as solid as blocks around you this tick, e.g. boats, like [World.isSpaceEmpty] counts them. */
 	private var solidEntities: List<Box> = emptyList()
 	private var shapeContext: ShapeContext = ShapeContext.absent()
@@ -3146,6 +3154,7 @@ abstract class ObstaclePassingMode(
 		shapesAge = player.age
 		shapesWorld = System.identityHashCode(world)
 		shapes.clear()
+		hazardCells.clear()
 		shapeContext = ShapeContext.of(player)
 		solidEntities = world.getOtherEntities(player, player.boundingBox.expand(SOLID_ENTITY_RANGE)) { player.collidesWith(it) }.map { it.boundingBox }
 	}
@@ -3154,6 +3163,8 @@ abstract class ObstaclePassingMode(
 	private fun dropShapes() {
 		shapes.clear()
 		shapes.trim()
+		hazardCells.clear()
+		hazardCells.trim()
 		solidEntities = emptyList()
 		shapeContext = ShapeContext.absent()
 		shapesAge = -1
@@ -3162,21 +3173,52 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.shapeAt(pos: BlockPos): VoxelShape {
 		freshShapes()
 		val key = pos.asLong()
-		return shapes.get(key) ?: world.getBlockState(pos).getCollisionShape(world, pos, shapeContext).also { shapes.put(key, it) }
+		return shapes.get(key) ?: world.getBlockState(pos).let { state ->
+			state.getCollisionShape(world, pos, shapeContext).also {
+				shapes.put(key, it)
+				if (it.isEmpty && state.isHazard()) hazardCells.add(key)
+			}
+		}
 	}
+
+	/**
+	 * Lava, fire, cobwebs and the like: nothing stops you there, but touching it burns, hurts or holds you nearly still.
+	 * Kept out of like a block, never stood on, see [hazardAt].
+	 */
+	private fun BlockState.isHazard() = fluidState.isIn(FluidTags.LAVA) || block in HAZARDS
+
+	/** Whether there's one of [isHazard] at [pos]. */
+	private fun SafeContext.hazardAt(pos: BlockPos): Boolean {
+		shapeAt(pos)
+		return hazardCells.contains(pos.asLong())
+	}
+
+	/** Whether there's one of [isHazard] in [box]. */
+	private fun SafeContext.hazardIn(box: Box): Boolean {
+		val pos = BlockPos.Mutable()
+		for (x in floor(box.minX).toInt()..floor(box.maxX - 1e-7).toInt())
+			for (z in floor(box.minZ).toInt()..floor(box.maxZ - 1e-7).toInt())
+				for (y in floor(box.minY).toInt()..floor(box.maxY - 1e-7).toInt())
+					if (hazardAt(pos.set(x, y, z))) return true
+		return false
+	}
+
+	/** The shape that's in your way at [pos]: its collision shape, a whole block where there's one of [isHazard]. */
+	private fun SafeContext.wayShape(pos: BlockPos): VoxelShape =
+		shapeAt(pos).let { if (it.isEmpty && hazardCells.contains(pos.asLong())) VoxelShapes.fullCube() else it }
 
 	/**
 	 * Like [World.isSpaceEmpty] for you: no block, entity as solid as one or the world border in [box]. From one below,
 	 * a fence reaches up into it.
 	 */
-	private fun SafeContext.spaceEmpty(box: Box): Boolean {
+	private fun SafeContext.spaceEmpty(box: Box, hazards: Boolean = true): Boolean {
 		freshShapes()
 		if (!world.worldBorder.contains(box) || solidEntities.any { it.intersects(box) }) return false
 		val pos = BlockPos.Mutable()
 		for (x in floor(box.minX).toInt()..floor(box.maxX).toInt())
 			for (z in floor(box.minZ).toInt()..floor(box.maxZ).toInt())
 				for (y in floor(box.minY).toInt() - 1..floor(box.maxY).toInt()) {
-					val shape = shapeAt(pos.set(x, y, z))
+					val shape = if (hazards) wayShape(pos.set(x, y, z)) else shapeAt(pos.set(x, y, z))
 					if (shape.isEmpty) continue
 					val hit = if (shape === VoxelShapes.fullCube()) box.intersects(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
 						else shape.boundingBoxes.any { it.offset(x.toDouble(), y.toDouble(), z.toDouble()).intersects(box) }
@@ -3188,7 +3230,7 @@ abstract class ObstaclePassingMode(
 	/** Where a ray from [start] along [direction] first hits a block's collision shape within [reach], like [rayCast]. */
 	private fun SafeContext.blockRay(start: Vec3d, direction: Vec3d, reach: Double): BlockHitResult? {
 		val end = start.add(direction.multiply(reach))
-		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos -> shapeAt(pos).raycast(start, end, pos) }, { null })
+		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos -> wayShape(pos).raycast(start, end, pos) }, { null })
 	}
 
 	/**
@@ -3211,10 +3253,14 @@ abstract class ObstaclePassingMode(
 	private fun Vec3d.floorWithin(dir: Vec3d, length: Double) =
 		generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it <= length }.any { add(dir.multiply(it)).boxHasFloor() }
 
-	/** Whether anything under your box here holds you up. A block's corner does, as where a layer's edge runs askew. */
+	/**
+	 * Whether anything under your box here holds you up. A block's corner does, as where a layer's edge runs askew. Not
+	 * with lava or fire on it, see [isHazard]: bounced off, that's touched, it's no floor like a hole.
+	 */
 	context(safeContext: SafeContext)
 	private fun Vec3d.boxHasFloor() =
-		!safeContext.spaceEmpty(Box(x - 0.29, y - 0.05, z - 0.29, x + 0.29, y, z + 0.29))
+		!safeContext.spaceEmpty(Box(x - 0.29, y - 0.05, z - 0.29, x + 0.29, y, z + 0.29), hazards = false) &&
+			!safeContext.hazardIn(Box(x - 0.3, y, z - 0.3, x + 0.3, y + 1, z + 0.3))
 
 	/** The blocks a block below to one above under your box here, for the debug log. */
 	context(safeContext: SafeContext)
@@ -3356,7 +3402,9 @@ abstract class ObstaclePassingMode(
 
 	/** Whether you fit standing at this spot. */
 	context(safeContext: SafeContext)
-	private fun Vec3d.canStand() = safeContext.world.isSpaceEmpty(safeContext.player, Box(x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3))
+	private fun Vec3d.canStand() = Box(x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3).let {
+		safeContext.world.isSpaceEmpty(safeContext.player, it) && !safeContext.hazardIn(it)
+	}
 
 	private fun SafeContext.passTo(pos: Vec3d): Boolean {
 		// The same goal again would restart Baritone's path every tick.
