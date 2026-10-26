@@ -1765,8 +1765,10 @@ abstract class ObstaclePassingMode(
 					}
 					// Up on a layer, something low enough in the hole after its end: glided over with the hole once off it on
 					// the lane, see [glideOverHole]. Up here only the hole's start is a hole, gliding over it isn't planned.
-					// Close enough to brake for it that's no longer left to it.
-					if (onLayer && !onLine && distance > brakeDistance() && maxHopY().isFinite() && holeBefore(onLane, dir, progress, distance) &&
+					// Only while the hole on the lane still starts ahead, off its edge the glide over it takes over. Past it still
+					// up here, e.g. drifting off it, braking for it as before.
+					if (onLayer && !onLine && maxHopY().isFinite() &&
+						holesAhead(onLane, dir).any { it.start > progress && it.start < progress + distance } &&
 						!tooHighToGlideOver(onLane, dir, distance)) return@let
 					// Still passing what's dodged, something farther on the lane is looked at once past it. Over to another
 					// lane now would cross the line right where what's dodged is.
