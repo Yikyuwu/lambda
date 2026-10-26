@@ -2348,9 +2348,19 @@ abstract class ObstaclePassingMode(
 			commitSwingBack("steerDodge")
 			dodgeTicks = 0
 		}
-		// A short hole on the lane, glided over like on the line, staying on the lane.
+		// Whether over on the lane and fast enough for it, see [isDodging].
+		fun updateOnLane(leaning: Boolean) {
+			atFitSpeed = fitDodge && player.velocity.horizontalLength() >= FIT_SPEED
+			val wasOnLane = onLane
+			onLane = dodge.let { it != null && it != Vec3d.ZERO } && !leaning &&
+				abs(offset.dotProduct(across(dir)) - dodgeOffset) < ON_LANE
+			if (onLane && !wasOnLane) ElytraFly.debug { "Over on the lane, bouncing on at %.2f".format(player.velocity.horizontalLength()) }
+		}
+		// A short hole on the lane, glided over like on the line, staying on the lane. Bouncing on down into a dip on it,
+		// still dodging on the lane: whether over on it is kept up, else it'd coast level instead of bouncing into it.
 		if (!onLine && !onLayer && glideOverHole(here, linePoint, dir, null, dodging = true)) {
 			commitHop("steerDodge", hop?.with(lane = lane))
+			updateOnLane(leaning(progress))
 			return true
 		}
 		// Up on a layer of carpets the ones down on the floor after it aren't seen, nor the layer itself from down there.
@@ -2483,11 +2493,7 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		val leaning = leaning(progress)
-		atFitSpeed = fitDodge && player.velocity.horizontalLength() >= FIT_SPEED
-		val wasOnLane = onLane
-		onLane = dodge.let { it != null && it != Vec3d.ZERO } && !leaning &&
-			abs(offset.dotProduct(across(dir)) - dodgeOffset) < ON_LANE
-		if (onLane && !wasOnLane) ElytraFly.debug { "Over on the lane, bouncing on at %.2f".format(player.velocity.horizontalLength()) }
+		updateOnLane(leaning)
 		dodgeYaw = if (leaning) dodgeLeanYaw(linePoint, dir) else steerYaw(linePoint, dodge ?: Vec3d.ZERO, dir)
 		ElytraFly.debug {
 			val v = player.velocity
