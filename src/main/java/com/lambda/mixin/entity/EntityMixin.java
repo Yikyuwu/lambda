@@ -180,8 +180,9 @@ public abstract class EntityMixin {
         var player = getMc().player;
         if ((Object) this != getMc().player) return original;
 
+        // Without the sprint while slowing down, so a bounce's jump doesn't push you on, see ObstaclePassingMode.noSprint
         if (ElytraFly.getBounceMode().isEnabled() && player.isGliding())
-            return true;
+            return !ElytraFly.getBounceMode().getNoSprint();
 
         return original;
     }
