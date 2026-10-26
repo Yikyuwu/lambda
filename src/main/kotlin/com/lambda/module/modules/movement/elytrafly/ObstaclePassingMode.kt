@@ -77,6 +77,12 @@ import kotlin.math.roundToLong
 import kotlin.math.sign
 import kotlin.math.sin
 
+/**
+ * A lane across the way, the line itself exactly [Vec3d.ZERO]: along an axis the way's direction isn't exact, its
+ * lane 0 would come out -0.0 or a hair off, not equal to it, e.g. never back on the line after a dodge.
+ */
+private fun laneVec(lane: Vec3d) = if (lane.horizontalLengthSquared() < 1e-9) Vec3d.ZERO else lane
+
 abstract class ObstaclePassingMode(
 	override val c: Config,
 	flyMode: FlyMode
@@ -426,7 +432,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private class Hop(
 		val start: Double, val end: Double, val feetY: Double, val topY: Double, val obstacle: Double, val step: Boolean,
-		val down: Boolean = false, val lane: Vec3d = Vec3d.ZERO, val stepHeight: Double = STEP_HEIGHT, val low: Boolean = false,
+		val down: Boolean = false, lane: Vec3d = Vec3d.ZERO, val stepHeight: Double = STEP_HEIGHT, val low: Boolean = false,
 		/** Under something hanging over the way, held in the middle of the room below it, off the floor so it doesn't bounce. */
 		val under: Boolean = false,
 		/** Over a hole, held high, with room to sink as it slows down so it gets farther. */
@@ -446,6 +452,7 @@ abstract class ObstaclePassingMode(
 		/** A top on the way, e.g. a pillar, touched down on and bounced off instead of glided over. */
 		val touch: Touch? = null,
 	) {
+		val lane = laneVec(lane)
 		val targetY = aim ?: when {
 			under -> (feetY + topY) / 2
 			hole -> topY - min(HOP_MARGIN, (topY - feetY) / 2)
@@ -523,7 +530,8 @@ abstract class ObstaclePassingMode(
 	 * A top at [y] to touch down on and bounce off, under the box from where to where along the line in [range], on the
 	 * [lane] that far across the line, [middle] halfway along it.
 	 */
-	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, val lane: Vec3d = Vec3d.ZERO) {
+	private class Touch(val range: ClosedFloatingPointRange<Double>, val y: Double, lane: Vec3d = Vec3d.ZERO) {
+		val lane = laneVec(lane)
 		val middle = (range.start + range.endInclusive) / 2
 		/** Over a hole, steered toward [lane] only from here along the line on, past what's in the way on it before. */
 		var switchAt = Double.NEGATIVE_INFINITY
@@ -576,7 +584,9 @@ abstract class ObstaclePassingMode(
 	 * [carpets] that many on it ahead, and whether it [stays] on the lane you're on. [offset] across the line it is, the
 	 * target short of it by the drift of the tilt.
 	 */
-	private class Lane(val target: Vec3d, val lean: Int, val offset: Double, val carpets: Int = 0, val stays: Boolean = false)
+	private class Lane(target: Vec3d, val lean: Int, val offset: Double, val carpets: Int = 0, val stays: Boolean = false) {
+		val target = laneVec(target)
+	}
 
 	/** Where along the line an obstacle is that no lane gets past, landing to walk around it. */
 	private var brakeAt: Double? = null
@@ -2264,7 +2274,8 @@ abstract class ObstaclePassingMode(
 			val from = point(along, lane)
 			val to = point(toAlong, toLane)
 			fun cornerClear(corner: Vec3d) =
-				side != 0 && sign(corner.subtract(from).dotProduct(across)) != side.toDouble() || boxClear(corner, along, held)
+				corner.subtract(from).dotProduct(across).let { off -> side != 0 && (abs(off) < 1e-6 || sign(off) != side.toDouble()) } ||
+					boxClear(corner, along, held)
 			return boxClear(from, along, held) && cornerClear(Vec3d(to.x, from.y, from.z)) && cornerClear(Vec3d(from.x, from.y, to.z))
 		}
 		// Looked at once per lane, from [DODGE_STEER_AHEAD] ahead on, before that it's on the lane it's bouncing on.
@@ -3581,7 +3592,7 @@ abstract class ObstaclePassingMode(
 		// Steering out farther still if need be, not in.
 		hop.hole && hop.touch?.leans?.any { progress in it } == true &&
 			abs(player.pos.subtract(linePoint).dotProduct(across(dir)) - hop.lane.dotProduct(across(dir))) <= TOUCH_LANE_OFF -> {
-			val side = sign(hop.lane.dotProduct(across(dir)))
+			val side = hop.lane.dotProduct(across(dir)).let { if (abs(it) < 1e-6) 0.0 else sign(it) }
 			val steer = steerYaw(linePoint, hop.lane, dir)
 			val lean = leanYaw(dir, side.toInt())
 			fun out(yaw: Double) = Vec3d(-sin(Math.toRadians(yaw)), 0.0, cos(Math.toRadians(yaw))).dotProduct(across(dir)) * side
