@@ -2937,10 +2937,11 @@ abstract class ObstaclePassingMode(
 			val next = point.obstacleHit(forward, stop + DODGE_STEER_AHEAD, speed = speed, mobs = false)
 				?: return@run Continuation(speed, null, null, end.at, "nothing in reach")
 			fromChainStart(start) {
-				planHop(point, forward, next.distance, anyway = true)?.let { over ->
+				// On its lane, the floor bounced off on the way to it is that lane's.
+				planHop(point, forward, next.distance, anyway = true)?.with(lane = lane)?.let { over ->
 					val made = canGetOver(over, end.at, speed)
 					if (made || hopShort <= CHAIN_SHORT)
-						return@run Continuation(if (made) hopExitSpeed else speed, over.with(lane = lane), null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
+						return@run Continuation(if (made) hopExitSpeed else speed, over, null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
 				}
 				// Touched down on like [topWay] does.
 				laneSurfaces(point, forward, end.at + speed, end.at + next.distance + TOP_WAY_PAST, surfaceRises(point)).firstOrNull { touch ->
