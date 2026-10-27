@@ -1933,7 +1933,9 @@ abstract class ObstaclePassingMode(
 		// Toward the side of a top to touch down on in the hole after it: gliding over the hole, there's hardly any
 		// steering over to it.
 		val toward = touchSide?.takeIf { (_, until) -> at < until }?.first
-		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, toward = toward)
+		// Free past its end, not only its start: right after a pillar 2 long something on the lane is no way past either.
+		val past = DODGE_MARGIN + blockLength(dir, at, linePoint.y)
+		val lane = freeLane(from, linePoint, dir, distance, Vec3d.ZERO, past = past, toward = toward)
 			?: run {
 				// Looking for an opening glides over it on each lane, that'd replace why not on the line.
 				val notOver = hopRejection
@@ -3044,6 +3046,17 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.rescueBeforeBrake(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, at: Double, block: String): Boolean {
 		if (!player.isGliding || player.isOnGround || chooserMissed("block", at, chooserLaneNow())) return false
 		val way = chooseAtBlock(from, linePoint, dir, distance, null, null) ?: return false
+		// Over to its lane from where you are free on the way, e.g. not across what's dodged right beside you still, the
+		// chooser judged the lane past this block only.
+		way.lane?.let { lane ->
+			val across = across(dir)
+			val path = steerPath(from.subtract(linePoint).dotProduct(across), dir, lane.offset, lane.lean,
+				distance - player.velocity.horizontalLength() * LEAN_TICKS, distance)
+			steerPathHit(linePoint, dir, path, distance)?.let { hit ->
+				ElytraFly.debug { "Obstacle %.1f ahead ($block), no lane, not the chooser's way ${lane.target.describe(dir)}: $hit".format(distance) }
+				return false
+			}
+		}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), no lane, the chooser's way past it instead of landing: $way".format(distance) }
 		commitChosenBlock("rescue", way, dir, at)
 		return true
@@ -3343,6 +3356,14 @@ abstract class ObstaclePassingMode(
 		// Ended a few ticks later than planned: steering back lags behind, at its end it's still close to what's low.
 		return Hop(from, if (stepAt != null) end else end + speed * SWERVE_END_TICKS, feetY, ceiling, from, stepAt != null,
 			aim = aim, swerve = Swerve(swerve.offset, swerve.outAt, swerve.backAt, path, swerve.blockAt))
+	}
+
+	/** How long the block at [at] along the line is, as high as bouncing goes over the floor at [floorY], up to [SWERVE_MAX_BLOCK]. */
+	private fun SafeContext.blockLength(dir: Vec3d, at: Double, floorY: Double): Double {
+		var end = at
+		while (end < at + SWERVE_MAX_BLOCK && !swerveMoveFree(dir, floorY, end to 0.0, end to 0.0, floorY + SWERVE_FLOOR_GAP, floorY + SWERVE_BOUNCE_BAND, 0.0))
+			end += HOP_SCAN_STEP
+		return end - at
 	}
 
 	/**
