@@ -29,7 +29,7 @@ import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inve
 import com.lambda.interaction.material.StackSelection.Companion.select
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
-import com.lambda.threading.runGameScheduled
+import com.lambda.threading.runSafeGameScheduled
 import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.combat.CombatUtils.hasDeadlyCrystal
 import com.lambda.util.combat.DamageUtils.isFallDeadly
@@ -70,8 +70,10 @@ object AutoTotem : Module(
         // How many are left after one popped, to tell later whether it ran out or never got one into the offhand.
         listen<PacketEvent.Receive.Pre> { event ->
             val packet = event.packet as? EntityStatusS2CPacket ?: return@listen
-            if (packet.status != EntityStatuses.USE_TOTEM_OF_UNDYING || packet.getEntity(world) !== player) return@listen
-            runGameScheduled {
+            if (packet.status != EntityStatuses.USE_TOTEM_OF_UNDYING) return@listen
+            // This runs on the network thread, the world's entities are only looked up safely on the game thread.
+            runSafeGameScheduled {
+                if (packet.getEntity(world) !== player) return@runSafeGameScheduled
                 val left = player.inventory.mainStacks.filter { it.item == Items.TOTEM_OF_UNDYING }.sumOf { it.count }
                 this@AutoTotem.info("Totem popped, $left left in the inventory")
             }
