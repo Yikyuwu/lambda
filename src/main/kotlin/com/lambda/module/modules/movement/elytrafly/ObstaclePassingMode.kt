@@ -262,6 +262,17 @@ abstract class ObstaclePassingMode(
 		private const val STEER_SIM_TICKS = 400
 		/** Long enough to bounce up to speed from a take-off and over a hop as far as it's looked for. */
 		private const val CAN_HOP_SIM_TICKS = 200
+		/** How long bouncing on after a glide is followed at most coming back down, see [clearComingDown]. */
+		private const val COMING_DOWN_TICKS = 40
+		/** How far the box moves at most between the spots its way is looked at, see [boxMove]: under a block. */
+		private const val BOX_WAY_STEP = 1.0
+		/** How much smaller the box is looked at along its way, see [boxMove]: touching a block isn't running into it. */
+		private const val BOX_WAY_INSET = 1e-3
+		/**
+		 * How much narrower the box is looked at along its way, see [boxMove]: it's simulated on the lane, flown steering
+		 * on to it, a corner it only just clips is the lane's to keep clear of, see [freeLane].
+		 */
+		private const val BOX_WAY_SIDE = 0.05
 		/** How many ticks after the next bounce starts holding from it is looked at, see [holdingFor]. */
 		private const val NEXT_BOUNCE_MARGIN = 2
 		/** How much higher than needed holding from the next bounce has to get you, see [fromNextBounce]. */
@@ -5463,6 +5474,9 @@ abstract class ObstaclePassingMode(
 		// Bouncing on up on a layer, down in a gap in it, see [intoLayerSide].
 		val fall = GapFall()
 		val touch = hop.touch
+		// Where the box is, landed on what it came down on, and where it first ran into a block, see [boxMove].
+		var boxY = y
+		var blockedAt: Pair<Double, Double>? = null
 		repeat(CAN_HOP_SIM_TICKS) { tick ->
 			var jumped = false
 			// Down on the top to touch down on, bounced off it like the floor. From then on it keeps the height it has.
@@ -5554,7 +5568,21 @@ abstract class ObstaclePassingMode(
 				hopShort = if (y > hop.topY) Double.POSITIVE_INFINITY else hop.feetAt(along) - y
 				return false
 			}
+			// The box's whole way, not only the heights over the obstacle: e.g. rising to them into a block hanging higher
+			// than the rays look, or bouncing off a top up into one. Told only when the glide makes it otherwise, a miss
+			// above is the one to tell, e.g. how near it is, see [hopShort].
+			if (blockedAt == null) boxMove(dir, hop.lane, fromAlong, boxY, along, y)?.let { boxY = it } ?: run { blockedAt = along to y }
 			if (along > hop.end) {
+				val blocked = blockedAt
+				if (blocked != null || !clearComingDown(dir, hop.lane, along, y, climb, speed, gravity, bounce)) {
+					val ahead = (blocked?.first ?: along) - progress
+					val atY = blocked?.second ?: y
+					val what = if (blocked != null) "the box would run into a block" else "coming down after it the box would run into a block higher than the rays look"
+					hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, $what %.1f ahead at y %.2f"
+						.format(startY, startClimb, startSpeed, ahead, atY) }
+					hopShort = Double.POSITIVE_INFINITY
+					return false
+				}
 				hopExitSpeed = speed
 				hopExitAt = along
 				hopExitY = y
@@ -5580,6 +5608,87 @@ abstract class ObstaclePassingMode(
 			onLayer && spot.add(0.0, baseY - startPos.y, 0.0).boxHasFloor() -> baseY
 			else -> null
 		}
+	}
+
+	/**
+	 * Where the gliding box's feet end up moving from [from] at [fromY] to [to] at [y] along the line on [lane], like the
+	 * game's move: up or down first where it is, then across. Coming down onto a top lands on it, the floor's included,
+	 * the simulation bounces off it a tick later; going up into a block or across into one runs into it: null. Only the
+	 * box above [above], see [clearComingDown]. Across a tick at most a block apart, it doesn't pass through one between.
+	 */
+	private fun SafeContext.boxMove(dir: Vec3d, lane: Vec3d, from: Double, fromY: Double, to: Double, y: Double, above: Double = Double.NEGATIVE_INFINITY): Double? {
+		fun box(along: Double, bottom: Double, top: Double) = startPos.add(dir.multiply(along)).add(lane).let {
+			Box(it.x - GLIDE_SIZE / 2 + BOX_WAY_SIDE, max(bottom, above) + BOX_WAY_INSET, it.z - GLIDE_SIZE / 2 + BOX_WAY_SIDE,
+				it.x + GLIDE_SIZE / 2 - BOX_WAY_SIDE, top - BOX_WAY_INSET, it.z + GLIDE_SIZE / 2 - BOX_WAY_SIDE)
+		}
+		fun free(box: Box) = box.maxY <= box.minY || spaceEmpty(box)
+		var feet = y
+		if (y > fromY) {
+			if (!free(box(from, fromY, y + GLIDE_SIZE))) return null
+		} else if (y < fromY) feet = landing(startPos.add(dir.multiply(from)).add(lane), fromY, y)
+		val steps = max(1, ceil(abs(to - from) / BOX_WAY_STEP).toInt())
+		var at = feet
+		for (step in 1..steps) {
+			val along = from + (to - from) * step / steps
+			// Below the floor where there's some, the simulation's a tick late bouncing off it.
+			at = if (feet < startPos.y) floorAt(dir, along, lane)?.takeIf { feet < it } ?: feet else feet
+			if (!free(box(along, at, at + GLIDE_SIZE))) return null
+		}
+		return at
+	}
+
+	/** The highest top the gliding box at [spot] lands on coming down from [fromY] to [toY], [toY] when there's none. */
+	private fun SafeContext.landing(spot: Vec3d, fromY: Double, toY: Double): Double {
+		var top = toY
+		val pos = BlockPos.Mutable()
+		for (x in floor(spot.x - GLIDE_SIZE / 2 + BOX_WAY_INSET).toInt()..floor(spot.x + GLIDE_SIZE / 2 - BOX_WAY_INSET).toInt())
+			for (z in floor(spot.z - GLIDE_SIZE / 2 + BOX_WAY_INSET).toInt()..floor(spot.z + GLIDE_SIZE / 2 - BOX_WAY_INSET).toInt())
+				// From one below, a fence reaches up into it.
+				for (by in floor(fromY + BOX_WAY_INSET).toInt() downTo floor(toY).toInt() - 1) {
+					if (by + 1.5 <= top) break
+					val shape = wayShape(pos.set(x, by, z))
+					if (shape.isEmpty) continue
+					for (part in shape.boundingBoxes) {
+						val partTop = by + part.maxY
+						if (partTop > top && partTop <= fromY + BOX_WAY_INSET &&
+							x + part.maxX > spot.x - GLIDE_SIZE / 2 + BOX_WAY_INSET && x + part.minX < spot.x + GLIDE_SIZE / 2 - BOX_WAY_INSET &&
+							z + part.maxZ > spot.z - GLIDE_SIZE / 2 + BOX_WAY_INSET && z + part.minZ < spot.z + GLIDE_SIZE / 2 - BOX_WAY_INSET) top = partTop
+					}
+				}
+		return top
+	}
+
+	/**
+	 * Whether bouncing on after a glide that ends at [along] at [y] on [lane], climbing at [climb] at [speed] a tick, the
+	 * box comes down to the rays' heights without running into a block higher than they look, e.g. bounced off a top two
+	 * high up into one floating a few blocks on: they won't see it coming, the next plan won't know it's there. One that
+	 * reaches down to their heights there is the next plan's to get past.
+	 */
+	private fun SafeContext.clearComingDown(
+		dir: Vec3d, lane: Vec3d, along: Double, y: Double, climb: Double, speed: Double, gravity: Double, bounce: (Double, Double) -> Double,
+	): Boolean {
+		val seen = startPos.y + if (passerConfig.headHitters) 2.0 else 1.0
+		var at = along
+		var feet = y
+		var c = climb
+		var s = speed
+		repeat(COMING_DOWN_TICKS) {
+			if (feet + GLIDE_SIZE <= seen || feet <= startPos.y && c <= 0) return true
+			glide(c, s, bounce(feet, c), gravity).let { (newClimb, newSpeed) ->
+				c = newClimb
+				s = newSpeed
+			}
+			val to = at + s
+			feet = boxMove(dir, lane, at, feet, to, feet + c, seen) ?: run {
+				fun rayHeights(along: Double) = startPos.add(dir.multiply(along)).add(lane).let {
+					spaceEmpty(Box(it.x - GLIDE_SIZE / 2 + BOX_WAY_SIDE, startPos.y + BOX_WAY_INSET, it.z - GLIDE_SIZE / 2 + BOX_WAY_SIDE,
+						it.x + GLIDE_SIZE / 2 - BOX_WAY_SIDE, seen - BOX_WAY_INSET, it.z + GLIDE_SIZE / 2 - BOX_WAY_SIDE))
+				}
+				return !rayHeights(at) || !rayHeights(to)
+			}
+			at = to
+		}
+		return true
 	}
 
 	/** Coming down below the top of the layer bounced on over a gap in it, not onto it, see [intoLayerSide]. */
