@@ -114,14 +114,24 @@ private const val PATH_LINE_BEHIND = 8.0
 /** The width of the lines of the path shown, as wide on screen at any distance. */
 private const val PATH_LINE_WIDTH = -0.001f
 
-/** How many routes the route planner keeps looking on from at each step, see [ObstaclePassingMode.planRoute]. */
+/** How many routes the route planner keeps looking on from at each step, see [ObstaclePassingMode.RouteSearch]. */
 private const val ROUTE_BEAM = 4
 /** How many ways past in a row a route has at most. */
 private const val ROUTE_DEPTH = 4
 /** How far ahead along the line routes are compared at, see [ObstaclePassingMode.routeScore]. */
 private const val ROUTE_HORIZON = 64.0
-/** How long planning a route may take, then the routes not looked on from yet are scored as they are. */
+/** How long planning a route may take each tick, it goes on the next, see [ObstaclePassingMode.RouteSearch]. */
 private const val ROUTE_BUDGET_NANOS = 3_000_000L
+/** How many ticks a route search goes on for at most, then the routes not looked on from yet are scored as they are. */
+private const val ROUTE_MAX_TICKS = 16
+/** How long what the route planner found from a spot is kept, the world may change, see [ObstaclePassingMode.routeWays]. */
+private const val ROUTE_MEMO_TICKS = 40
+/** After how many route searches where their time went is logged. */
+private const val ROUTE_TIMING_SEARCHES = 20
+/** How many levels down off the end of one the route planner looks for floor, see [ObstaclePassingMode.downWay]. */
+private const val ROUTE_DROP_LEVELS = 2
+/** The text of the way that's the deciders' plan, see [ObstaclePassingMode.planWay]. */
+private const val PLAN_TEXT = "plan"
 /** The colours of a route's steps drawn, first to last, see [PasserSettings.showPath]. */
 private val ROUTE_COLORS = listOf(Color(255, 70, 70), Color(255, 150, 0), Color(190, 90, 255), Color(70, 140, 255))
 
@@ -2794,9 +2804,16 @@ abstract class ObstaclePassingMode(
 	 */
 	private class RouteState(val along: Double, val offset: Double, val y: Double, val climb: Double, val speed: Double, val level: Double)
 
+	/** A way past to fly from where a route is, along its lane until [laneUntil] when it's a lane, see [routeStep]. */
+	private class RouteWay(val way: HoleWay, val laneUntil: Double)
+
 	/** One way past on a route, [way], ending at [end] [ticks] later, drawn through [points]. */
-	private class RouteStep(val way: HoleWay, val end: RouteState, val ticks: Int, val points: List<Vec3d>) {
-		override fun toString() = if (way.kind == "brake") "brake" else "%s %+.2f to %.0f".format(way.kind, end.offset, end.along)
+	private class RouteStep(val way: RouteWay, val end: RouteState, val ticks: Int, val points: List<Vec3d>) {
+		val kind get() = way.way.kind
+		/** The deciders' plan, see [planWay]. */
+		val plan get() = way.way.text == PLAN_TEXT
+
+		override fun toString() = if (kind == "brake") "brake" else "%s%s %+.2f to %.0f".format(kind, if (plan) "*" else "", end.offset, end.along)
 	}
 
 	/**
@@ -2805,7 +2822,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private class Route(val steps: List<RouteStep>, val end: RouteState, val ticks: Int, val score: Double) {
 		/** The same ways on the same lanes, wherever they end exactly, for logging it only once it changes. */
-		val key get() = steps.joinToString(" ") { "%s%+.1f".format(it.way.kind, it.end.offset) }
+		val key get() = steps.joinToString(" ") { "%s%+.1f".format(it.kind, it.end.offset) }
 
 		override fun toString() = steps.joinToString(" -> ")
 	}
@@ -2813,98 +2830,301 @@ abstract class ObstaclePassingMode(
 	/** The route drawn, see [PasserSettings.showPath]: each step's points, and coasting on from its end to the horizon. */
 	private class RouteView(val steps: List<List<Vec3d>>, val coast: List<Vec3d>)
 
+	/**
+	 * What [waysFrom] found from a route's end: the [ways] past what's next, and whether swerving past it is looked for
+	 * too when none of them gets past, see [swerveWays].
+	 */
+	private class RouteWays(val ways: List<RouteWay>, val swerves: Boolean)
+
+	/**
+	 * A beam search for the route past what's ahead, spread over ticks, see [routeShadow]: from [root], on the line [dir]
+	 * from [lineX], [lineZ], scored at the [horizon] along it. Each tick it goes on where it left off, a way at a time:
+	 * the routes in the [beam] of this [depth], the one at [index] looked on from, its ways left to fly in [todo]. The
+	 * deciders' plan when it started, [did], [didKind], to compare with.
+	 */
+	private class RouteSearch(
+		val dir: Vec3d, val lineX: Double, val lineZ: Double, val root: RouteState, val horizon: Double, rootScore: Double,
+		val rootWays: List<RouteWay>, val did: String, val didKind: String,
+	) {
+		var beam = listOf(Route(emptyList(), root, 0, rootScore))
+		var depth = 0
+		var index = 0
+		/** The routes one way on from the beam so far, the next beam's to pick from. */
+		val next = mutableListOf<Route>()
+		/** The routes that end, with nothing ahead in reach or braking. */
+		val done = mutableListOf<Route>()
+		/** The ways from the route at [index] not flown yet, null before they're looked for. */
+		var todo: ArrayDeque<RouteWay>? = null
+		var made = 0
+		var swerves = false
+		var swerved = false
+		var expanded = 0
+		var nanos = 0L
+		var ticks = 0
+		/** The glides simulated, kept from tick to tick of the search, see [hopRunMemo]. */
+		val hops = HashMap<HopRunKey, HopRun>()
+		val finished get() = depth >= ROUTE_DEPTH || beam.isEmpty()
+
+		/** The best route there is so far: ended, one way on, or not looked on from yet, not those looked on from already. */
+		fun best() = (done + next + beam.drop(if (todo == null) index else index + 1)).minByOrNull { it.score }
+	}
+
+	/** What the route planner spends its time on, see [routeTimed]. */
+	private enum class RouteWork { Scan, HoleWays, DownWay, BlockWays, SwerveWays, Glide, Lane, Score }
+
+	private val routeWorkNanos = LongArray(RouteWork.entries.size)
+	private val routeWorkCalls = IntArray(RouteWork.entries.size)
+	private var routeSearches = 0
+	private var routeSearchNanos = 0L
+	private var routeMemoHits = 0
+	private var routeMemoLooks = 0
+
+	/** Runs [block], its time counted as [work], logged now and then, see [logRouteTiming]. */
+	private inline fun <T> routeTimed(work: RouteWork, block: () -> T): T {
+		val started = System.nanoTime()
+		try {
+			return block()
+		} finally {
+			routeWorkNanos[work.ordinal] += System.nanoTime() - started
+			routeWorkCalls[work.ordinal]++
+		}
+	}
+
+	/** Every [ROUTE_TIMING_SEARCHES] searches, where their time went, see [RouteWork], and starts counting anew. */
+	private fun logRouteTiming() {
+		if (routeSearches < ROUTE_TIMING_SEARCHES) return
+		ElytraFly.debug {
+			val works = RouteWork.entries.filter { routeWorkCalls[it.ordinal] > 0 }.joinToString(", ") {
+				"%s %.2f ms (%d × %.3f)".format(it.name, routeWorkNanos[it.ordinal] / 1e6 / routeSearches, routeWorkCalls[it.ordinal] / routeSearches,
+					routeWorkNanos[it.ordinal] / 1e6 / routeWorkCalls[it.ordinal])
+			}
+			"Route timing over $routeSearches searches, %.2f ms each: $works; ways memo %d/%d".format(routeSearchNanos / 1e6 / routeSearches, routeMemoHits, routeMemoLooks)
+		}
+		routeWorkNanos.fill(0)
+		routeWorkCalls.fill(0)
+		routeSearches = 0
+		routeSearchNanos = 0
+		routeMemoHits = 0
+		routeMemoLooks = 0
+	}
+
 	/** Read by the render thread, swapped whole by the game thread, see [RouteView]. */
 	@Volatile private var routeView: RouteView? = null
 	/** The [Route.key] of the route logged last, logged again only once it changes. */
 	private var routeText = ""
-	private var routeRuns = 0
-	private var routeNanos = 0L
+	/** The search going on, see [RouteSearch]. */
+	private var routeSearch: RouteSearch? = null
+	/** The route found last, its first way flown again first by the next search, see [rootWays]. */
+	private var lastRoute: Route? = null
+
+	/** A route state rounded, what [waysFrom] found from it is found from all close to it, see [routeMemo]. */
+	private data class RouteKey(val along: Long, val offset: Long, val y: Long, val climb: Long, val speed: Long, val level: Long, val swerving: Boolean)
+
+	/**
+	 * What [waysFrom] found, across searches, for the line from [routeMemoLine] along [routeMemoDir], for
+	 * [ROUTE_MEMO_TICKS] at most, the world may change.
+	 */
+	private val routeMemo = HashMap<RouteKey, RouteWays?>()
+	private var routeMemoLine: Vec3d? = null
+	private var routeMemoDir: Vec3d? = null
+	private var routeMemoTick = 0
 
 	private fun forgetRoute() {
 		routeView = null
 		routeText = ""
+		routeSearch = null
+		lastRoute = null
+		routeMemo.clear()
 	}
 
 	/**
-	 * Plans a route past what's ahead every [CHOOSER_RELOOK_TICKS] while gliding, see [planRoute], and only logs it once it
-	 * changes, beside what the deciders committed to, and keeps it to draw. All of it [sandboxed]: nothing it plans or
-	 * simulates on the way stays, the flight is the same. Not while flying a glide over already, landing or walking.
+	 * Plans a route past what's ahead while gliding, see [RouteSearch]: started every [CHOOSER_RELOOK_TICKS] with none
+	 * going on, gone on with each tick for [ROUTE_BUDGET_NANOS], ended after [ROUTE_MAX_TICKS] with what it has. Logged
+	 * only once it changes, beside what the deciders committed to when it started, and kept to draw. All of it
+	 * [sandboxed]: nothing it plans or simulates on the way stays, the flight is the same. Not while flying a glide over
+	 * already, landing or walking.
 	 */
 	private fun SafeContext.routeShadow() {
 		if (!passerConfig.passObstacles || !player.isGliding || inDip || passingToPos != null || brakeAt != null) {
 			forgetRoute()
 			return
 		}
-		if (passTicks % CHOOSER_RELOOK_TICKS != 0) return
-		val progress = progress(player.pos)
-		if (hop.let { it != null && progress >= it.start }) return
+		val dir = getSnappedDir()
+		val search = routeSearch?.takeIf { it.dir == dir && it.lineX == startPos.x && it.lineZ == startPos.z } ?: run {
+			routeSearch = null
+			if (passTicks % CHOOSER_RELOOK_TICKS != 0) return
+			val progress = progress(player.pos)
+			if (hop.let { it != null && progress >= it.start }) return
+			startRoute(dir, progress).also { routeSearch = it }
+		}
 		val started = System.nanoTime()
-		var expanded = 0
-		val route = sandboxed {
+		val deadline = started + ROUTE_BUDGET_NANOS
+		sandboxed {
 			// What the planners log looking from where a route is would read as the flight's. Not what putting it back logs.
 			ElytraFly.debugMuted++
 			try {
-				withHopMemo { planRoute { expanded++ } }
+				withHopMemo(search.hops) { while (!search.finished && System.nanoTime() < deadline) routeWork(search) }
 			} finally {
 				ElytraFly.debugMuted--
 			}
 		}
-		val nanos = System.nanoTime() - started
-		routeRuns++
-		routeNanos += nanos
+		search.nanos += System.nanoTime() - started
+		search.ticks++
+		if (!search.finished && search.ticks < ROUTE_MAX_TICKS) return
+		routeSearch = null
+		routeSearches++
+		routeSearchNanos += search.nanos
+		logRouteTiming()
+		val route = search.best()
 		if (route == null || route.steps.isEmpty()) {
-			forgetRoute()
+			routeView = null
 			return
 		}
-		routeView = RouteView(route.steps.map { it.points }, routeCoast(route.end, progress + ROUTE_HORIZON))
+		lastRoute = route
+		routeView = RouteView(route.steps.map { it.points }, routeCoast(route.end, search.horizon))
 		if (route.key == routeText) return
 		routeText = route.key
 		ElytraFly.debug {
-			"Route: $route (score %.1f, %.2f ms, %d expanded, %.2f on average); did ${planText()}".format(route.score, nanos / 1e6, expanded, routeNanos / 1e6 / routeRuns)
+			"Route: $route (score %.1f, %.2f ms over %d ticks, %d expanded, depth %d%s); did ${search.did}; %s".format(route.score, search.nanos / 1e6,
+				search.ticks, search.expanded, search.depth, if (search.finished) "" else ", cut off", routeVersus(route, search))
+		}
+	}
+
+	/** A search from where you are, [progress] along the line [dir], see [RouteSearch], with the ways it flies first, see [rootWays]. */
+	private fun SafeContext.startRoute(dir: Vec3d, progress: Double): RouteSearch {
+		val root = RouteState(progress, player.pos.subtract(startPos).dotProduct(across(dir)), player.y, player.velocity.y,
+			player.velocity.horizontalLength(), startPos.y)
+		val horizon = root.along + ROUTE_HORIZON
+		if (routeMemoLine != startPos || routeMemoDir != dir || passTicks - routeMemoTick > ROUTE_MEMO_TICKS) {
+			routeMemo.clear()
+			routeMemoLine = startPos
+			routeMemoDir = dir
+			routeMemoTick = passTicks
+		}
+		return RouteSearch(dir, startPos.x, startPos.z, root, horizon, routeTimed(RouteWork.Score) { routeScore(root, 0, horizon) },
+			rootWays(root), planText(), planKind())
+	}
+
+	/**
+	 * The ways flown first from where you are, besides those looked for, see [waysFrom]: the deciders' plan, see
+	 * [planWay], and the first way of the route found last, when it's still ahead and not the plan.
+	 */
+	private fun SafeContext.rootWays(root: RouteState): List<RouteWay> {
+		val plan = planWay(root)
+		val again = lastRoute?.steps?.firstOrNull()?.takeUnless { it.plan || it.kind == "brake" }?.way?.takeIf { again ->
+			again.way.hop.let { it == null || it.start > root.along } &&
+				(plan == null || again.way.hop?.let { a -> plan.way.hop?.let { sameWay(a, it) } } != true)
+		}
+		return listOfNotNull(plan, again)
+	}
+
+	/**
+	 * The plan the deciders committed to as a way from [root], the glide over or the lane dodged to, null with neither:
+	 * flown alongside the ways the route planner looks for itself, e.g. through an opening it's holding for already.
+	 */
+	private fun planWay(root: RouteState): RouteWay? {
+		hop?.let { planned ->
+			// The level it ends on like the flight sets it once past it.
+			val toLevel = when {
+				planned.step -> baseY + planned.stepHeight
+				planned.down -> if (planned.intoDip) baseY - STEP_HEIGHT else baseY
+				else -> null
+			}
+			return RouteWay(HoleWay(planKind(), planned, null, PLAN_TEXT, thread, toLevel), planned.end)
+		}
+		val lane = dodge?.takeIf { it != Vec3d.ZERO } ?: return null
+		return RouteWay(HoleWay("dodge", null, Lane(lane, dodgeLean, dodgeOffset), PLAN_TEXT), max(dodgeEnd, root.along) + DODGE_MARGIN)
+	}
+
+	/** What kind of way the deciders' plan is, named like the route planner's ways, see [HoleWay.kind]. */
+	private fun planKind() = hop?.let {
+		when {
+			it.touch != null -> "touch-down"
+			it.step -> "step"
+			it.down -> "off"
+			it.swerve != null -> "swerve"
+			thread != null -> "thread"
+			it.under -> "under"
+			else -> "glide"
+		}
+	} ?: when {
+		brakeAt != null -> "brake"
+		dodge.let { it != null && it != Vec3d.ZERO } -> "dodge"
+		else -> "on"
+	}
+
+	/** Where [route] and the deciders' plan when [search] started differ, compactly: its first way and what they did. */
+	private fun routeVersus(route: Route, search: RouteSearch): String {
+		val first = route.steps.first()
+		return when {
+			first.plan -> "takes the plan"
+			first.kind == search.didKind -> "same kind as the plan, ${first.kind}"
+			else -> "differs: route ${first.kind}, did ${search.didKind}"
 		}
 	}
 
 	/**
-	 * A beam search for the route past what's ahead from where you are: from each of the [ROUTE_BEAM] best routes so far,
-	 * every way past what's next on its lane, see [waysFrom], up to [ROUTE_DEPTH] ways or [ROUTE_HORIZON] along the line.
-	 * All scored at the same horizon, see [routeScore]. Out of [ROUTE_BUDGET_NANOS], the routes not looked on from yet are
-	 * scored as they are. [expanding] is told of each route looked on from. Null with nothing ahead.
+	 * One piece of [search]'s work, see [RouteSearch]: the ways from the route looked on from, a way of them flown and
+	 * scored, see [routeStep] and [routeScore], swerving past looked for when none got past, or on to the next route,
+	 * braking from it when none did. Nothing ahead within reach, the route ends there, bounced on.
 	 */
-	private fun SafeContext.planRoute(expanding: () -> Unit): Route? {
-		val dir = getSnappedDir()
-		val root = RouteState(progress(player.pos), player.pos.subtract(startPos).dotProduct(across(dir)), player.y, player.velocity.y,
-			player.velocity.horizontalLength(), startPos.y)
-		val horizon = root.along + ROUTE_HORIZON
-		val deadline = System.nanoTime() + ROUTE_BUDGET_NANOS
-		val done = mutableListOf<Route>()
-		var beam = listOf(Route(emptyList(), root, 0, routeScore(root, 0, horizon)))
-		repeat(ROUTE_DEPTH) {
-			val next = mutableListOf<Route>()
-			for (route in beam) {
-				if (System.nanoTime() > deadline) {
-					done += route
-					continue
-				}
-				expanding()
-				val steps = waysFrom(route.end, dir, horizon, deadline)
-				when {
-					// Nothing ahead within the horizon: it's flown on bouncing.
-					steps == null -> done += route
-					// Out of time looking, scored as it is.
-					steps.isEmpty() && System.nanoTime() > deadline -> done += route
-					// No way past: landing to walk.
-					steps.isEmpty() -> done += Route(route.steps + RouteStep(HoleWay("brake", null, null, ""), route.end, 0, emptyList()),
-						route.end, route.ticks, route.ticks + CHOOSER_BRAKE_COST)
-					else -> steps.forEach { step ->
-						val ticks = route.ticks + step.ticks
-						next += Route(route.steps + step, step.end, ticks, routeScore(step.end, ticks, horizon))
-					}
-				}
+	private fun SafeContext.routeWork(search: RouteSearch) {
+		val route = search.beam[search.index]
+		val todo = search.todo
+		if (todo == null) {
+			search.expanded++
+			val found = routeWays(route.end, search, swerving = false)
+			if (found == null) {
+				search.done += route
+				nextRoute(search)
+				return
 			}
-			beam = next.sortedBy { it.score }.take(ROUTE_BEAM)
-			if (beam.isEmpty()) return done.minByOrNull { it.score }
+			search.todo = ArrayDeque((if (route.steps.isEmpty()) search.rootWays else emptyList()) + found.ways)
+			search.made = 0
+			search.swerves = found.swerves
+			search.swerved = false
+			return
 		}
-		return (done + beam).minByOrNull { it.score }
+		todo.removeFirstOrNull()?.let { way ->
+			lookingFrom(route.end) { routeStep(route.end, way, search.dir) }?.let { step ->
+				search.made++
+				val ticks = route.ticks + step.ticks
+				search.next += Route(route.steps + step, step.end, ticks, routeTimed(RouteWork.Score) { routeScore(step.end, ticks, search.horizon) })
+			}
+			return
+		}
+		if (search.made == 0 && search.swerves && !search.swerved) {
+			search.swerved = true
+			routeWays(route.end, search, swerving = true)?.let { todo += it.ways }
+			return
+		}
+		// No way past: landing to walk.
+		if (search.made == 0) search.done += Route(route.steps + RouteStep(RouteWay(HoleWay("brake", null, null, ""), route.end.along), route.end, 0, emptyList()),
+			route.end, route.ticks, route.ticks + CHOOSER_BRAKE_COST)
+		nextRoute(search)
+	}
+
+	/** On to the next route in [search]'s beam, the next beam the best [ROUTE_BEAM] of those one way on, one of each key. */
+	private fun nextRoute(search: RouteSearch) {
+		search.todo = null
+		if (++search.index < search.beam.size) return
+		search.beam = search.next.sortedBy { it.score }.distinctBy { it.key }.take(ROUTE_BEAM)
+		search.next.clear()
+		search.index = 0
+		search.depth++
+	}
+
+	/** [waysFrom] [state], remembered for states close to it, see [routeMemo]. Null with nothing ahead before [RouteSearch.horizon]. */
+	private fun SafeContext.routeWays(state: RouteState, search: RouteSearch, swerving: Boolean): RouteWays? {
+		if (state.along >= search.horizon) return null
+		val key = RouteKey((state.along * 4).roundToLong(), (state.offset * 20).roundToLong(), (state.y * 20).roundToLong(), (state.climb * 20).roundToLong(),
+			(state.speed * 50).roundToLong(), (state.level * 100).roundToLong(), swerving)
+		routeMemoLooks++
+		if (routeMemo.containsKey(key)) {
+			routeMemoHits++
+			return routeMemo[key]
+		}
+		return waysFrom(state, search.dir, swerving).also { routeMemo[key] = it }
 	}
 
 	/**
@@ -2941,60 +3161,83 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * The ways past what's next on the lane from [state], within the [horizon] along the line, each flown to where it ends,
-	 * those that don't get past left out: a block, glided over or under, touched down on, a stepping stone, through an
-	 * opening, dodged to a lane (see [blockWays]) or swerved past (see [swerveWays]) when none of those does; a hole,
-	 * glided over, touched down in (see [holeWays]) or side-stepped on the floor (see [floorLane]). Null with nothing
-	 * ahead, or a mob, those are left to the deciders. Looked at only until the [deadline].
+	 * The ways past what's next on the lane from [state] within [PasserSettings.dodgeLookAhead], not flown yet: a block,
+	 * glided over or under, touched down on, a stepping stone, through an opening, dodged to a lane (see [blockWays]), or
+	 * [swerving] past it (see [swerveWays]), looked for only when none of those gets past; a hole, glided over, touched
+	 * down in (see [holeWays]), side-stepped on the floor (see [floorLane]) or gone down off the level into (see
+	 * [downWay]). Null with nothing ahead, or a mob, those are left to the deciders.
 	 */
-	private fun SafeContext.waysFrom(state: RouteState, dir: Vec3d, horizon: Double, deadline: Long): List<RouteStep>? = lookingFrom(state) {
-		val reach = min(passerConfig.dodgeLookAhead.toDouble(), horizon - state.along)
-		if (reach <= 0) return@lookingFrom null
+	private fun SafeContext.waysFrom(state: RouteState, dir: Vec3d, swerving: Boolean): RouteWays? = lookingFrom(state) {
+		val reach = passerConfig.dodgeLookAhead.toDouble()
 		val across = across(dir)
 		val linePoint = startPos.add(dir.multiply(state.along))
 		val here = linePoint.add(across.multiply(state.offset))
-		val block = here.obstacleHits(dir, reach, speed = state.speed, carpets = carpetsCount).second
-		val hole = holesAhead(here, dir).firstOrNull { it.start > state.along && it.start < state.along + reach }
-		val blockAt = block?.let { state.along + it.distance }
-		val steps = mutableListOf<RouteStep>()
-		fun take(ways: List<HoleWay>, laneUntil: Double) = ways.forEach { way ->
-			if (System.nanoTime() <= deadline) routeStep(state, way, dir, laneUntil)?.let { steps += it }
+		val (block, hole) = routeTimed(RouteWork.Scan) {
+			here.obstacleHits(dir, reach, speed = state.speed, carpets = carpetsCount).second to
+				holesAhead(here, dir).firstOrNull { it.start > state.along && it.start < state.along + reach }
 		}
+		val blockAt = block?.let { state.along + it.distance }
 		if (hole != null && (blockAt == null || hole.start <= blockAt)) {
-			val floorLine = here.add(0.0, baseY - here.y, 0.0)
-			val sideStep = floorLane(here, linePoint, dir, hole.start - state.along, hole.endInclusive - state.along)
-			take(holeWays(floorLine, dir, hole, layerStart(floorLine, dir, hole), laneVec(across.multiply(state.offset)), sideStep),
-				hole.endInclusive + DODGE_MARGIN)
-			return@lookingFrom steps
+			if (swerving) return@lookingFrom null
+			val until = hole.endInclusive + DODGE_MARGIN
+			val ways = routeTimed(RouteWork.HoleWays) {
+				val floorLine = here.add(0.0, baseY - here.y, 0.0)
+				val sideStep = floorLane(here, linePoint, dir, hole.start - state.along, hole.endInclusive - state.along)
+				holeWays(floorLine, dir, hole, layerStart(floorLine, dir, hole), laneVec(across.multiply(state.offset)), sideStep)
+			}
+			val down = routeTimed(RouteWork.DownWay) { downWay(here, dir, state, hole.start) }
+			return@lookingFrom RouteWays((ways + listOfNotNull(down)).map { RouteWay(it, until) }, swerves = false)
 		}
 		if (block == null || block.mob) return@lookingFrom null
 		val outerTops = anyHeightTops
 		anyHeightTops = true
 		try {
-			val (ways, end, dodgePast) = blockWays(here, linePoint, dir, block.distance)
+			if (swerving) return@lookingFrom routeTimed(RouteWork.SwerveWays) {
+				RouteWays(swerveWays(linePoint, dir, block.distance, state.offset, state.speed).map { RouteWay(it, blockAt!!) }, swerves = false)
+			}
+			val (ways, end, dodgePast) = routeTimed(RouteWork.BlockWays) { blockWays(here, linePoint, dir, block.distance) }
 			val laneUntil = max(end, state.along + dodgePast + DODGE_MARGIN)
-			take(ways, laneUntil)
-			// Nothing else gets past it: out beside it and back, like the chooser.
-			if (steps.isEmpty() && block.distance >= MIN_DODGE_DISTANCE) take(swerveWays(linePoint, dir, block.distance, state.offset, state.speed), laneUntil)
+			RouteWays(ways.map { RouteWay(it, laneUntil) }, swerves = block.distance >= MIN_DODGE_DISTANCE)
 		} finally {
 			anyHeightTops = outerTops
 		}
-		steps
 	}
 
 	/**
-	 * Flies [way] from [state], null when it doesn't get past: a glide over like [blockWayExit] judges it, bounced off a
-	 * top it ends on, through an opening only as slow as it fits; a lane bounced along until [laneUntil], see [laneRun].
+	 * Off the level [state] bounces on down to the floor a level or two below where it ends at [edge] along the line,
+	 * e.g. the end of a layer or into a dip a block deep: glided off it like [planGap] glides off a layer's end, bounced
+	 * on down there. Null with no floor that near below, or no glide off it.
 	 */
-	private fun SafeContext.routeStep(state: RouteState, way: HoleWay, dir: Vec3d, laneUntil: Double): RouteStep? {
+	private fun SafeContext.downWay(here: Vec3d, dir: Vec3d, state: RouteState, edge: Double): HoleWay? {
+		val ahead = edge - state.along
+		val below = levelBelow(here.add(dir.multiply(ahead + STEP_ON)), state.level) ?: return null
+		val off = planHop(here, dir, (ahead - DROP_BEFORE).coerceAtLeast(HOP_SCAN_STEP), true, DROP_BEFORE + STEP_ON) ?: return null
+		val lane = across(dir).multiply(state.offset)
+		return HoleWay("off", Hop(off.start, off.end, off.feetY, off.topY, off.obstacle, false, down = true, lane = lane, low = off.low), null,
+			"down to y%.0f".format(below), toLevel = below)
+	}
+
+	/** The floor a level or two below [level] at [spot], see [ROUTE_DROP_LEVELS], null with none. */
+	private fun SafeContext.levelBelow(spot: Vec3d, level: Double) =
+		(1..ROUTE_DROP_LEVELS).map { level - it * STEP_HEIGHT }.firstOrNull { Vec3d(spot.x, it, spot.z).boxHasFloor() }
+
+	/**
+	 * Flies [way] from [state], null when it doesn't get past: a glide over like [blockWayExit] judges it, bounced off a
+	 * top it ends on, through an opening only as slow as it fits, ending on the level it goes up or down to; a lane
+	 * bounced along until its [RouteWay.laneUntil], see [laneRun].
+	 */
+	private fun SafeContext.routeStep(state: RouteState, way: RouteWay, dir: Vec3d): RouteStep? {
 		val across = across(dir)
-		val hop = way.hop ?: return way.lane?.let { lane -> laneRun(state, dir, lane.offset, lane.lean, laneUntil)?.let { (end, ticks, points) -> RouteStep(way, end, ticks, points) } }
-		val slow = way.thread?.maxSpeed?.takeIf { it.isFinite() }
+		val hop = way.way.hop ?: return way.way.lane?.let { lane ->
+			routeTimed(RouteWork.Lane) { laneRun(state, dir, lane.offset, lane.lean, way.laneUntil) }?.let { (end, ticks, points) -> RouteStep(way, end, ticks, points) }
+		}
+		val slow = way.way.thread?.maxSpeed?.takeIf { it.isFinite() }
 		return inFrame(if (slow != null) frame().copy(threadAt = hop.start) else frame()) {
-			val ran = blockHopRun(hop, state.along, state.speed) ?: return@inFrame null
-			if (slow != null && !slowEnough(hop, slow, state.along, state.speed)) return@inFrame null
+			val ran = routeTimed(RouteWork.Glide) {
+				blockHopRun(hop, state.along, state.speed)?.takeIf { slow == null || slowEnough(hop, slow, state.along, state.speed) }
+			} ?: return@inFrame null
 			val end = bouncedOff(hop, ran)
-			val level = if (way.kind == "step") state.level + STEP_HEIGHT else state.level
+			val level = way.way.toLevel ?: if (way.way.kind == "step") state.level + STEP_HEIGHT else state.level
 			val endState = RouteState(end.at, hop.laneAt(end.at, across).dotProduct(across), end.y, end.climb, end.speed, level)
 			fun point(along: Double, y: Double) = startPos.add(dir.multiply(along)).add(hop.laneAt(along, across)).let { Vec3d(it.x, y, it.z) }
 			// Through where it's held and where it touches down, not each tick: only drawn.
@@ -3258,7 +3501,7 @@ abstract class ObstaclePassingMode(
 	 * A way over a hole Chooser Decides can commit to: gliding over it on the [hop]'s lane, touching down on its top, or
 	 * side-stepping it on the floor on the [lane]. How fast it is after it on average over the starts, see [chooseAtHole].
 	 */
-	private class HoleWay(val kind: String, val hop: Hop?, val lane: Lane?, val text: String, val thread: Thread? = null) {
+	private class HoleWay(val kind: String, val hop: Hop?, val lane: Lane?, val text: String, val thread: Thread? = null, val toLevel: Double? = null) {
 		var exit = 0.0
 		/** What follows it from where it ends, from the first start, flown once it's past, see [continuation]. */
 		var then: Continuation? = null
@@ -7209,11 +7452,11 @@ abstract class ObstaclePassingMode(
 	 */
 	private var glideTrace: MutableList<Pair<Double, Double>>? = null
 
-	/** Runs [block] with [canHop] remembering what it simulated, see [hopRunMemo]. */
-	private inline fun <T> withHopMemo(block: () -> T): T {
+	/** Runs [block] with [canHop] remembering what it simulated in [memo], see [hopRunMemo]. */
+	private inline fun <T> withHopMemo(memo: HashMap<HopRunKey, HopRun> = HashMap(), block: () -> T): T {
 		val outer = hopRunMemo
 		if (outer == null) {
-			hopRunMemo = HashMap()
+			hopRunMemo = memo
 			continuationMemo = tickContinuations()
 		}
 		try {
