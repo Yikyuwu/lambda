@@ -286,7 +286,8 @@ object ElytraFly : Module(
                 }
                 return@listen
             }
-            mode.elytraFly.onFlagListeners.forEach { it() }
+            // On the game thread, the listeners change what it reads there, e.g. Bounce's pause timer it counts each tick.
+            runGameScheduled { mode.elytraFly.onFlagListeners.forEach { it() } }
         }
 
         listen<PacketEvent.Send.Post> { event ->

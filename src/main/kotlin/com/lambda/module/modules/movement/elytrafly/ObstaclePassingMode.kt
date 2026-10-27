@@ -2934,7 +2934,6 @@ abstract class ObstaclePassingMode(
 		val started = System.nanoTime()
 		val progress = progress(player.pos)
 		val at = progress + distance
-		val speed = player.velocity.horizontalLength()
 		val (best, current, count) = sandboxed {
 			withHopMemo {
 				anyHeightTops = true
@@ -4458,12 +4457,13 @@ abstract class ObstaclePassingMode(
 		val step = laneStep(dir) / 4
 		// The blocks under the box on each lane all along it.
 		val cells = HashSet<Long>()
+		val corners = doubleArrayOf(-GLIDE_SIZE / 2, GLIDE_SIZE / 2)
 		var along = start
 		while (along <= end) {
 			var side = -reach
 			while (side <= reach + 1e-6) {
 				val point = linePoint.add(dir.multiply(along)).add(across.multiply(side))
-				for (dx in arrayOf(-GLIDE_SIZE / 2, GLIDE_SIZE / 2)) for (dz in arrayOf(-GLIDE_SIZE / 2, GLIDE_SIZE / 2))
+				for (dx in corners) for (dz in corners)
 					cells += BlockPos.asLong(floor(point.x + dx).toInt(), 0, floor(point.z + dz).toInt())
 				side += step
 			}
@@ -4753,6 +4753,9 @@ abstract class ObstaclePassingMode(
 		val nz = doubleArrayOf(0.0, 1.0, across.z)
 		val k = DoubleArray(3) { across.x * nx[it] + across.z * nz[it] }
 		val out = ArrayList<Pair<Double, Double>>()
+		// Each box's corners grown by half the box, filled anew for each, see below.
+		val qx = DoubleArray(4)
+		val qz = DoubleArray(4)
 		var shiftX = 0.0
 		var shiftZ = 0.0
 		for (leg in 0..1) {
@@ -4778,8 +4781,8 @@ abstract class ObstaclePassingMode(
 				pMax[axis] = hi
 			}
 			for (box in boxes) {
-				val qx = doubleArrayOf(box.minX - half, box.maxX + half, box.minX - half, box.maxX + half)
-				val qz = doubleArrayOf(box.minZ - half, box.minZ - half, box.maxZ + half, box.maxZ + half)
+				qx[0] = box.minX - half; qx[1] = box.maxX + half; qx[2] = box.minX - half; qx[3] = box.maxX + half
+				qz[0] = box.minZ - half; qz[1] = box.minZ - half; qz[2] = box.maxZ + half; qz[3] = box.maxZ + half
 				var low = Double.NEGATIVE_INFINITY
 				var high = Double.POSITIVE_INFINITY
 				for (axis in 0..2) {
@@ -5911,8 +5914,12 @@ abstract class ObstaclePassingMode(
 		// Only overhead, glided under without touching the floor, a bounce would throw you up into it. Only if the box fits
 		// right above the floor all the way, else something's in the way down there too that the rays above missed. Not
 		// [above] a height, over what hangs there, e.g. a floating block glided over instead of under.
-		val under = above == null && !onFloor && fits(heights.first())
-		val feetY = heights.firstOrNull { fits(it) } ?: run {
+		// None at all when the line is too high already, e.g. up on a layer near the nether's cap: nothing to glide over at.
+		// The lowest looked at once, it's the first one tried for the feet too.
+		val lowest = heights.firstOrNull()
+		val lowestFits = lowest != null && fits(lowest)
+		val under = above == null && !onFloor && lowestFits
+		val feetY = (if (lowestFits) lowest else heights.drop(1).firstOrNull { fits(it) }) ?: run {
 			// What's in the way up there, for the log.
 			val blocked = samples.firstOrNull { !free(box(it, maxHopY).expand(swing, 0.0, swing)) }
 			val what = blocked?.let { along ->
@@ -5922,7 +5929,7 @@ abstract class ObstaclePassingMode(
 			return noHop("too high to get over under y %.2f, $what, %.1f long".format(maxHopY, end - distance))
 		}
 		// As high as there's room over it all, a roof or a block hanging above.
-		val topY = heights.dropWhile { it < feetY }.takeWhile { fits(it) }.last()
+		val topY = heights.dropWhile { it <= feetY }.takeWhile { fits(it) }.lastOrNull() ?: feetY
 		if (topY - feetY < HOP_MARGIN) return noHop("only %.2f room between y %.2f and %.2f".format(topY - feetY, feetY, topY))
 		// Under it only with floor right after to come down on, else it's dodged and the height kept.
 		if (under && !linePoint.add(dir.multiply(stop + HOP_SCAN_STEP)).boxHasFloor()) return noHop("no floor right after it to come down on")
@@ -6219,7 +6226,7 @@ abstract class ObstaclePassingMode(
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = touch?.range?.contains(along) == true
 			// Coming over it lower than its top runs into its side.
-			if (onTop && fromAlong !in touch!!.range && !touched && y < touch.y) {
+			if (onTop && fromAlong !in touch.range && !touched && y < touch.y) {
 				val atY = y
 				val ahead = along - progress
 				val topY = touch.y
@@ -7179,8 +7186,7 @@ abstract class ObstaclePassingMode(
 		val across = across(dir)
 		val here = Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(across)
 		val ahead = linePoint.add(dir.multiply(player.velocity.horizontalLength() * LAND_AHEAD_TICKS))
-		val step = laneStep(dir) / 4
-		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val (step, sides) = quarterLanes(dir)
 		// Room at your height on the way over there too, beside the hole may be right at the wall. The box swings out at speed.
 		val swing = sweep(dir)
 		fun roomAt(spot: Vec3d) = spaceEmpty(Box(spot.x - GLIDE_SIZE / 2 - swing, player.y, spot.z - GLIDE_SIZE / 2 - swing,
