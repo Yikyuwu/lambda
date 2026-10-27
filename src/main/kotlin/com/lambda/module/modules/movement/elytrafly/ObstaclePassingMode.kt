@@ -2865,8 +2865,8 @@ abstract class ObstaclePassingMode(
 		val hops = HashMap<HopRunKey, HopRun>()
 		val finished get() = depth >= ROUTE_DEPTH || beam.isEmpty()
 
-		/** The best route there is so far: ended, looked on from or not yet, not the ones looked on from already. */
-		fun best() = (done + next + beam.drop(index)).minByOrNull { it.score }
+		/** The best route there is so far: ended, one way on, or not looked on from yet, not those looked on from already. */
+		fun best() = (done + next + beam.drop(if (todo == null) index else index + 1)).minByOrNull { it.score }
 	}
 
 	/** What the route planner spends its time on, see [routeTimed]. */
