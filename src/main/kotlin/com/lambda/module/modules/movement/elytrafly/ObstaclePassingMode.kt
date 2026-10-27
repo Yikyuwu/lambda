@@ -3253,6 +3253,28 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * Off a layer out on a lane, back to the line held over what's low on the way down there, e.g. a railing as high as
+	 * the layer was, see [swervePlan]. Whether it's held over something, nothing in the way it bounces on down there.
+	 */
+	private fun SafeContext.swerveBack(dir: Vec3d): Boolean {
+		val progress = progress(player.pos)
+		val offset = player.pos.subtract(startPos).dotProduct(across(dir))
+		var why = ""
+		// Not back across the line before past what's dodged, it may be right beside you still.
+		val backAt = max(progress, dodgeEnd + SWERVE_PAST)
+		val back = swervePlan(Swerve(offset, Double.NEGATIVE_INFINITY, backAt, emptyList(), backAt), dir, startPos.y, SWERVE_HELD_MARGIN) { why = it }
+		if (back == null) {
+			if (why != SWERVE_FREE) ElytraFly.debug { "Off the blocks on a lane, no way back to the line over what's down there ($why)" }
+			return false
+		}
+		ElytraFly.debug { "Off the blocks on a lane, back to the line held at y %.2f over what's down there until %.1f ahead".format(back.targetY, back.end - progress) }
+		back.held = true
+		commitNoLane("swerveBack")
+		commitHop("swerveBack", back)
+		return true
+	}
+
+	/**
 	 * Whether the box swerving moves free from [a] to [b] (along and across the line [dir] down at [floorY]) between [low]
 	 * and [high], wider than yours by [side]: the flight steers a bit off the path planned. The larger axis
 	 * first, either when they're about even.
@@ -4115,6 +4137,13 @@ abstract class ObstaclePassingMode(
 						// Toward the side of a top to touch down on in a hole after it, like [startDodge].
 						else -> freeLane(here, linePoint, dir, distance, lane, dodgeCarpets, if (dodgeCarpets) CARPET_CLEAR else DODGE_MARGIN,
 							toward = touchSide?.takeIf { (_, until) -> progress + distance < until }?.first)
+					}?.takeUnless { switch ->
+						// Over to it from where you are free on the way, e.g. not across what's dodged right beside you, it's
+						// passed only further on.
+						switch.target != lane && steerPathHit(linePoint, dir, steerPath(offset.dotProduct(across(dir)), dir, switch.offset, switch.lean,
+							distance - player.velocity.horizontalLength() * LEAN_TICKS, distance), distance)?.also { hit ->
+							ElytraFly.debug { "Obstacle %.1f ahead on the lane ($block), not over to ${switch.target.describe(dir)}: $hit".format(distance) }
+						} != null
 					}
 					val over = if (carpetsOnly && distance <= CARPET_HOP_AHEAD) planHop(from, dir, distance, carpets = true, lean = tilt)
 						?.with(lane = lane) else null
@@ -5755,6 +5784,9 @@ abstract class ObstaclePassingMode(
 		if (first <= HOP_SCAN_STEP && (onCarpets || !shortGap(first))) {
 			if (lane != Vec3d.ZERO && !onCarpets && line.boxHasFloor()) return false
 			offTheLayer()
+			// Off it on a lane, down there what's beside the way may be as high as the layer was, e.g. a railing: held over
+			// it back to the line, not dropped down into its side.
+			if (lane != Vec3d.ZERO && !onCarpets) return swerveBack(dir)
 			return false
 		}
 		// The next bounce would come down in a gap in it, into the side of the layer after it: glided across.
