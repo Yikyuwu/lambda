@@ -64,3 +64,24 @@ class LiveFlyer : Flyer {
 	override val isOnGround get() = you.isOnGround
 	override val isGliding get() = you.isGliding
 }
+
+/** You as you were when taken, see [of]: only values, read on any thread, e.g. by a route search apart. */
+data class FlyerSnapshot(
+	override val pos: Vec3d,
+	override val blockPos: BlockPos,
+	override val velocity: Vec3d,
+	override val finalGravity: Double,
+	override val isOnGround: Boolean,
+	override val isGliding: Boolean,
+) : Flyer {
+	override val x get() = pos.x
+	override val y get() = pos.y
+	override val z get() = pos.z
+	override val horizontalSpeed get() = velocity.horizontalLength()
+
+	companion object {
+		/** [flyer] as it is now. */
+		fun of(flyer: Flyer) =
+			FlyerSnapshot(flyer.pos, flyer.blockPos.toImmutable(), flyer.velocity, flyer.finalGravity, flyer.isOnGround, flyer.isGliding)
+	}
+}

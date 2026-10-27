@@ -61,6 +61,7 @@ import net.minecraft.entity.effect.StatusEffects
 import net.minecraft.entity.boss.dragon.EnderDragonPart
 import net.minecraft.entity.mob.HoglinEntity
 import net.minecraft.entity.mob.MagmaCubeEntity
+import net.minecraft.predicate.entity.EntityPredicates
 import net.minecraft.network.packet.s2c.play.EntityVelocityUpdateS2CPacket
 import net.minecraft.network.packet.s2c.play.ExplosionS2CPacket
 import net.minecraft.registry.Registries
@@ -76,6 +77,7 @@ import net.minecraft.util.shape.VoxelShapes
 import net.minecraft.world.BlockView
 import net.minecraft.world.RaycastContext
 import net.minecraft.world.World
+import net.minecraft.world.border.WorldBorder
 import java.awt.Color
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
@@ -131,6 +133,20 @@ private const val ROUTE_MEMO_TICKS = 40
 private const val ROUTE_TIMING_SEARCHES = 20
 /** How many levels down off the end of one the route planner looks for floor, see [ObstaclePassingMode.downWay]. */
 private const val ROUTE_DROP_LEVELS = 2
+/** Every how many route searches started [ObstaclePassingMode.checkRouteSnapshot] runs, see [PasserSettings.routeSnapshotCheck]. */
+private const val ROUTE_CHECK_EVERY = 4
+/** After how many snapshot checks the corridor's size and what it cost is logged, see [ObstaclePassingMode.checkRouteSnapshot]. */
+private const val ROUTE_CHECK_LOG_EVERY = 10
+/** How far behind you along the line the corridor goes, see [ObstaclePassingMode.captureCorridor]. */
+private const val CORRIDOR_BEHIND = 8.0
+/** How far ahead along the line the corridor goes at least, as far as a route search looks past that. */
+private const val CORRIDOR_AHEAD = 80.0
+/** How far across the line to either side the corridor goes, besides the farthest lane dodged to. */
+private const val CORRIDOR_SIDE = 4.0
+/** How far a box swings out across the way past that, diagonally, see [ObstaclePassingMode.swingClears]. */
+private const val CORRIDOR_SWING = 2.0
+/** How far above the highest flown the corridor goes with no highest, see [ObstaclePassingMode.maxFlightY]. */
+private const val CORRIDOR_OPEN_TOP = 8.0
 /** The text of the way that's the deciders' plan, see [ObstaclePassingMode.planWay]. */
 private const val PLAN_TEXT = "plan"
 /** The colours of a route's steps drawn, first to last, see [PasserSettings.showPath]. */
@@ -666,11 +682,6 @@ abstract class ObstaclePassingMode(
 		private const val LEAN_TICKS = 20
 		/** How far apart the rays across the way are, close enough that no block corner slips between them. */
 		private const val RAY_SPACING = 0.25
-		/**
-		 * How much wider across the way a block narrower than a whole one is to the rays, e.g. a glass pane, iron bars, a
-		 * chain or bamboo standing alone: a post that thin fits between two of them, see [PassWorld.blockRay].
-		 */
-		private const val POST_MARGIN = RAY_SPACING / 2
 		/** How long after a knockback a bump into a wall is taken for the knockback's, not walked on from, see [knockedBack]. */
 		private const val KNOCKBACK_GRACE_TICKS = 5
 		/** How much the server has to change your speed for it to be a knockback, not just your speed told back. */
@@ -2947,6 +2958,7 @@ abstract class ObstaclePassingMode(
 			if (passTicks % CHOOSER_RELOOK_TICKS != 0) return
 			val progress = progress(flyer.pos)
 			if (hop.let { it != null && progress >= it.start }) return
+			if (passerConfig.routeSnapshotCheck) checkRouteSnapshot(dir, progress)
 			startRoute(dir, progress).also { routeSearch = it }
 		}
 		val started = System.nanoTime()
@@ -2981,6 +2993,132 @@ abstract class ObstaclePassingMode(
 				search.ticks, search.expanded, search.depth, if (search.finished) "" else ", cut off", routeVersus(route, search))
 		}
 	}
+
+	private var routeChecks = 0
+	private var checksRun = 0
+	private var corridorNanos = 0L
+	private var corridorBytes = 0L
+	private var checkNanos = 0L
+	private var checkDiffers = 0
+
+	/**
+	 * Checks the route search over a snapshot against the live one, every [ROUTE_CHECK_EVERY]th search started, see
+	 * [PasserSettings.routeSnapshotCheck]: the corridor ahead taken, see [captureCorridor], the search from where you are
+	 * run through at once twice, each in a [PlanCtx] of its own, once reading the live world and you, once the corridor
+	 * and you taken with it, see [FlyerSnapshot]. Where the routes differ is logged, and now and then what the corridor
+	 * took. Nothing of either stays: the flight and the route searched for it are the same.
+	 */
+	private fun SafeContext.checkRouteSnapshot(dir: Vec3d, progress: Double) {
+		if (routeChecks++ % ROUTE_CHECK_EVERY != 0) return
+		val started = System.nanoTime()
+		val corridor = captureCorridor(dir, progress)
+		val captured = System.nanoTime()
+		if (corridor == null) {
+			ElytraFly.debug { "Route snapshot: too many kinds of blocks to take the corridor" }
+			return
+		}
+		val you = FlyerSnapshot.of(flyer)
+		val live = searchApart(ctx.forSearch(), dir, progress)
+		val snapshot = searchApart(ctx.forSearch().also { it.passWorldOverride = corridor; it.flyerOverride = you }, dir, progress)
+		corridorNanos += captured - started
+		corridorBytes += corridor.bytes
+		checkNanos += System.nanoTime() - captured
+		val liveSteps = live?.steps?.map { it.toString() }.orEmpty()
+		val snapshotSteps = snapshot?.steps?.map { it.toString() }.orEmpty()
+		if (liveSteps != snapshotSteps) {
+			checkDiffers++
+			val at = liveSteps.indices.firstOrNull { it >= snapshotSteps.size || liveSteps[it] != snapshotSteps[it] } ?: liveSteps.size
+			ElytraFly.debug {
+				"Route snapshot differs: live ${live ?: "none"}, snapshot ${snapshot ?: "none"}; first at step %d: %s vs %s; %d reads outside the corridor".format(at + 1,
+					liveSteps.getOrNull(at) ?: "end", snapshotSteps.getOrNull(at) ?: "end", corridor.outsideReads.get())
+			}
+		}
+		if (++checksRun % ROUTE_CHECK_LOG_EVERY != 0) return
+		ElytraFly.debug {
+			"Route snapshot: corridor %d×%d×%d, %d kinds of blocks, %.0f KB, taken in %.2f ms on average; both searches %.1f ms; %d of %d differ".format(corridor.sizeX,
+				corridor.sizeY, corridor.sizeZ, corridor.palette.size, corridorBytes / 1024.0 / ROUTE_CHECK_LOG_EVERY, corridorNanos / 1e6 / ROUTE_CHECK_LOG_EVERY,
+				checkNanos / 1e6 / ROUTE_CHECK_LOG_EVERY, checkDiffers, ROUTE_CHECK_LOG_EVERY)
+		}
+		corridorNanos = 0
+		corridorBytes = 0
+		checkNanos = 0
+		checkDiffers = 0
+	}
+
+	/** The best route a search from [progress] along [dir] finds run through at once in [planCtx], see [withCtx], nothing logged. */
+	private fun SafeContext.searchApart(planCtx: PlanCtx, dir: Vec3d, progress: Double): Route? = withCtx(planCtx) {
+		ElytraFly.debugMuted++
+		try {
+			val search = startRoute(dir, progress)
+			withHopMemo(search.hops) { while (!search.finished) routeWork(search) }
+			search.best()?.takeIf { it.steps.isNotEmpty() }
+		} finally {
+			ElytraFly.debugMuted--
+		}
+	}
+
+	/**
+	 * The corridor ahead taken as it is now, see [CorridorWorld]: along the line [dir] from [CORRIDOR_BEHIND] behind
+	 * [progress] to as far ahead as a route search looks, at least [CORRIDOR_AHEAD], across it to [CORRIDOR_SIDE] and
+	 * [CORRIDOR_SWING] past the farthest lane, diagonally the box around all that. From two below the lowest level to a
+	 * block above the gliding box at the highest flown or glided over, and the steps up a route may take. Null with more
+	 * kinds of blocks than it can tell apart.
+	 */
+	private fun SafeContext.captureCorridor(dir: Vec3d, progress: Double): CorridorWorld? {
+		val across = across(dir)
+		val ahead = max(CORRIDOR_AHEAD, ROUTE_HORIZON + passerConfig.dodgeLookAhead)
+		val side = CORRIDOR_SIDE + passerConfig.maxDodge + CORRIDOR_SWING
+		val corners = listOf(progress - CORRIDOR_BEHIND, progress + ahead).flatMap { along ->
+			listOf(-side, side).map { startPos.add(dir.multiply(along)).add(across.multiply(it)) }
+		}
+		val lowest = min(baseY, lowerLevels.firstOrNull() ?: baseY)
+		val top = max(maxFlightY(), maxHopY()).takeIf { it.isFinite() } ?: (startPos.y + CORRIDOR_OPEN_TOP)
+		val minX = floor(corners.minOf { it.x }).toInt()
+		val maxX = floor(corners.maxOf { it.x }).toInt()
+		val minZ = floor(corners.minOf { it.z }).toInt()
+		val maxZ = floor(corners.maxOf { it.z }).toInt()
+		val minY = max(world.bottomY, floor(lowest).toInt() - 2)
+		val maxY = min(world.topYInclusive, ceil(top + GLIDE_SIZE + 1 + ROUTE_DEPTH * STEP_HEIGHT).toInt())
+		val sizeX = maxX - minX + 1
+		val sizeY = maxY - minY + 1
+		val sizeZ = maxZ - minZ + 1
+		val cells = ShortArray(sizeX * sizeY * sizeZ)
+		val palette = ArrayList<CorridorCell>()
+		val kinds = HashMap<CellKey, Int>()
+		val context = ShapeContext.of(player)
+		val pos = BlockPos.Mutable()
+		var i = 0
+		for (x in minX..maxX) for (z in minZ..maxZ) for (y in minY..maxY) {
+			pos.set(x, y, z)
+			val state = world.getBlockState(pos)
+			val key = if (state.isAir) CellKey(state, VoxelShapes.empty(), VoxelShapes.empty(), false, false)
+				else CellKey(state, state.getCollisionShape(world, pos, context), state.getCollisionShape(world, pos), state.isHazard(), state.isSolidBlock(world, pos))
+			cells[i++] = kinds.getOrPut(key) {
+				if (palette.size > Short.MAX_VALUE) return null
+				palette += CorridorCell(state, key.shape, key.bare, key.hazard, state.isOf(Blocks.MAGMA_BLOCK), key.solid)
+				palette.size - 1
+			}.toShort()
+		}
+		val minChunkX = ChunkSectionPos.getSectionCoord(minX)
+		val minChunkZ = ChunkSectionPos.getSectionCoord(minZ)
+		val chunksX = ChunkSectionPos.getSectionCoord(maxX) - minChunkX + 1
+		val chunksZ = ChunkSectionPos.getSectionCoord(maxZ) - minChunkZ + 1
+		val loaded = BooleanArray(chunksX * chunksZ) { world.chunkManager.isChunkLoaded(minChunkX + it / chunksZ, minChunkZ + it % chunksZ) }
+		val around = Box(minX.toDouble(), minY.toDouble(), minZ.toDouble(), maxX + 1.0, maxY + 1.0, maxZ + 1.0)
+			.expand(CUBE_REACH + MAGMA_CUBE_MARGIN + 1, CUBE_SEARCH_HEIGHT, CUBE_REACH + MAGMA_CUBE_MARGIN + 1)
+		val live = livePassWorld.of(this)
+		val entities = world.getOtherEntities(player, around) { player.collidesWith(it) || it.glidedOver() }.map { entity ->
+			live.passEntity(entity).let { e -> e.label.let { label -> PassEntity(e.box, e.solid, e.glidedOver, e.onGround, e.landsOn) { label } } }
+		}
+		val youBoxes = world.getOtherEntities(player, around) { EntityPredicates.EXCEPT_SPECTATOR.test(it) && player.collidesWith(it) }.map { it.boundingBox }
+		val collidableBoxes = world.getOtherEntities(player, around, EntityPredicates.CAN_COLLIDE).map { it.boundingBox }
+		return CorridorWorld(minX, minY, minZ, sizeX, sizeY, sizeZ, cells, palette.toTypedArray(), minChunkX, minChunkZ, chunksX, chunksZ, loaded,
+			CorridorWorld.copyOf(world.worldBorder), flyer.x, flyer.z, player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE), entities,
+			live.solidBoxes().toList(), youBoxes, collidableBoxes)
+	}
+
+	/** What tells a block apart in the corridor, see [CorridorCell]: the shapes by identity, most blocks share theirs. */
+	private data class CellKey(val state: BlockState, val shape: VoxelShape, val bare: VoxelShape, val hazard: Boolean, val solid: Boolean)
 
 	/** A search from where you are, [progress] along the line [dir], see [RouteSearch], with the ways it flies first, see [rootWays]. */
 	private fun SafeContext.startRoute(dir: Vec3d, progress: Double): RouteSearch {
@@ -7971,11 +8109,23 @@ abstract class ObstaclePassingMode(
 	private fun Entity.glidedOver() = isAlive && (this is MagmaCubeEntity || this is HoglinEntity)
 
 	/**
+	 * Where your gliding box mustn't be past this mob, see [PassEntity.glidedOver]: like a block two high, the biggest just
+	 * as high, and as far across as it attacks you, [CUBE_REACH], with room around that. Above or below it, it can't. One
+	 * mid-jump is taken as down on what's below it again, the floor or the railing, else at [floorY]: it'll have landed
+	 * by the time you're there.
+	 */
+	private fun PassEntity.mobBox(floorY: Double): Box {
+		val body = box.let { it.offset(0.0, (if (onGround) it.minY else min(it.minY, landsOn ?: floorY)) - it.minY, 0.0) }
+		return Box(body.minX, body.minY, body.minZ, body.maxX, body.minY + max(CUBE_HEIGHT, body.lengthY), body.maxZ)
+			.expand(CUBE_REACH + MAGMA_CUBE_MARGIN, 0.0, CUBE_REACH + MAGMA_CUBE_MARGIN)
+	}
+
+	/**
 	 * The boxes of the magma cubes and hoglins up to [maxDistance] around [from], see [PassWorld.mobBox].
 	 */
 	private fun SafeContext.cubeBoxes(from: Vec3d, maxDistance: Double) =
 		passWorld.glidedOverMobs(Box(from, from).expand(maxDistance, CUBE_SEARCH_HEIGHT, maxDistance))
-			.map { passWorld.mobBox(it, startPos.y) }
+			.map { it.mobBox(startPos.y) }
 
 	/**
 	 * Whether to hold the height for [hop] at [progress] along the line, once it's close enough. Over carpets only
@@ -8626,7 +8776,7 @@ abstract class ObstaclePassingMode(
 		val reach = direction.normalize().multiply(maxDistance)
 		val around = starts.fold(Box(starts.first(), starts.first())) { box, start -> box.union(Box(start, start)) }
 		val solid = safeContext.passWorld.obstacleEntities(around.union(around.offset(reach)).expand(CUBE_REACH + MAGMA_CUBE_MARGIN), mobs)
-			.map { it to if (it.glidedOver()) safeContext.passWorld.mobBox(it, startPos.y) else it.boundingBox }
+			.map { it to if (it.glidedOver) it.mobBox(startPos.y) else it.box }
 		// Past one already hit no ray needs to look, that's most of the way for most of them.
 		fun nearest(starts: List<Vec3d>, within: Double): Obstacle? {
 			var nearest: Obstacle? = null
@@ -8646,11 +8796,11 @@ abstract class ObstaclePassingMode(
 							nearest = Obstacle(distance) { "${Registries.BLOCK.getId(safeContext.passWorld.blockState(hit.blockPos).block).path} ${hit.blockPos.toShortString()}" }
 					}
 				solid.forEach { (entity, box) ->
-					val glidedOver = entity.glidedOver()
+					val glidedOver = entity.glidedOver
 					box.raycast(start, start.add(reach)).orElse(null)?.let {
 						val distance = it.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
-							nearest = Obstacle(distance, glidedOver) { "${Registries.ENTITY_TYPE.getId(entity.type).path}${if (entity is MagmaCubeEntity) " size ${entity.size}" else ""} ${entity.blockPos.toShortString()}" }
+							nearest = Obstacle(distance, glidedOver) { entity.label }
 					}
 				}
 			}
@@ -8839,6 +8989,13 @@ abstract class ObstaclePassingMode(
 		}
 	}
 
+	/**
+	 * Lava, fire, cobwebs and the like: nothing stops you there, but touching it burns, hurts or holds you nearly still.
+	 * Cactus and a lit campfire stop you, and hurt too. Kept out of like a block, never stood on, see [PassWorld.hazardAt].
+	 */
+	private fun BlockState.isHazard() = fluidState.isIn(FluidTags.LAVA) || block in HAZARDS ||
+		block is CampfireBlock && get(CampfireBlock.LIT)
+
 	/** A world the planner reads instead of the live one, e.g. a snapshot of the way ahead, see [passWorld]. */
 	private var passWorldOverride: PassWorld? get() = ctx.passWorldOverride; set(value) { ctx.passWorldOverride = value }
 	private val livePassWorld = LivePassWorld()
@@ -8929,25 +9086,6 @@ abstract class ObstaclePassingMode(
 
 		override fun bareShape(pos: BlockPos): VoxelShape = world.getBlockState(pos).getCollisionShape(world, pos)
 
-		/**
-		 * Lava, fire, cobwebs and the like: nothing stops you there, but touching it burns, hurts or holds you nearly
-		 * still. Cactus and a lit campfire stop you, and hurt too. Kept out of like a block, never stood on, see [hazardAt].
-		 */
-		private fun BlockState.isHazard() = fluidState.isIn(FluidTags.LAVA) || block in HAZARDS ||
-			block is CampfireBlock && get(CampfireBlock.LIT)
-
-		/**
-		 * Whether there's magma under your box at [y]: each bounce on it touches it a tick, it hurts more often than that
-		 * from a bounce to the next. Glided over like a hole, not with Fire Resistance, see [Vec3d.boxHasFloor].
-		 */
-		override fun hotFloorUnder(x: Double, y: Double, z: Double): Boolean {
-			val below = floor(y - 0.05).toInt()
-			for (bx in floor(x - 0.29).toInt()..floor(x + 0.29).toInt())
-				for (bz in floor(z - 0.29).toInt()..floor(z + 0.29).toInt())
-					if (hotFloor(BlockPos(bx, below, bz))) return true
-			return false
-		}
-
 		override fun hotFloor(pos: BlockPos) =
 			world.getBlockState(pos).isOf(Blocks.MAGMA_BLOCK) && !player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
 
@@ -8956,34 +9094,8 @@ abstract class ObstaclePassingMode(
 			return hazardCells.contains(pos.asLong())
 		}
 
-		override fun hazardIn(box: Box): Boolean {
-			val pos = BlockPos.Mutable()
-			for (x in floor(box.minX).toInt()..floor(box.maxX - 1e-7).toInt())
-				for (z in floor(box.minZ).toInt()..floor(box.maxZ - 1e-7).toInt())
-					for (y in floor(box.minY).toInt()..floor(box.maxY - 1e-7).toInt())
-						if (hazardAt(pos.set(x, y, z))) return true
-			return false
-		}
-
 		override fun wayShape(pos: BlockPos): VoxelShape =
 			shapeAt(pos).let { if (hazardCells.contains(pos.asLong())) VoxelShapes.fullCube() else it }
-
-		/** Like [World.isSpaceEmpty] for you. From one below, a fence reaches up into [box]. */
-		override fun spaceEmpty(box: Box, hazards: Boolean, border: Boolean): Boolean {
-			fresh()
-			if (border && !world.worldBorder.contains(box) || solidEntities.any { it.intersects(box) }) return false
-			val pos = BlockPos.Mutable()
-			for (x in floor(box.minX).toInt()..floor(box.maxX).toInt())
-				for (z in floor(box.minZ).toInt()..floor(box.maxZ).toInt())
-					for (y in floor(box.minY).toInt() - 1..floor(box.maxY).toInt()) {
-						val shape = if (hazards) wayShape(pos.set(x, y, z)) else shapeAt(pos.set(x, y, z))
-						if (shape.isEmpty) continue
-						val hit = if (shape === VoxelShapes.fullCube()) box.intersects(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
-							else shape.boundingBoxes.any { it.offset(x.toDouble(), y.toDouble(), z.toDouble()).intersects(box) }
-						if (hit) return false
-					}
-			return true
-		}
 
 		override fun solidBoxes(): List<Box> {
 			fresh()
@@ -8992,53 +9104,10 @@ abstract class ObstaclePassingMode(
 
 		override fun vanillaSpaceEmpty(box: Box, you: Boolean) = if (you) world.isSpaceEmpty(player, box) else world.isSpaceEmpty(box)
 
-		/**
-		 * Like [rayCast], against [wayShape]. One narrower than a whole block across the way, e.g. a post, [POST_MARGIN]
-		 * wider to either side across it: the rays are [RAY_SPACING] apart, a post that thin would fit between two of them.
-		 */
-		override fun blockRay(start: Vec3d, direction: Vec3d, reach: Double, passes: ((BlockPos, VoxelShape) -> Boolean)?): BlockHitResult? {
-			val end = start.add(direction.multiply(reach))
-			val across = across(direction)
-			val wideX = abs(across.x) * POST_MARGIN
-			val wideZ = abs(across.z) * POST_MARGIN
-			return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos ->
-				val shape = wayShape(pos)
-				// Looked past, the ray goes on to the next block.
-				if (passes != null && !shape.isEmpty && passes(pos, shape)) return@raycast null
-				if (shape.isEmpty || shape === VoxelShapes.fullCube()) return@raycast shape.raycast(start, end, pos)
-				val bounds = shape.boundingBox
-				val growX = if (bounds.lengthX < 1 - 1e-6) wideX else 0.0
-				val growZ = if (bounds.lengthZ < 1 - 1e-6) wideZ else 0.0
-				if (growX < 1e-6 && growZ < 1e-6) shape.raycast(start, end, pos)
-				else bounds.expand(growX, 0.0, growZ).offset(pos).raycast(start, end).orElse(null)
-					?.let { BlockHitResult(it, Direction.getFacing(direction.x, direction.y, direction.z).opposite, pos.toImmutable(), false) }
-			}, { null })
-		}
-
 		override fun colliderRay(start: Vec3d, direction: Vec3d, reach: Double) =
 			safe!!.rayCast(start, direction, reach, InteractionMask.Block, RaycastContext.ShapeType.COLLIDER)?.blockResult
 
-		/** A wall to you. Null from outside it, or running along it: there it's [spaceEmpty] that keeps you in. */
-		override fun borderAhead(start: Vec3d, direction: Vec3d): Double? {
-			val border = world.worldBorder
-			if (!border.contains(start.x, start.z)) return null
-			val dir = direction.normalize()
-			val toX = when {
-				dir.x > 1e-6 -> (border.boundEast - start.x) / dir.x
-				dir.x < -1e-6 -> (border.boundWest - start.x) / dir.x
-				else -> Double.POSITIVE_INFINITY
-			}
-			val toZ = when {
-				dir.z > 1e-6 -> (border.boundSouth - start.z) / dir.z
-				dir.z < -1e-6 -> (border.boundNorth - start.z) / dir.z
-				else -> Double.POSITIVE_INFINITY
-			}
-			return min(toX, toZ).takeIf { it.isFinite() }
-		}
-
-		override fun inBorder(box: Box) = world.worldBorder.contains(box)
-
-		override fun inBorder(pos: BlockPos) = world.worldBorder.contains(pos)
+		override fun worldBorder(): WorldBorder = world.worldBorder
 
 		override fun isLoaded(pos: Vec3d) = with(safe!!) { pos.isLoaded }
 
@@ -9046,9 +9115,9 @@ abstract class ObstaclePassingMode(
 		 * See [obstacleHits]. Within a pass, see [planning], picked out of the ones all around you looked up once, in the
 		 * same order.
 		 */
-		override fun obstacleEntities(box: Box, mobs: Boolean): List<Entity> {
+		override fun obstacleEntities(box: Box, mobs: Boolean): List<PassEntity> {
 			fun inTheWay(entity: Entity) = player.collidesWith(entity) || mobs && entity.glidedOver()
-			if (!planning) return world.getOtherEntities(player, box, ::inTheWay)
+			if (!planning) return world.getOtherEntities(player, box, ::inTheWay).map(::passEntity)
 			val around = planningEntitiesBox ?: player.boundingBox.expand(SOLID_ENTITY_RANGE).also { all ->
 				planningEntitiesBox = all
 				// A dragon's parts are looked up only with the dragon in the box, never picked out of these.
@@ -9057,33 +9126,31 @@ abstract class ObstaclePassingMode(
 			}
 			val all = planningEntities
 			if (all == null || box.minX < around.minX || box.minY < around.minY || box.minZ < around.minZ ||
-				box.maxX > around.maxX || box.maxY > around.maxY || box.maxZ > around.maxZ) return world.getOtherEntities(player, box, ::inTheWay)
-			return all.filter { it.boundingBox.intersects(box) && inTheWay(it) }
+				box.maxX > around.maxX || box.maxY > around.maxY || box.maxZ > around.maxZ) return world.getOtherEntities(player, box, ::inTheWay).map(::passEntity)
+			return all.filter { it.boundingBox.intersects(box) && inTheWay(it) }.map(::passEntity)
 		}
 
-		override fun glidedOverMobs(box: Box): List<Entity> = world.getOtherEntities(player, box) { it.glidedOver() }
+		override fun glidedOverMobs(box: Box): List<PassEntity> = world.getOtherEntities(player, box) { it.glidedOver() }.map(::passEntity)
 
-		/**
-		 * Glided over like a block two high, the biggest just as high, and as far across as it attacks you, [CUBE_REACH],
-		 * with room around that. Above or below it, it can't. One mid-jump is taken as down on what's below it again, the
-		 * floor or the railing, it'll have landed by the time you're there.
-		 */
-		override fun mobBox(mob: Entity, floorY: Double): Box {
-			val body = mob.boundingBox.let { it.offset(0.0, (if (mob.isOnGround) it.minY else landingY(mob, floorY)) - it.minY, 0.0) }
-			return Box(body.minX, body.minY, body.minZ, body.maxX, body.minY + max(CUBE_HEIGHT, body.lengthY), body.maxZ)
-				.expand(CUBE_REACH + MAGMA_CUBE_MARGIN, 0.0, CUBE_REACH + MAGMA_CUBE_MARGIN)
+		/** [entity] as the planner sees it, see [PassEntity], as it is now. */
+		fun passEntity(entity: Entity): PassEntity {
+			val glidedOver = entity.glidedOver()
+			return PassEntity(entity.boundingBox, player.collidesWith(entity), glidedOver, entity.isOnGround,
+				if (glidedOver && !entity.isOnGround) landsOn(entity) else null) {
+				"${Registries.ENTITY_TYPE.getId(entity.type).path}${if (entity is MagmaCubeEntity) " size ${entity.size}" else ""} ${entity.blockPos.toShortString()}"
+			}
 		}
 
-		/** Where [entity] in the air comes down, on the top of the first block below it, else at [floorY]. */
-		private fun landingY(entity: Entity, floorY: Double): Double {
+		/** The top of the first block below [entity] in the air, where it comes down, null with none that near. */
+		private fun landsOn(entity: Entity): Double? {
 			var pos = entity.blockPos
 			repeat(CUBE_SEARCH_HEIGHT.toInt()) {
 				val below = pos.down()
 				val shape = bareShape(below)
-				if (!shape.isEmpty) return min(entity.y, below.y + shape.getMax(Direction.Axis.Y))
+				if (!shape.isEmpty) return below.y + shape.getMax(Direction.Axis.Y)
 				pos = below
 			}
-			return min(entity.y, floorY)
+			return null
 		}
 	}
 
@@ -9467,6 +9534,8 @@ class PasserSettings(override val c: Config) : ConfigBlock {
 	val openingColor by c.setting("Opening Color", Color(255, 60, 255, 255), "The opening threaded through") { passObstacles && showPath }
 	val lineColor by c.setting("Line Color", Color(255, 255, 255, 70), "The flight line") { passObstacles && showPath }
 	val routePlanner by c.setting("Route Planner", RoutePlanner.Off, "Plans a route of several ways past what's ahead within 64 blocks. Shadow only logs it (with Debug Log) and draws it (with Show Path), the flight is the same") { passObstacles }
+
+	val routeSnapshotCheck by c.setting("Route Snapshot Check", false, "Debug: every few route searches, takes the corridor ahead and runs the search through twice at once, over the live world and over what was taken, and logs (with Debug Log) where the routes differ and now and then what taking it cost. A frame's hitch each time, the flight is the same") { passObstacles && routePlanner == RoutePlanner.Shadow }
 
 	enum class RoutePlanner(override val displayName: String) : NamedEnum {
 		Off("Off"),
