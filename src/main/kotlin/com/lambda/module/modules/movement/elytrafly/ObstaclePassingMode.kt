@@ -2934,7 +2934,6 @@ abstract class ObstaclePassingMode(
 		val started = System.nanoTime()
 		val progress = progress(player.pos)
 		val at = progress + distance
-		val speed = player.velocity.horizontalLength()
 		val (best, current, count) = sandboxed {
 			withHopMemo {
 				anyHeightTops = true
