@@ -101,18 +101,25 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     /** Mobs given up on since they couldn't be hit, e.g. behind a wall, and when. */
     private val unhittable = WeakHashMap<Entity, Long>()
     private var missTicks = 0
+    /** Ticks a mob waited on a container someone else keeps open. Only reset once no container is open anymore. */
+    private var screenWaitTicks = 0
     private var heldSlot = -1
     private var heldTicks = 0
 
     fun SafeContext.tick() {
+        val screenOpen = player.currentScreenHandler != player.playerScreenHandler
+        if (!screenOpen) screenWaitTicks = 0
         if (!enabled) return stopFighting()
         var next = findTarget() ?: return stopFighting()
         val pauses = pauseBuild && c.isBuilding
         // Busy with something else, e.g. a restock, so only fight what attacks you or would take a drop.
         if (pauses && !c.canPauseFor(this@HighwayAura)) next = findTarget(threatsOnly = true) ?: return stopFighting()
         // A restock closes its container for the fight and carries on once the mob is dead. Eating finishes first.
-        if (player.isUsingItem || player.currentScreenHandler != player.playerScreenHandler) {
+        if (player.isUsingItem || screenOpen) {
             stopFighting()
+            // A container nobody closes for the fight, e.g. one opened by hand or by another module, would keep the
+            // build paused for as long as the mob stays. It's left open and the fight given up until it's closed.
+            if (screenOpen && ++screenWaitTicks > MAX_SCREEN_WAIT_TICKS && !player.isUsingItem) return
             waiting = true
             return
         }
@@ -174,6 +181,8 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     private fun SafeContext.fight(target: LivingEntity) {
         val weapon = weaponSlot()
         if (weapon != null && !HotbarRequest(weapon, this@HighwayAura, nowOrNothing = false).submit().done) {
+            // A swap that never goes through would keep the build paused for as long as the mob stays.
+            if (++missTicks > MAX_MISS_TICKS) giveUp(target)
             settle.reset()
             return
         }
@@ -185,10 +194,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
         } else heldTicks++
 
         val hit = runSafeAutomated { lookAtEntity(target) } ?: run {
-            if (++missTicks > MAX_MISS_TICKS) {
-                unhittable[target] = System.currentTimeMillis()
-                this@HighwayAura.target = null
-            }
+            if (++missTicks > MAX_MISS_TICKS) giveUp(target)
             settle.reset()
             return
         }
@@ -199,6 +205,12 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
         if (player.getAttackCooldownProgress(0.5f) < 1f || heldTicks < swingTicks) return
         attackEntity(target, interactConfig.swing)
         heldTicks = 0
+    }
+
+    /** Leaves a mob that can't be fought alone for a while, so the build goes on. */
+    private fun giveUp(target: LivingEntity) {
+        unhittable[target] = System.currentTimeMillis()
+        this.target = null
     }
 
     /** The hotbar slot of the chosen weapon, or of the strongest other one. Null fights with whatever is held. */
@@ -235,6 +247,11 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     private companion object {
         const val SEARCH_EXTRA = 3.0
         const val MAX_MISS_TICKS = 20
+        /**
+         * The build's own restocks close their container the tick after the fight starts, so this only runs out on a
+         * container nobody closes. Long enough for one that was still opening on a laggy server to arrive and be closed.
+         */
+        const val MAX_SCREEN_WAIT_TICKS = 100
         const val UNHITTABLE_MS = 5_000L
     }
 }
