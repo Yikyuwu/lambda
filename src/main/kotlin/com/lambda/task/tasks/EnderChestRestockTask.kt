@@ -62,6 +62,11 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     holdWhile: () -> Boolean = { false },
     /** Runs before the ender chest is broken, e.g. swapping worn pickaxes from a shulker just taken, since breaking it needs one. */
     private val beforeBreaking: SafeContext.() -> Task<*>? = { null },
+    /**
+     * What goes back into the ender chest, e.g. a shulker of pickaxes with no fresh one left. Once [beforeBreaking] used
+     * one up, it's opened again to put that back and take the next, up to [MAX_ROUNDS] times.
+     */
+    private val putBack: (ItemStack) -> Boolean = { false },
 ) : StationTask<EnderChestRestockTask.Phase>("Restocking from the ender chest", Phase.Opening, automated, holdWhile) {
     override val moveDelay get() = swapDelay
 
@@ -98,6 +103,8 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     private var openAttempts = 0
     private var collectAttempts = 0
     private var ranBeforeBreaking = false
+    private var rounds = 1
+    private var putBackCount = 0
     private var hotbarCooldown = 0
     /** Why [beforeBreaking] failed. The ender chest is still broken first, so it isn't left behind. */
     private var beforeBreakingFailure: String? = null
@@ -163,10 +170,22 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
         }
     }
 
-    /** Takes a stack for the first want that isn't met yet, throwing away junk to make room for it. */
+    /**
+     * Puts back what [putBack] asks for, then takes a stack for the first want that isn't met yet, throwing away junk to
+     * make room for it.
+     */
     private fun SafeContext.take(handler: ScreenHandler): Boolean {
         // What's in it decides whether the next trip is worth it.
         EnderChestContainer.update(handler.containerStacks.map { it.copy() })
+        handler.playerSlots.firstOrNull { putBack(it.stack) }?.let { used ->
+            if (handler.containerSlots.none { it.stack.isEmpty }) {
+                if (putBackCount == 0) warn("The ender chest is full, keeping ${used.stack.name.string}")
+            } else if (submit { quickMove(used.id) }) {
+                putBackCount++
+                LOG.info("[EnderChestRestock] put back ${used.stack.name.string}")
+                return true
+            }
+        }
         val open = allWants.filter { (taken[it] ?: 0) < it.maxStacks && !it.isMet(this) }
         val (want, slot) = open.firstNotNullOfOrNull { want ->
             handler.containerSlots.filter { want.matches(it.stack) }.maxByOrNull { want.amount(it.stack) }?.let { want to it }
@@ -197,10 +216,25 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
             ranBeforeBreaking = true
             beforeBreaking()?.let { task ->
                 enter(Phase.BeforeBreaking)
-                return runStep(task) { enter(Phase.MakingRoom) }
+                return runStep(task) { if (!nextRound()) enter(Phase.MakingRoom) }
             }
         }
         enter(Phase.MakingRoom)
+    }
+
+    /**
+     * Opens the ender chest again when [beforeBreaking] used something up to put back, e.g. a shulker that ran out of fresh
+     * pickaxes with worn ones left, to take the next one and run [beforeBreaking] again. Whether it did.
+     */
+    private fun SafeContext.nextRound(): Boolean {
+        if (stopping || rounds >= MAX_ROUNDS) return false
+        if (player.hotbarAndInventorySlots.none { putBack(it.stack) }) return false
+        rounds++
+        ranBeforeBreaking = false
+        taken.clear()
+        info("Opening the ender chest again to put back what's used up and take more")
+        resume()
+        return true
     }
 
     /** With Silk Touch the ender chest comes back, which needs a free slot. Else it only drops obsidian. */
@@ -294,8 +328,9 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     private fun SafeContext.finish() {
         beforeBreakingFailure?.let { return failure("Failed while using what was taken from the ender chest ($it)") }
         val took = allWants.mapNotNull { want -> taken[want]?.let { "$it stack(s) for ${want.name}" } }
-        if (took.isEmpty()) warn("Found nothing to take in the ender chest")
-        else info("Took ${took.joinToString()} from the ender chest")
+        if (putBackCount > 0) info("Put $putBackCount used shulker(s) back in the ender chest")
+        if (took.isEmpty() && putBackCount == 0) warn("Found nothing to take in the ender chest")
+        else if (took.isNotEmpty()) info("Took ${took.joinToString()} from the ender chest")
         success()
     }
 
@@ -335,6 +370,8 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
         private const val PICKUP_RADIUS = 8.0
         private const val MAX_OPEN_ATTEMPTS = 2
         private const val MAX_COLLECT_ATTEMPTS = 3
+        /** How often it's opened again to put back what's used up and take more, see [nextRound]. */
+        private const val MAX_ROUNDS = 4
         private val COLLECT_PHASES = setOf(Phase.MakingRoom, Phase.Breaking, Phase.PickingUp)
     }
 }

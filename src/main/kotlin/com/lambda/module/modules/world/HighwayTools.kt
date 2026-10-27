@@ -532,6 +532,7 @@ object HighwayTools : Module(
             // The aura goes first, the trip carries on once the mob is dead.
             holdWhile = { isFighting },
             beforeBreaking = { with(toolRestock) { restockNow() } },
+            putBack = { restockPickaxes && toolRestock.enabled && toolRestock.isUsedToolShulker(it) },
         ).onCompletion {
             endEnderChestTrip()
             restockRetryTicks = restockRetryDelay * 20
