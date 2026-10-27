@@ -296,6 +296,8 @@ abstract class ObstaclePassingMode(
 		/** How far onto a layer to bounce on the glide up onto it goes, and how far on it must be free up there. */
 		private const val STEP_ON = 1.0
 		private const val STEP_CLEAR = 4.0
+		/** Room above a level to bounce on it, e.g. on a layer in a tunnel two blocks high: as high as you stand. */
+		private const val LEVEL_ROOM = 1.8
 		/** A gap in a layer you bounce on up to this long is glided across, a longer one you drop down into. */
 		private const val MAX_GAP = 8.0
 		/**
@@ -364,6 +366,13 @@ abstract class ObstaclePassingMode(
 		/** Up to how many ticks from now holding the height to glide under something is looked at, and how far apart. */
 		private const val UNDER_HOLD_SEARCH_TICKS = 120
 		private const val UNDER_HOLD_SEARCH_STEP = 6
+		/**
+		 * The first this many ticks of that looked at each: close by the window to start holding in may be a tick or two,
+		 * between coming down low enough and bouncing up off the floor into it, e.g. at 0.9 a tick from y 120.16 3.8 before a
+		 * floating block 4.7 on, only holding from 3 ticks on gets under it, from 0 or 6 doesn't: 6 apart it was judged
+		 * not made at all, and the miss told was the unheld run's, scraping the floor right before it.
+		 */
+		private const val UNDER_HOLD_FINE_TICKS = 18
 		/**
 		 * How far gliding in low under something gets a tick of speed, before it's down to [UNDER_HOLD_END_SPEED] and on
 		 * the floor: in a 1-high gap about 38 blocks from 1.0 a tick, 23 from 0.8, 53 from 1.2.
@@ -903,8 +912,13 @@ abstract class ObstaclePassingMode(
 	abstract val passerConfig: PasserSettings
 
 	var startPos: Vec3d = Vec3d.ZERO
-	/** The floor you started on. The line goes up onto a layer of blocks [STEP_HEIGHT] high on it, or of carpets, and back down. */
+	/**
+	 * The level below the one bounced on: the floor you started on, the line goes up onto a layer of blocks [STEP_HEIGHT]
+	 * high on it, or of carpets, and back down. Up on a layer onto one more on it, the layer left is it, see [setLevel].
+	 */
 	private var baseY = 0.0
+	/** The levels below [baseY] stepped up from, the lowest first, stepped back down onto in turn, see [setLevel]. */
+	private val lowerLevels = ArrayDeque<Double>()
 	var passingToPos: Vec3d? = null
 	/**
 	 * Ticks flown, once each tick, the clock for what's kept for a few ticks. Not the player's age, that starts over on
@@ -1311,6 +1325,7 @@ abstract class ObstaclePassingMode(
 			planWorld = System.identityHashCode(world)
 			startPos = floorBelow()
 			baseY = startPos.y
+			lowerLevels.clear()
 			if (passerConfig.passObstacles) centerLine()
 			failedPasses = 0
 			passCooldown = 0
@@ -1556,9 +1571,11 @@ abstract class ObstaclePassingMode(
 		// the way there was picked on the line as it was.
 		if (player.isOnGround && passingToPos == null && hop == null)
 			// Up onto a layer only bouncing, standing on one after walking you take off from the floor.
-			listOf(baseY, baseY + STEP_HEIGHT, baseY + CARPET_HEIGHT).firstOrNull { abs(playerPos.y - it) < 0.01 && abs(startPos.y - it) > 0.01 && (it == baseY || player.isGliding) }?.let { level ->
+			// Up on a layer, one more on it too, and down any of those below.
+			(listOf(baseY, baseY + STEP_HEIGHT, baseY + CARPET_HEIGHT) + lowerLevels + listOfNotNull((startPos.y + STEP_HEIGHT).takeIf { onLayer && !onCarpets }))
+				.firstOrNull { abs(playerPos.y - it) < 0.01 && abs(startPos.y - it) > 0.01 && (it == baseY || it < startPos.y || player.isGliding) }?.let { level ->
 				ElytraFly.debug { if (level > startPos.y) "Up on the blocks, bouncing on at y %.2f".format(level) else "Back down, bouncing on at y %.2f".format(level) }
-				startPos = Vec3d(startPos.x, level, startPos.z)
+				setLevel(level)
 			}
 
 		val snappedDir = getSnappedDir()
@@ -1642,7 +1659,7 @@ abstract class ObstaclePassingMode(
 				Vec3d(playerPos.x, baseY, playerPos.z).boxHasFloor()) offTheLayer()
 			// Gliding up onto a layer, what's past its start up there comes into sight on the way: onto a lane past it now,
 			// the way up onto the layer is planned again on it, see [dodgePastOnLayer].
-			if (hop.step && hop.swerve == null && !onLayer && dodge == null && passerConfig.dodge && flightTicks % LAYER_LOOK_TICKS == 0 &&
+			if (hop.rising && hop.swerve == null && dodge == null && passerConfig.dodge && flightTicks % LAYER_LOOK_TICKS == 0 &&
 				hop.obstacle - progress >= MIN_DODGE_DISTANCE &&
 				dodgePastOnLayer(Vec3d(playerPos.x, closestLinePoint.y, playerPos.z), closestLinePoint, snappedDir, hop.obstacle - progress, "the layer", hop)) {
 				commitHop("passObstacles", null)
@@ -1681,6 +1698,8 @@ abstract class ObstaclePassingMode(
 					return false
 				}
 			}
+			// The level glided down onto, see [downOntoLayer]. Looked at only once the branches before it don't apply.
+			val downOnto by lazy { downOntoLayer(hop, progress, snappedDir) }
 			when {
 				// Touching down on a top ends the glide until the bounce off it takes off again.
 				!player.isGliding && !(hop.touched && flightTicks - hop.touchedAt <= TOUCH_GRACE_TICKS) -> {
@@ -1713,25 +1732,27 @@ abstract class ObstaclePassingMode(
 				// Glided over something higher, e.g. off a top two blocks high touched down on, now all over a layer a block
 				// high that goes on with nothing higher on it to where the glide ends: down onto it to bounce on. Held on over
 				// it the glide only slows down, bouncing keeps the speed, e.g. for a hole after the layer.
-				downOntoLayer(hop, progress, snappedDir) -> {
-					ElytraFly.debug { "Down onto the blocks below what's glided over, bouncing on at y %.2f".format(baseY + STEP_HEIGHT) }
+				downOnto != null -> {
+					val level = downOnto!!
+					ElytraFly.debug { "Down onto the blocks below what's glided over, bouncing on at y %.2f".format(level) }
 					// Landed on early, the last bounce off its end may come too low for a hole right after it, see [holeSoonAfterLayer].
-					stepLanding = !holeSoonAfterLayer(closestLinePoint, snappedDir)
-					startPos = Vec3d(startPos.x, baseY + STEP_HEIGHT, startPos.z)
+					stepLanding = !holeSoonAfterLayer(closestLinePoint, snappedDir, level, level - STEP_HEIGHT)
+					setLevel(level)
 					commitHop("passObstacles", null)
 				}
 				// Onto a layer from below, up there as soon as all of the box is over it: down onto it from its start, not its
 				// middle, and well onto it, not on its edge.
 				// Swerving, up onto the layer only where planned: over a railing as high the box is all over a top too.
-				progress > hop.end || hop.step && hop.swerve == null && !onLayer && progress > hop.obstacle &&
-					topOverlap(playerPos, baseY + hop.stepHeight) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 && !holeSoonAfterLayer(closestLinePoint, snappedDir) -> {
+				progress > hop.end || hop.rising && hop.swerve == null && progress > hop.obstacle &&
+					topOverlap(playerPos, baseY + hop.stepHeight) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 &&
+					!(if (onLayer) holeSoonAfterLayer(closestLinePoint, snappedDir, baseY + hop.stepHeight, startPos.y) else holeSoonAfterLayer(closestLinePoint, snappedDir)) -> {
 					// Above the layer now, from the line down on the floor it'd be in the way right where you are.
 					when {
 						hop.step -> {
-							ElytraFly.debug { "${if (onLayer) "Across the gap" else "Up on the blocks"}, bouncing on at y %.2f".format(baseY + hop.stepHeight) }
+							ElytraFly.debug { "${if (hop.rising) "Up on the blocks" else "Across the gap"}, bouncing on at y %.2f".format(baseY + hop.stepHeight) }
 							// Up from below only, not across a gap in a layer.
-							stepLanding = !onLayer && !player.isOnGround
-							startPos = Vec3d(startPos.x, baseY + hop.stepHeight, startPos.z)
+							stepLanding = hop.rising && !player.isOnGround
+							setLevel(baseY + hop.stepHeight)
 						}
 						// Past the edge, from the line up there the end of the layer would be ahead again and again.
 						hop.down -> if (hop.intoDip) intoDip() else offTheLayer()
@@ -1809,6 +1830,14 @@ abstract class ObstaclePassingMode(
 					skipHopAt = hop.start
 					commitHop("passObstacles", null)
 					if (dodgeAfterMob) commitNoLane("passObstacles")
+				}
+				// What it was judged with past it looked at again from where it really is, while it can still brake for what's
+				// after it: nothing getting past that from where the glide really ends, planned again, see [thenStillFollows].
+				hop.then != null && !hop.held && passTicks % RELOOK_TICKS == 0 && hop.start - progress > brakeDistance() &&
+					!thenStillFollows(hop, snappedDir, progress) -> {
+					ElytraFly.debug { "Past the obstacle at %.1f nothing gets past what's after it any more from where the glide ends, looking again".format(hop.start - progress) }
+					dropThread()
+					commitHop("passObstacles", null)
 				}
 				else -> {
 					// Chooser Decides: a much faster way over the hole than the one it picked, switched to.
@@ -1900,9 +1929,9 @@ abstract class ObstaclePassingMode(
 		hopTooSlow = false
 		if (!skipHopAt.near(at) && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true)?.let {
 			if (dodgePastNext(from, linePoint, dir, distance, block, it)) return true
-			ElytraFly.debug { "Obstacle %.1f ahead ($block), ${if (inDip) "the end of the dip" else "a layer to bounce on"}, gliding up onto it at y %.2f".format(distance, it.feetY) }
-			// Up out of a dip that's the floor again, a block up from it.
-			commitHop("startDodge", if (inDip) it.with(stepHeight = layerHeight + STEP_HEIGHT) else it)
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), ${if (inDip) "the end of the dip" else if (onLayer) "one more layer on this one to bounce on" else "a layer to bounce on"}, gliding up onto it at y %.2f".format(distance, it.feetY) }
+			// Up out of a dip that's the floor again, a block up from it, see [planHop]'s step height.
+			commitHop("startDodge", it)
 			return true
 		}
 		if (!skipHopAt.near(at)) planHop(linePoint, dir, distance)?.let { planned ->
@@ -2065,7 +2094,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.dodgePastNext(from: Vec3d, linePoint: Vec3d, dir: Vec3d, distance: Double, block: String, over: Hop): Boolean {
 		val after = over.end - progress(from)
-		val next = from.add(dir.multiply(after)).add(0.0, if (over.step) over.stepHeight else 0.0, 0.0)
+		val next = from.add(dir.multiply(after)).add(0.0, if (over.step) baseY + over.stepHeight - from.y else 0.0, 0.0)
 			.obstacleHit(dir, brakeDistance() + DODGE_STEER_AHEAD)
 		val lane = next?.let { freeLane(from, linePoint, dir, after + it.distance, Vec3d.ZERO) }
 		if (next == null || lane == null) return over.step && dodgePastOnLayer(from, linePoint, dir, distance, block, over)
@@ -2084,7 +2113,7 @@ abstract class ObstaclePassingMode(
 		// Out of a dip the step up is to the floor again, nothing past it up there that's not seen from in it.
 		if (look < MIN_DODGE_DISTANCE || inDip) return false
 		// From the layer's start up there.
-		val up = Vec3d(0.0, over.stepHeight, 0.0)
+		val up = Vec3d(0.0, baseY + over.stepHeight - linePoint.y, 0.0)
 		val start = linePoint.add(dir.multiply(distance)).add(up)
 		val next = start.obstacleHit(dir, look) ?: return false
 		// No way past it found a moment ago and still far, looked at again every [RELOOK_TICKS] only, see [lookedLately].
@@ -2423,6 +2452,8 @@ abstract class ObstaclePassingMode(
 		private val levelHoldY = this@ObstaclePassingMode.levelHoldY
 		private val layerSpeedUp = this@ObstaclePassingMode.layerSpeedUp
 		private val startPos = this@ObstaclePassingMode.startPos
+		private val baseY = this@ObstaclePassingMode.baseY
+		private val lowerLevels = this@ObstaclePassingMode.lowerLevels.toList()
 		// What the deciders remember about what's ahead.
 		private val skipAt = this@ObstaclePassingMode.skipAt
 		private val skipHopAt = this@ObstaclePassingMode.skipHopAt
@@ -2493,6 +2524,9 @@ abstract class ObstaclePassingMode(
 			outer.levelHoldY = levelHoldY
 			outer.layerSpeedUp = layerSpeedUp
 			outer.startPos = startPos
+			outer.baseY = baseY
+			outer.lowerLevels.clear()
+			outer.lowerLevels += lowerLevels
 			outer.skipAt = skipAt
 			outer.skipHopAt = skipHopAt
 			outer.restartFor = restartFor
@@ -3680,8 +3714,11 @@ abstract class ObstaclePassingMode(
 			fromChainStart(start) {
 				// On its lane, the floor bounced off on the way to it is that lane's.
 				planHop(point, forward, next.distance, anyway = true)?.with(lane = lane)?.let { over ->
-					val made = canGetOver(over, end.at, speed)
-					if (made || hopShort <= CHAIN_SHORT)
+					// Under it with a little less room, like [holdingFor] holds for it: where the glide before really ends
+					// differs a bit from this, a tick later or higher, and the window to start holding in to get under is a
+					// tick or two, e.g. judged under a floating block 5.2 on, it ended 0.15 higher and missed it.
+					val made = canGetOver(if (over.under) over.with(topY = over.topY - UNDER_TOP_MARGIN) else over, end.at, speed)
+					if (made || chainNearMiss(over))
 						return@run Continuation(if (made) hopExitSpeed else speed, over, null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
 				}
 				// Touched down on like [topWay] does.
@@ -3718,6 +3755,34 @@ abstract class ObstaclePassingMode(
 		val top = hop.touch ?: return end
 		if (abs(end.y - top.y) > 1e-3 || end.climb > 1e-6) return end
 		return HopEnd(end.speed + bounceGain(), end.at, end.y, JUMP_VELOCITY)
+	}
+
+	/**
+	 * Whether the last [canGetOver] of what follows, [hop], missed by so little it's planned again from where it really is
+	 * once there, see [CHAIN_SHORT]. Not under something: its miss is the unheld or late run coming down onto the floor
+	 * below it, bounced off up into it, e.g. 0.005 below the room under a floating block while no tick to start holding
+	 * from got under it.
+	 */
+	private fun chainNearMiss(hop: Hop) = !hop.under && hopShort <= CHAIN_SHORT
+
+	/**
+	 * Whether what [hop] was judged with past it, [Hop.then], still follows from where gliding over it from here really
+	 * ends, judged again like [withWhatFollows] judged it: the glide's end judged at plan time differs from the flown one,
+	 * e.g. higher and later, and right past it there's no time left to get under or over what follows or to brake. What
+	 * follows from here is kept as what's flown on to past it. Not made from here at all, that's the glide's own checks.
+	 */
+	private fun SafeContext.thenStillFollows(hop: Hop, dir: Vec3d, progress: Double): Boolean {
+		val (judged, then) = sandboxed {
+			withHopMemo {
+				val end = blockHopRun(hop, progress, player.velocity.horizontalLength(), strict = false)?.let { bouncedOff(hop, it) }
+					?: return@withHopMemo false to null
+				true to continuation(hop.lane, dir, end)
+			}
+		}
+		if (!judged) return true
+		if (then == null) return false
+		hop.then = then.takeIf { it.hop != null || it.lane != null }
+		return true
 	}
 
 	/**
@@ -4913,7 +4978,7 @@ abstract class ObstaclePassingMode(
 		val across = across(dir)
 		then.hop?.let { next ->
 			if (progress >= next.end) return
-			if (!canGetOver(next, progress) && hopShort > CHAIN_SHORT) {
+			if (!canGetOver(next, progress) && !chainNearMiss(next)) {
 				ElytraFly.debug { "Past it, ${then.text} not made from here any more ($hopMiss), looking again" }
 				return
 			}
@@ -6070,6 +6135,8 @@ abstract class ObstaclePassingMode(
 			.map { it to linePoint.add(dir.multiply(it)) }
 			.takeWhile { (_, point) -> point.isLoaded }
 		val first = along.firstOrNull { (_, point) -> !point.boxHasFloor() }?.first ?: return false
+		// Stepped up onto this layer from another, that one may end before it: off its end down to what's there.
+		settleBelow(linePoint.add(dir.multiply(first)))
 		// A gap too short to come down in bouncing on, floor below it and the layer again right after it.
 		fun shortGap(edge: Double) = linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0).boxHasFloor() &&
 			along.firstOrNull { (distance, point) -> distance > edge && distance < edge + MIN_GAP && point.boxHasFloor() } != null
@@ -6111,6 +6178,9 @@ abstract class ObstaclePassingMode(
 		}
 		if (noGapAt.near(at) || skipHopAt.near(at)) return false
 		noGapAt = at
+		// One more layer on this one before its end, a block up: bounced up onto first, see [startDodge]. Its end is
+		// looked for again up there, see [setLevel].
+		if (!onCarpets) linePoint.obstacleDistance(dir, edge)?.let { if (isStepUp(linePoint, dir, it)) return false }
 		// Deeper than the floor you started on, that's for walking around.
 		val deeper = !linePoint.add(dir.multiply(edge)).add(0.0, baseY - linePoint.y, 0.0).boxHasFloor()
 		// Where there's floor under you again up here, more of the layer.
@@ -6181,11 +6251,49 @@ abstract class ObstaclePassingMode(
 		return lane to progress(edgeLine) + next.distance
 	}
 
-	/** Past the end of a layer, the line goes back down to the floor you started on. */
+	/** Past the end of a layer, the line goes back down to the level below it, see [baseY]. */
 	private fun offTheLayer() {
 		ElytraFly.debug { "Off the blocks, bouncing on down at y %.2f".format(baseY) }
-		startPos = Vec3d(startPos.x, baseY, startPos.z)
+		setLevel(baseY)
 	}
+
+	/**
+	 * The line to the level [y], up or down. Up from a layer onto one more on it, the layer left becomes [baseY], the one
+	 * below it kept in [lowerLevels], a step at a time for a higher one: the end of each is stepped down from onto the
+	 * next lower in turn. Down, the levels at or above [y] are left behind. Not into a dip, see [intoDip].
+	 */
+	private fun setLevel(y: Double) {
+		if (y > startPos.y + 0.01) {
+			if (onLayer) {
+				lowerLevels.addLast(baseY)
+				baseY = startPos.y
+			}
+			while (y - baseY > STEP_HEIGHT + 0.01) {
+				lowerLevels.addLast(baseY)
+				baseY += STEP_HEIGHT
+			}
+		} else if (y < startPos.y - 0.01) {
+			while (baseY > y + 0.01 && lowerLevels.isNotEmpty()) baseY = lowerLevels.removeLast()
+			if (abs(baseY - y) < 0.01) baseY = lowerLevels.removeLastOrNull() ?: y
+		}
+		startPos = Vec3d(startPos.x, y, startPos.z)
+		// The end of the level left was looked for at its height.
+		noGapAt = null
+	}
+
+	/**
+	 * Up on a layer stepped up onto from another, where its end is at [spot] the level [baseY] below may have ended
+	 * already, e.g. the higher layer runs on past the lower one: down to the highest of [lowerLevels] with floor there.
+	 */
+	private fun SafeContext.settleBelow(spot: Vec3d) {
+		if (lowerLevels.isEmpty() || Vec3d(spot.x, baseY, spot.z).boxHasFloor()) return
+		val below = lowerLevels.lastOrNull { Vec3d(spot.x, it, spot.z).boxHasFloor() } ?: return
+		while (baseY > below + 0.01) baseY = lowerLevels.removeLast()
+		ElytraFly.debug { "No floor a block below the end of the blocks, down to y %.2f after it".format(baseY) }
+	}
+
+	/** Gliding up from the level bounced on onto a higher one, not across a gap in it, see [Hop.stepHeight]. */
+	private val Hop.rising get() = step && baseY + stepHeight > startPos.y + 0.01
 
 	/**
 	 * Over a dip a block deep glided down into, see [dipLane]: the line goes down there before landing, the landing's
@@ -6225,12 +6333,12 @@ abstract class ObstaclePassingMode(
 	 * right after it: landing on it early there shifts the bounces so the last one off its edge may come too low for the
 	 * hole, landed on as late as before, see [stepLanding].
 	 */
-	private fun SafeContext.holeSoonAfterLayer(linePoint: Vec3d, dir: Vec3d): Boolean {
-		val up = linePoint.add(0.0, baseY + STEP_HEIGHT - linePoint.y, 0.0)
+	private fun SafeContext.holeSoonAfterLayer(linePoint: Vec3d, dir: Vec3d, layerY: Double = baseY + STEP_HEIGHT, floorY: Double = baseY): Boolean {
+		val up = linePoint.add(0.0, layerY - linePoint.y, 0.0)
 		val reach = player.velocity.horizontalLength() * DIP_BOUNCE_TICKS * STEP_LANDING_BOUNCES
 		val edge = generateSequence(HOP_SCAN_STEP) { it + HOP_SCAN_STEP }.takeWhile { it <= reach }
 			.firstOrNull { !up.add(dir.multiply(it)).boxHasFloor() } ?: return false
-		val floor = linePoint.add(0.0, baseY - linePoint.y, 0.0)
+		val floor = linePoint.add(0.0, floorY - linePoint.y, 0.0)
 		return generateSequence(edge) { it + HOP_SCAN_STEP }.takeWhile { it <= edge + HOLE_TOUCHDOWN_MARGIN + 1 }
 			.any { !floor.add(dir.multiply(it)).boxHasFloor() }
 	}
@@ -6241,18 +6349,27 @@ abstract class ObstaclePassingMode(
 	 * [isStepUp]. Not over a hole, a mob, under something, through an opening, out beside something, nor before the top
 	 * to touch down on is touched down on and passed.
 	 */
-	private fun SafeContext.downOntoLayer(hop: Hop, progress: Double, dir: Vec3d): Boolean {
-		if (onLayer || inDip || !player.isGliding || player.isOnGround) return false
-		if (hop.step || hop.down || hop.under || hop.hole || hop.open || hop.low || hop.cube || hop.swerve != null || hop.fromLayer) return false
-		if (thread?.hopStart == hop.start || progress < hop.obstacle) return false
-		if (hop.touch?.let { !hop.touched || progress <= it.range.endInclusive } == true) return false
-		val layerY = baseY + STEP_HEIGHT
-		if (hop.feetY < layerY + 0.5 || player.y < layerY) return false
-		if (topOverlap(player.pos, layerY) < GLIDE_SIZE * GLIDE_SIZE * 0.99) return false
-		val up = Vec3d(player.pos.x, layerY, player.pos.z)
-		return up.add(dir.multiply(STEP_ON)).boxHasFloor() && up.add(dir.multiply(STEP_CLEAR)).boxHasFloor() &&
-			up.obstacleDistance(dir, max(STEP_CLEAR, hop.end - progress)) == null
+	private fun SafeContext.downOntoLayer(hop: Hop, progress: Double, dir: Vec3d): Double? {
+		if (onCarpets || inDip || !player.isGliding || player.isOnGround) return null
+		if (hop.step || hop.down || hop.under || hop.hole || hop.open || hop.low || hop.cube || hop.swerve != null || hop.fromLayer) return null
+		if (thread?.hopStart == hop.start || progress < hop.obstacle) return null
+		if (hop.touch?.let { !hop.touched || progress <= it.range.endInclusive } == true) return null
+		// Any number of blocks up from the level bounced on, the highest under you: from the floor right onto a layer two
+		// high too, the levels below it are stepped down onto off its end, see [setLevel]. A block up only past something
+		// higher, else it'd have been glided up onto, see [isStepUp]; higher, the glide over that layer itself too.
+		return generateSequence(startPos.y + STEP_HEIGHT) { it + STEP_HEIGHT }
+			.takeWhile { it <= hop.feetY - (if (it < startPos.y + STEP_HEIGHT + 0.01) 0.5 else 0.0) && it <= player.y }
+			.toList().asReversed().firstOrNull { layerY ->
+				val up = Vec3d(player.pos.x, layerY, player.pos.z)
+				topOverlap(player.pos, layerY) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 &&
+					up.add(dir.multiply(STEP_ON)).boxHasFloor() && up.add(dir.multiply(STEP_CLEAR)).boxHasFloor() &&
+					up.add(dir.multiply(STEP_ON)).roomToBounce() && up.obstacleDistance(dir, max(STEP_CLEAR, hop.end - progress)) == null
+			}
 	}
+
+	/** Whether there's room standing at this spot, under a low roof too, e.g. on a layer in a tunnel: bounced on there. */
+	context(safeContext: SafeContext)
+	private fun Vec3d.roomToBounce() = safeContext.spaceEmpty(Box(x - 0.3, y, z - 0.3, x + 0.3, y + LEVEL_ROOM, z + 0.3))
 
 	/**
 	 * Whether what's [distance] ahead of [linePoint] up on the layer bounced on stands in a hole right after the layer's
@@ -6288,14 +6405,15 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * Whether the obstacle [distance] ahead of [from] is a layer of blocks [STEP_HEIGHT] high to bounce on, with room
-	 * to bounce up there for a bit. Only from down on the floor you started on, one more on top is in the way.
+	 * to bounce up there for a bit, under a low roof too. From whatever level [from] is at, up on a layer onto one more on
+	 * it too, see [setLevel]. Not from carpets, a block up from them is no top.
 	 */
 	private fun SafeContext.isStepUp(from: Vec3d, dir: Vec3d, distance: Double): Boolean {
-		if (onLayer) return false
+		if (onCarpets) return false
 		val up = from.add(0.0, STEP_HEIGHT, 0.0)
 		// Floor on up there for a while too: a single block lying askew has its own top a block on.
 		return up.obstacleDistance(dir, distance + STEP_CLEAR) == null && up.add(dir.multiply(distance + STEP_ON)).boxHasFloor() &&
-			up.add(dir.multiply(distance + STEP_CLEAR)).boxHasFloor()
+			up.add(dir.multiply(distance + STEP_CLEAR)).boxHasFloor() && up.add(dir.multiply(distance + STEP_ON)).roomToBounce()
 	}
 
 	/**
@@ -6386,7 +6504,9 @@ abstract class ObstaclePassingMode(
 		// Under it only with floor right after to come down on, else it's dodged and the height kept.
 		if (under && !linePoint.add(dir.multiply(stop + HOP_SCAN_STEP)).boxHasFloor()) return noHop("no floor right after it to come down on")
 		val at = progress(linePoint)
-		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets, under = under).takeIf { anyway || canGetOver(it, at) }
+		// Up onto a layer a block up from the line, however high that is above [baseY], e.g. up on a layer onto one more.
+		val stepHeight = if (step) lineY + STEP_HEIGHT - baseY else STEP_HEIGHT
+		return Hop(at + start, at + stop, feetY, topY, at + distance, step, low = carpets, under = under, stepHeight = stepHeight).takeIf { anyway || canGetOver(it, at) }
 			?: noHop("can't get up there in time, $hopMiss").also { hopTooSlow = true }
 	}
 
@@ -6402,10 +6522,14 @@ abstract class ObstaclePassingMode(
 			hop.hole && onLayer && risesBefore(hop, progress, from).any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, from, NEXT_BOUNCE_HEIGHT_MARGIN) }
 		// Under something, held from whenever it still makes it: [holdingFor] holds as late as it can, not from a set
 		// distance, the bounces before may take it up into it there.
-		hop.under -> (0 until UNDER_HOLD_SEARCH_TICKS step UNDER_HOLD_SEARCH_STEP).any { canHop(hop, progress, it, from) }
+		hop.under -> underHoldTicks().any { canHop(hop, progress, it, from) }
 		// The one from close by last, its miss is the one told and gone by, see [hopShort].
 		else -> !hop.hole && !hop.under && fromNextBounce(hop, progress) || canHop(hop, progress, from = from)
 	}
+
+	/** From how many ticks on holding the height under something is looked at by [canGetOver], see [UNDER_HOLD_FINE_TICKS]. */
+	private fun underHoldTicks() = (0 until UNDER_HOLD_FINE_TICKS).asSequence() +
+		(UNDER_HOLD_FINE_TICKS until UNDER_HOLD_SEARCH_TICKS step UNDER_HOLD_SEARCH_STEP).asSequence()
 
 	/**
 	 * In how many ticks the last bounces before [hop] rise, bouncing on from here at [progress], the last first: only the
