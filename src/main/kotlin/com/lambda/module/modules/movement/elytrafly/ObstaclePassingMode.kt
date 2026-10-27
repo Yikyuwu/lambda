@@ -2156,10 +2156,15 @@ abstract class ObstaclePassingMode(
 				if (throughOpening(from, linePoint, dir, distance, block)) return true
 				// One fits slower, it slows down first. Also a swerve out beside it and back: steering over takes the longer
 				// along the way the faster, fast it can't get out there before it.
-				if (distance > brakeDistance() + DODGE_STEER_AHEAD && flyer.horizontalSpeed > FIT_SPEED &&
-					(freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null ||
-						sandboxed { swerveWays(linePoint, dir, distance, from.subtract(linePoint).dotProduct(across(dir)), FIT_SPEED) }.isNotEmpty())) {
+				val slowLane = distance > brakeDistance() + DODGE_STEER_AHEAD && flyer.horizontalSpeed > FIT_SPEED &&
+					freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null
+				val slowSwerve = if (slowLane || distance <= brakeDistance() + DODGE_STEER_AHEAD || flyer.horizontalSpeed <= FIT_SPEED) null
+					else sandboxed { swerveWays(linePoint, dir, distance, from.subtract(linePoint).dotProduct(across(dir)), FIT_SPEED) }.firstOrNull()
+				if (slowLane || slowSwerve != null) {
 					commitSlowFor("startDodge", at)
+					// The swerve at that speed taken on right away: looked at anew at the speed it still has, it never fits
+					// before it's too late. Still too fast once it steers out, it lands to take off again slower, see [reswerve].
+					slowSwerve?.hop?.let { commitHop("startDodge", it) }
 					return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane at this speed ($noLane), slowing down to %.2f to fit one".format(distance, FIT_SPEED))
 				}
 				if (distance > brakeDistance()) return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane to dodge to yet ($noLane), no opening in it ($openingMiss)".format(distance))
@@ -4150,13 +4155,15 @@ abstract class ObstaclePassingMode(
 				// of floating blocks, from the hold's lead on, see [holdingFor].
 				val bouncing = over.start - progress - speed * leadTicks(over)
 				val approach = steerPath(off, dir, thread.centre, thread.lean, over.start - progress, over.start - progress)
-				if (bouncing > 0) steerPathHit(linePoint, dir, approach, bouncing)?.let { hit ->
+				// Diagonally a tick's move goes one axis and then the other, the box swings out that far beside the way.
+				val swing = sweep(dir)
+				if (bouncing > 0) steerPathHit(linePoint, dir, approach, bouncing, swing = swing)?.let { hit ->
 					ElytraFly.debug { "Not through the opening %+.2f across: $hit".format(thread.centre) }
 					continue
 				}
 				// What's low, e.g. a railing on the floor, all the way to it: each bounce comes down to the floor, the hold
 				// only gets up over it once it's risen.
-				steerPathHit(linePoint, dir, approach, over.start - progress - 1, high = STEP_HEIGHT)?.let { hit ->
+				steerPathHit(linePoint, dir, approach, over.start - progress - 1, high = STEP_HEIGHT, swing = swing)?.let { hit ->
 					ElytraFly.debug { "Not through the opening %+.2f across, low: $hit".format(thread.centre) }
 					continue
 				}
@@ -8088,12 +8095,14 @@ abstract class ObstaclePassingMode(
 	 * tick moves along one axis and then the other, the box swings out to the corner between, see [sweep]. As high as
 	 * [obstacleHit] looks. Where along the line, null when it's free.
 	 */
-	private fun SafeContext.steerPathHit(linePoint: Vec3d, dir: Vec3d, path: List<SteerState>, until: Double, high: Double? = null): String? {
+	private fun SafeContext.steerPathHit(
+		linePoint: Vec3d, dir: Vec3d, path: List<SteerState>, until: Double, high: Double? = null, swing: Double = 0.0,
+	): String? {
 		val across = across(dir)
 		val bottom = linePoint.y + passerConfig.minObstacleHeight
 		val top = linePoint.y + (high ?: if (passerConfig.headHitters) 1.99 else passerConfig.minObstacleHeight + WIDTH_MARGIN)
 		fun free(x: Double, z: Double) = passWorld.spaceEmpty(Box(x - GLIDE_SIZE / 2, bottom, z - GLIDE_SIZE / 2, x + GLIDE_SIZE / 2, top, z + GLIDE_SIZE / 2)
-			.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
+			.expand(LANE_CLEAR_MARGIN + swing, 0.0, LANE_CLEAR_MARGIN + swing))
 		fun point(state: SteerState) = linePoint.add(dir.multiply(state.along)).add(across.multiply(state.offset))
 		// From the first tick on, where you are now you're already.
 		for (i in 0 until path.lastIndex) {
