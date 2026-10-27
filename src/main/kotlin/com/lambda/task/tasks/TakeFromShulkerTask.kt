@@ -91,14 +91,15 @@ class TakeFromShulkerTask @Ta5kBuilder constructor(
 
     /**
      * Fills up a carried stack with just what's missing and puts the rest back, so e.g. 63 carrots take one.
-     * Without one to fill up it takes the biggest stack, throwing away junk to make room for it.
+     * Without one to fill up it takes a stack, throwing away junk to make room for it. Always from the smallest stack,
+     * so leftovers get used up instead of piling up next to full stacks.
      */
     private fun SafeContext.take(handler: ScreenHandler): Boolean {
         if (carried() >= target) return false
         val stacks = handler.containerSlots.filter { isWanted(it.stack) }
         handler.playerSlots.firstNotNullOfOrNull { carried ->
             if (!isWanted(carried.stack) || carried.stack.count >= carried.stack.maxCount) return@firstNotNullOfOrNull null
-            stacks.filter { ItemStack.areItemsAndComponentsEqual(it.stack, carried.stack) }.maxByOrNull { it.stack.count }?.let { carried to it }
+            stacks.filter { ItemStack.areItemsAndComponentsEqual(it.stack, carried.stack) }.minByOrNull { it.stack.count }?.let { carried to it }
         }?.let { (carried, from) ->
             // Three clicks stay under the default limit of five inventory packets.
             submit {
@@ -108,7 +109,7 @@ class TakeFromShulkerTask @Ta5kBuilder constructor(
             }
             return true
         }
-        val stack = stacks.maxByOrNull { it.stack.count } ?: return false
+        val stack = stacks.minByOrNull { it.stack.count } ?: return false
         // A digger's inventory is usually full, and a quick move into it would silently do nothing.
         if (handler.playerSlots.none { it.stack.isEmpty }) {
             val junk = handler.playerSlots.firstOrNull { it.stack.item in inventoryConfig.disposables && !isWanted(it.stack) }
