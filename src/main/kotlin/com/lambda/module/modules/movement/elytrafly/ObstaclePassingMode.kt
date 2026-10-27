@@ -369,13 +369,13 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val TOUCH_MIN_OVERLAP = GLIDE_SIZE * GLIDE_SIZE / 6
 		/**
-		 * How far inside a top's edges, along x and z, the middle of the box has to be to come down on it, a quarter of the
-		 * box: three quarters of it over the top each way. Not in a hole, see [touchLane]. Nearer its edge the move across
-		 * that tick may carry it off the top, it's never come down on there, glided on past it instead, see [topMargin].
-		 * Simulated, all of the box over it (0.3) or 0.2 a single block was hardly ever come down on at a tick's speed, the
-		 * parkour field's stepping stones not at all, the tick it comes over it decides how far in it is.
+		 * How far inside a top's edges, along x and z, the middle of the box has to be to come down on it: well over it, not
+		 * on its edge. Not in a hole, see [touchLane]. Nearer its edge the move across that tick may carry it off the top,
+		 * it's never come down on there, glided on past it instead, see [topMargin]. The tick it comes over it decides how far
+		 * in it is: simulated, 0.15 in and more a single block was hardly ever come down on at a tick's speed, the parkour
+		 * field's stepping stones half as often.
 		 */
-		private const val TOUCH_EDGE = 0.15
+		private const val TOUCH_EDGE = 0.08
 		/** How far to either side of the lane through a top's middle the way there is looked at, see [topHops]. */
 		private const val TOUCH_AIM_WINDOW = 0.15
 		/** How far across from the lane a top was found on the lane through its middle is looked for, see [topHops]. */
@@ -1089,7 +1089,7 @@ abstract class ObstaclePassingMode(
 		// doesn't stop halfway.
 		val now = hop.touch?.let { topOverlap(player.pos, it.y) } ?: 0.0
 		val next by lazy { hop.touch?.let { topOverlap(player.pos.add(player.velocity.x, 0.0, player.velocity.z), it.y) } ?: 0.0 }
-		// Not in a hole: down on it on the tick the box is the most inside its edges, a quarter of the box in at least, see
+		// Not in a hole: down on it on the tick the box is the most inside its edges, far enough in, see
 		// [TOUCH_EDGE], else glided on past it. On its edge, e.g. 88% of the box over it diving and 14% the tick after, it came
 		// down a tick late or the move across carried it off. Dived and not down on it there, pulled up, not onto its edge.
 		val centred = hop.touch?.takeIf { !hop.hole }
