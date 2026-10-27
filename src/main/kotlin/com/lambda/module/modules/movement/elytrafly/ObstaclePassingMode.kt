@@ -5910,8 +5910,12 @@ abstract class ObstaclePassingMode(
 		// Only overhead, glided under without touching the floor, a bounce would throw you up into it. Only if the box fits
 		// right above the floor all the way, else something's in the way down there too that the rays above missed. Not
 		// [above] a height, over what hangs there, e.g. a floating block glided over instead of under.
-		val under = above == null && !onFloor && fits(heights.first())
-		val feetY = heights.firstOrNull { fits(it) } ?: run {
+		// None at all when the line is too high already, e.g. up on a layer near the nether's cap: nothing to glide over at.
+		// The lowest looked at once, it's the first one tried for the feet too.
+		val lowest = heights.firstOrNull()
+		val lowestFits = lowest != null && fits(lowest)
+		val under = above == null && !onFloor && lowestFits
+		val feetY = (if (lowestFits) lowest else heights.drop(1).firstOrNull { fits(it) }) ?: run {
 			// What's in the way up there, for the log.
 			val blocked = samples.firstOrNull { !free(box(it, maxHopY).expand(swing, 0.0, swing)) }
 			val what = blocked?.let { along ->
@@ -5921,7 +5925,7 @@ abstract class ObstaclePassingMode(
 			return noHop("too high to get over under y %.2f, $what, %.1f long".format(maxHopY, end - distance))
 		}
 		// As high as there's room over it all, a roof or a block hanging above.
-		val topY = heights.dropWhile { it < feetY }.takeWhile { fits(it) }.last()
+		val topY = heights.dropWhile { it <= feetY }.takeWhile { fits(it) }.lastOrNull() ?: feetY
 		if (topY - feetY < HOP_MARGIN) return noHop("only %.2f room between y %.2f and %.2f".format(topY - feetY, feetY, topY))
 		// Under it only with floor right after to come down on, else it's dodged and the height kept.
 		if (under && !linePoint.add(dir.multiply(stop + HOP_SCAN_STEP)).boxHasFloor()) return noHop("no floor right after it to come down on")
