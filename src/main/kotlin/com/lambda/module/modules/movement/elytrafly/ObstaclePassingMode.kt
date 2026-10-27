@@ -373,9 +373,10 @@ abstract class ObstaclePassingMode(
 		 * on its edge. Not in a hole, see [touchLane]. Nearer its edge the move across that tick may carry it off the top,
 		 * it's never come down on there, glided on past it instead, see [topMargin]. The tick it comes over it decides how far
 		 * in it is: simulated, 0.15 in and more a single block was hardly ever come down on at a tick's speed, the parkour
-		 * field's stepping stones half as often.
+		 * field's stepping stones half as often. At 0.08 a single pillar on a diagonal was glided over instead of bounced
+		 * on, so only the middle of the box has to be over it, not off its edge.
 		 */
-		private const val TOUCH_EDGE = 0.08
+		private const val TOUCH_EDGE = 0.01
 		/** How far to either side of the lane through a top's middle the way there is looked at, see [topHops]. */
 		private const val TOUCH_AIM_WINDOW = 0.15
 		/** How far across from the lane a top was found on the lane through its middle is looked for, see [topHops]. */
