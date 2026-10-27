@@ -1024,8 +1024,8 @@ abstract class ObstaclePassingMode(
 
 	/** Lets something through right away for a new [key], for the same again only every [ticks] times it's asked. */
 	private class Limiter(val ticks: Int) {
-		private var key = ""
-		private var wait = 0
+		var key = ""
+		var wait = 0
 		fun allows(key: String): Boolean {
 			if (key == this.key && --wait > 0) return false
 			this.key = key
@@ -1624,7 +1624,7 @@ abstract class ObstaclePassingMode(
 		timed { passObstacles() }.also {
 			logPlan()
 			if (ElytraFly.choosing) timed { shadowChoose() }
-			if (passerConfig.routePlanner == PasserSettings.RoutePlanner.Shadow) timed { routeShadow() }
+			if (passerConfig.routePlanner == PasserSettings.RoutePlanner.Shadow) timed { flightKept { routeShadow() } }
 		}
 	}
 
@@ -2947,6 +2947,38 @@ abstract class ObstaclePassingMode(
 	 * [sandboxed]: nothing it plans or simulates on the way stays, the flight is the same. Not while flying a glide over
 	 * already, landing or walking.
 	 */
+	/**
+	 * Runs [block] with what the flight keeps outside the plan put back after, e.g. the spots with no way yet that the
+	 * deciders don't look at again for a while, see [lookedLately]: the route planner looking only, in Shadow, must
+	 * leave the flight as it is.
+	 */
+	private inline fun <T> flightKept(block: () -> T): T {
+		val noWay = HashMap(noWayYet)
+		val noPast = HashMap(noPastOnLayerYet)
+		val misses = chooserMisses.toList()
+		val limits = listOf(fewestCarpetsLane, freeOfCarpetsLane).map { it.key to it.wait }
+		val keptDive = diveTop
+		val keptSwing = swingCapped
+		val keptScan = scanTicks
+		val keptWants = wantsSpeed
+		val keptNeedAt = speedNeedAt
+		val keptSpeedingUp = speedingUp
+		try {
+			return block()
+		} finally {
+			noWayYet.clear(); noWayYet.putAll(noWay)
+			noPastOnLayerYet.clear(); noPastOnLayerYet.putAll(noPast)
+			chooserMisses.clear(); chooserMisses.addAll(misses)
+			listOf(fewestCarpetsLane, freeOfCarpetsLane).zip(limits).forEach { (limiter, kept) -> limiter.key = kept.first; limiter.wait = kept.second }
+			diveTop = keptDive
+			swingCapped = keptSwing
+			scanTicks = keptScan
+			wantsSpeed = keptWants
+			speedNeedAt = keptNeedAt
+			speedingUp = keptSpeedingUp
+		}
+	}
+
 	private fun SafeContext.routeShadow() {
 		if (!passerConfig.passObstacles || !flyer.isGliding || inDip || passingToPos != null || brakeAt != null) {
 			forgetRoute()
@@ -8974,7 +9006,10 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** Where the planner's state is, see [PlanCtx]: the game thread's own unless one is swapped in on this thread. */
-	private val ctx: PlanCtx get() = if (ctxSwaps.get() == 0) gameCtx else swappedCtx.get() ?: gameCtx
+	// A plain read: a thread sees its own swaps in order, and another's seen late or early only falls through to its own
+	// [swappedCtx], none, that's [gameCtx] all the same. Read on every planner field access, a volatile read each time
+	// would cost on the hot paths.
+	private val ctx: PlanCtx get() = if (ctxSwaps.plain == 0) gameCtx else swappedCtx.get() ?: gameCtx
 
 	/** Runs [block] with the planner reading and writing [planCtx] instead on this thread, see [PlanCtx]. */
 	private inline fun <T> withCtx(planCtx: PlanCtx, block: () -> T): T {
@@ -8985,7 +9020,7 @@ abstract class ObstaclePassingMode(
 			return block()
 		} finally {
 			ctxSwaps.decrementAndGet()
-			swappedCtx.set(outer)
+			if (outer == null) swappedCtx.remove() else swappedCtx.set(outer)
 		}
 	}
 
