@@ -85,6 +85,8 @@ object FlightStop : Loadable {
         listenUnsafe<WorldEvent.Leave> {
             owner = null
             walkingFor = null
+            // Logged again in the next world.
+            waitReason = null
         }
         return "Loaded Flight Stop"
     }
