@@ -176,7 +176,12 @@ abstract class StationTask<P : StationPhase>(
 
     /** Makes way for [holdWhile]: closes an open container and pauses what the running step does. */
     private fun SafeContext.hold() {
-        if (player.currentScreenHandler != player.playerScreenHandler) {
+        val nested = step as? StationTask<*>
+        if (nested != null && player.currentScreenHandler != player.playerScreenHandler) {
+            // The container is the nested task's. Cancelling it would leave its placed shulker behind, so it closes
+            // the container itself when it holds too, else it's only closed and the nested task's retries open it again.
+            if (!nested.holdWhile()) closeContainer()
+        } else if (player.currentScreenHandler != player.playerScreenHandler) {
             // A step that opened it would go on as if it were still open.
             cancelStep()
             closeContainer()
