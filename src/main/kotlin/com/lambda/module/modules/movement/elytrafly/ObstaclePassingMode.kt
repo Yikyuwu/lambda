@@ -150,6 +150,8 @@ abstract class ObstaclePassingMode(
 		private const val THREAD_SPEED_STEP = 0.02
 		/** The fastest that fits through an opening is looked for this much at a time, from a bit above the speed you have. */
 		private const val THREAD_SPEED_GRID = 0.05
+		/** Fitting through an opening this fast, it fits at any speed bouncing gets to, see [threadPlan]. */
+		private const val THREAD_TOP_SPEED = 2.0
 		/** Slower than this no opening is planned for, holding the height it'd stall. */
 		private const val THREAD_MIN_SPEED = 0.5
 		/** How much faster than you are it's looked for, the bounces before it speed you up. */
@@ -4761,13 +4763,27 @@ abstract class ObstaclePassingMode(
 		val speed = player.velocity.horizontalLength()
 		// The fastest it fits through, from a bit faster than you are down.
 		val top = ceil((speed + THREAD_SPEED_ABOVE) / THREAD_SPEED_GRID) * THREAD_SPEED_GRID
+		// Fitting a bit faster than you are isn't fitting at any speed: planned slow, right after taking off, the bounces
+		// on the way got it there faster than that, and unheld the box swung into a single missing block's side.
+		val ceiling = max(top, THREAD_TOP_SPEED)
 		// What's in the way, once for all of the speeds below, as far out as the fastest puts the box.
-		val boxes = passageBoxes(linePoint, dir, from, to, minY, maxY, passageSpread(max(top, speed), offset, THREAD_WINDOW))
+		val boxes = passageBoxes(linePoint, dir, from, to, minY, maxY, passageSpread(max(ceiling, speed), offset, THREAD_WINDOW))
 		fun fitting(speed: Double) = passage(linePoint, dir, from, to, minY, maxY, speed, offset, THREAD_WINDOW, boxes = boxes)
-		val fastest = generateSequence(top) { it - THREAD_SPEED_GRID }.takeWhile { it >= THREAD_MIN_SPEED - 1e-9 }
-			.firstOrNull { (fitting(it)?.width ?: 0.0) >= THREAD_MIN_WIDTH }
+		fun fits(speed: Double) = (fitting(speed)?.width ?: 0.0) >= THREAD_MIN_WIDTH
+		val below = generateSequence(top) { it - THREAD_SPEED_GRID }.takeWhile { it >= THREAD_MIN_SPEED - 1e-9 }
+			.firstOrNull { fits(it) }
 			?: return null.also { threadMiss = "no spot across gets through at every tick down to %.2f a tick".format(THREAD_MIN_SPEED) }
-		val maxSpeed = if (fastest > top - 1e-6) Double.POSITIVE_INFINITY else fastest - THREAD_SPEED_MARGIN
+		// Fitting at the top looked at, how much faster it still does, halving the grid steps up to the ceiling.
+		val fastest = if (below < top - 1e-6) below else if (fits(ceiling)) ceiling else {
+			var low = (below / THREAD_SPEED_GRID).roundToInt()
+			var high = (ceiling / THREAD_SPEED_GRID).roundToInt()
+			while (high - low > 1) {
+				val mid = (low + high) / 2
+				if (fits(mid * THREAD_SPEED_GRID)) low = mid else high = mid
+			}
+			low * THREAD_SPEED_GRID
+		}
+		val maxSpeed = if (fastest > ceiling - 1e-6) Double.POSITIVE_INFINITY else fastest - THREAD_SPEED_MARGIN
 		// Too fast for it even holding the height from now on and flapping, the hardest it slows down: only with room to
 		// land before it and take off again slower, see [threadHold].
 		val through = over.with(lane = across(dir).multiply(offset))
@@ -4778,7 +4794,12 @@ abstract class ObstaclePassingMode(
 				return null.also { threadMiss = "it'd get there at %.2f a tick holding the height from now on, too fast flapping too, it fits up to %.2f, no room to land and take off again before it".format(held, maxSpeed) }
 		}
 		// Planned at about the speed it gets there at, the spot is looked for again at the speed it has, see [centreAt].
-		val plan = (if (maxSpeed.isFinite()) fitting(fastest) else fitting(speed)?.takeIf { it.width >= THREAD_MIN_WIDTH } ?: fitting(fastest))
+		// Not held to a side only where either axis may go first at any speed: unheld where it fits slow, faster the box
+		// swings out to both sides there and nothing's left, see [centreAt].
+		fun unheld(spot: Passage) = spot.lean != 0 ||
+			(passage(linePoint, dir, from, to, minY, maxY, ceiling, spot.centre, THREAD_RETARGET, listOf(0), boxes)?.width ?: 0.0) >= THREAD_MIN_WIDTH
+		val plan = (if (maxSpeed.isFinite()) fitting(fastest)
+			else fitting(speed)?.takeIf { it.width >= THREAD_MIN_WIDTH && unheld(it) } ?: fitting(fastest))
 			?: return null.also { threadMiss = "no spot across gets through" }
 		val wall = over.obstacle - at
 		val reached = laneReachedAt(here, dir, plan.centre, wall)
