@@ -597,11 +597,14 @@ abstract class ObstaclePassingMode(
 	 * which only touch its corners: centred it gets through only at some ticks. With the heading held a little to [lean]
 	 * across, which axis goes first is known, 0 when it doesn't matter there. Gone through from [centre] across the
 	 * line, the middle of the widest spot that gets through at every tick, see [passage], at [maxSpeed] at most. The way
-	 * through is looked at from [from] to [to] along the line from [origin], the box between [minY] and [maxY].
+	 * through is looked at from [from] to [to] along the line from [origin], the box between [minY] and [maxY]. The heading
+	 * is held so until [passEnd] along the line, as far as the way through was looked at: through a field of floating
+	 * blocks that's all of the glide, a block beside the way past the opening is passed the same way.
 	 */
 	private class Thread(
 		val origin: Vec3d, val dir: Vec3d, val from: Double, val to: Double, val minY: Double, val maxY: Double,
 		val centre: Double, val width: Double, val lean: Int, val maxSpeed: Double, val wallAt: Double, val hopStart: Double,
+		val passEnd: Double,
 	) {
 		/** Whether how it went through was logged. */
 		var logged = false
@@ -4135,7 +4138,8 @@ abstract class ObstaclePassingMode(
 		val reached = laneReachedAt(here, dir, plan.centre, wall)
 		if (reached == null || reached > wall - 1)
 			return null.also { threadMiss = "%+.2f where it gets through, can't be steered over to in time".format(plan.centre) }
-		return Thread(linePoint, dir, from, to, minY, maxY, plan.centre, plan.width, plan.lean, maxSpeed, over.obstacle, over.start)
+		return Thread(linePoint, dir, from, to, minY, maxY, plan.centre, plan.width, plan.lean, maxSpeed, over.obstacle, over.start,
+			max(at + to, over.obstacle + DODGE_MARGIN))
 	}
 
 	/**
@@ -6695,7 +6699,9 @@ abstract class ObstaclePassingMode(
 	 * side, away from what's dodged.
 	 */
 	private fun SafeContext.hopYaw(linePoint: Vec3d, hop: Hop, dir: Vec3d, progress: Double): Double {
-		val threading = thread?.takeIf { progress < it.wallAt + DODGE_MARGIN && it.hopStart == hop.start && hop.lane == dodge }
+		// Held through all of the way through, not only the opening: past it, steered freely, the axis that goes first
+		// swaps, e.g. the box clipped a block's corner beside a field's lane 25 past where it went in.
+		val threading = thread?.takeIf { progress < it.passEnd && it.hopStart == hop.start && hop.lane == dodge }
 		return when {
 			threading != null -> threadYaw(linePoint, dir, progress, threading)
 			// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].

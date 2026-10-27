@@ -306,11 +306,12 @@ object ElytraFly : Module(
         listen<TickEvent.Post> {
             val wall = player.isGliding && player.horizontalCollision
             if (wall && !hitWall) {
-                debug { "Hit a wall gliding at %.2f a tick, yaw %.1f, around: ${surroundings(player.pos)}".format(lastHorizontalSpeed, player.yaw) }
+                debug { "Hit a wall gliding at %.2f a tick, yaw %.1f, the move ran into [${sweptInto(lastTickPos)}], around: ${surroundings(player.pos)}".format(lastHorizontalSpeed, player.yaw) }
                 trace(TRACE_TICKS)
             }
             hitWall = wall
             lastHorizontalSpeed = player.velocity.horizontalLength()
+            lastTickPos = player.pos
         }
 
         listen<TickEvent.Post> {
@@ -352,6 +353,8 @@ object ElytraFly : Module(
     private var lastSurroundings: Vec3d? = null
     private var hitWall = false
     private var lastHorizontalSpeed = 0.0
+    /** Where the player was at the end of the last tick, to tell what the move since ran into, see [sweptInto]. */
+    private var lastTickPos: Vec3d? = null
 
     /** [traceLine] for the modes, [line] only built with [debugLog]. */
     fun traceLine(line: () -> String) {
@@ -369,6 +372,22 @@ object ElytraFly : Module(
             recent.addLast("at ${player.pos.short}: $line")
             if (recent.size > RECENT_LINES) recent.removeFirst()
         }
+    }
+
+    /**
+     * The blocks the box's move from [from] to where it is now ran into. Diagonally one axis goes first, the box swings
+     * out between them, e.g. into a block's corner beside the way, out of reach of the box where it ended up.
+     */
+    private fun SafeContext.sweptInto(from: Vec3d?): String {
+        if (from == null) return "?"
+        val box = player.boundingBox
+        val swept = box.union(box.offset(from.subtract(player.pos))).expand(0.01, 0.0, 0.01).contract(0.0, 0.01, 0.0)
+        return BlockPos.stream(swept).map { it.toImmutable() }.toList().mapNotNull { blockPos ->
+            val state = world.getBlockState(blockPos)
+            val shape = state.getCollisionShape(world, blockPos)
+            if (shape.isEmpty || shape.boundingBoxes.none { it.offset(blockPos).intersects(swept) }) null
+            else "${Registries.BLOCK.getId(state.block).path} ${blockPos.toShortString()}"
+        }.joinToString()
     }
 
     /** What the client has in the way around [pos], to tell what only the server has from what both have. */
