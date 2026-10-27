@@ -205,6 +205,8 @@ abstract class ObstaclePassingMode(
 		 * 0.1 of a pillar beside the way and sank down onto the railing held only 0.15 above it.
 		 */
 		private const val SWERVE_SIDE_MARGIN = 0.25
+		/** Less once committed to it, so the next bounce a little off doesn't drop it, see [reswerve]. */
+		private const val SWERVE_HELD_MARGIN = 0.12
 		private const val SWERVE_ABOVE = 0.3
 		/** Room kept above the box held swerving, under the nether's roof at y 123 held at 122.31 there's 0.09. */
 		private const val SWERVE_HEAD_ROOM = 0.05
@@ -1611,7 +1613,7 @@ abstract class ObstaclePassingMode(
 				Vec3d(playerPos.x, baseY, playerPos.z).boxHasFloor()) offTheLayer()
 			// Gliding up onto a layer, what's past its start up there comes into sight on the way: onto a lane past it now,
 			// the way up onto the layer is planned again on it, see [dodgePastOnLayer].
-			if (hop.step && !onLayer && dodge == null && passerConfig.dodge && flightTicks % LAYER_LOOK_TICKS == 0 &&
+			if (hop.step && hop.swerve == null && !onLayer && dodge == null && passerConfig.dodge && flightTicks % LAYER_LOOK_TICKS == 0 &&
 				hop.obstacle - progress >= MIN_DODGE_DISTANCE &&
 				dodgePastOnLayer(Vec3d(playerPos.x, closestLinePoint.y, playerPos.z), closestLinePoint, snappedDir, hop.obstacle - progress, "the layer", hop)) {
 				commitHop("passObstacles", null)
@@ -1668,7 +1670,8 @@ abstract class ObstaclePassingMode(
 				}
 				// Onto a layer from below, up there as soon as all of the box is over it: down onto it from its start, not its
 				// middle, and well onto it, not on its edge.
-				progress > hop.end || hop.step && !onLayer && progress > hop.obstacle &&
+				// Swerving, up onto the layer only where planned: over a railing as high the box is all over a top too.
+				progress > hop.end || hop.step && hop.swerve == null && !onLayer && progress > hop.obstacle &&
 					topOverlap(playerPos, baseY + hop.stepHeight) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 && !holeSoonAfterLayer(closestLinePoint, snappedDir) -> {
 					// Above the layer now, from the line down on the floor it'd be in the way right where you are.
 					when {
@@ -3080,7 +3083,9 @@ abstract class ObstaclePassingMode(
 		val at = progress + distance
 		// How far the block goes on along the line, as high as bouncing goes.
 		var blockEnd = at
-		while (blockEnd < at + SWERVE_MAX_BLOCK && !swerveMoveFree(dir, floorY, blockEnd to 0.0, blockEnd to 0.0, floorY + SWERVE_FLOOR_GAP, floorY + SWERVE_BOUNCE_BAND))
+		// Only what's too high: a layer right after it is bounced on, see [swervePlan].
+		while (blockEnd < at + SWERVE_MAX_BLOCK && !swerveMoveFree(dir, floorY, blockEnd to 0.0, blockEnd to 0.0, floorY + SWERVE_FLOOR_GAP, floorY + SWERVE_BOUNCE_BAND) &&
+			!swerveMoveFree(dir, floorY, blockEnd to 0.0, blockEnd to 0.0, floorY + STEP_HEIGHT + SWERVE_FLOOR_GAP, floorY + STEP_HEIGHT + SWERVE_BOUNCE_BAND))
 			blockEnd += HOP_SCAN_STEP
 		if (blockEnd >= at + SWERVE_MAX_BLOCK) {
 			ElytraFly.debug { "No swerve past it: longer than %.0f along the line".format(SWERVE_MAX_BLOCK) }
@@ -3096,7 +3101,7 @@ abstract class ObstaclePassingMode(
 				// How far steering over to it takes, from the line straight on.
 				val reach = steerOffsets(0.0, offset, speed, SWERVE_MAX_REACH).firstOrNull { abs(it.second - offset) < LANE_REACHED }?.first
 				if (reach == null) null.also { miss("not over there within %.0f".format(SWERVE_MAX_REACH)) }
-				else swervePlan(Swerve(offset, max(progress, at - SWERVE_LEAD - reach), blockEnd + SWERVE_PAST, emptyList(), at), dir, floorY, ::miss)?.let { hop ->
+				else swervePlan(Swerve(offset, max(progress, at - SWERVE_LEAD - reach), blockEnd + SWERVE_PAST, emptyList(), at), dir, floorY, miss = ::miss)?.let { hop ->
 					HoleWay("swerve", hop, null, "out to %+.2f and back, held at y %.2f from %.1f to %.1f ahead".format(offset, hop.targetY, hop.start - progress, hop.end - progress))
 				}
 			}
@@ -3109,7 +3114,7 @@ abstract class ObstaclePassingMode(
 	 * yours: free bouncing where it's over the floor at [floorY], else held as low as it's free over what's under it,
 	 * below [maxHopY], from where that starts to where it ends.
 	 */
-	private fun SafeContext.swervePlan(swerve: Swerve, dir: Vec3d, floorY: Double, miss: (String) -> Unit): Hop? {
+	private fun SafeContext.swervePlan(swerve: Swerve, dir: Vec3d, floorY: Double, side: Double = SWERVE_SIDE_MARGIN, miss: (String) -> Unit): Hop? {
 		val across = across(dir)
 		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
 		val progress = progress(player.pos)
@@ -3136,12 +3141,23 @@ abstract class ObstaclePassingMode(
 		var start: Double? = null
 		var end = 0.0
 		var feetY = floorY
+		// Past the block a layer on the way, e.g. right after it on the line: landed on as soon as all of the box is over it
+		// with room to bounce on up there, like gliding up onto one, see [Hop.step].
+		val layerY = floorY + STEP_HEIGHT
+		val origin = Vec3d(startPos.x, floorY, startPos.z)
+		var stepAt: Double? = null
 		for (i in 0 until path.lastIndex) {
 			val a = path[i]
 			val b = path[i + 1]
-			if (swerveMoveFree(dir, floorY, a, b, bounceLow, bounceHigh)) continue
+			if (!onLayer && start != null && b.first >= swerve.backAt - SWERVE_PAST &&
+				topOverlap(origin.add(forward.multiply(b.first)).add(across.multiply(b.second)), layerY) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 &&
+				swerveMoveFree(dir, floorY, b, b, layerY + SWERVE_FLOOR_GAP, layerY + SWERVE_BOUNCE_BAND, 0.0)) {
+				stepAt = b.first
+				break
+			}
+			if (swerveMoveFree(dir, floorY, a, b, bounceLow, bounceHigh, side)) continue
 			var need = floorY + SWERVE_FLOOR_GAP
-			while (need <= ceiling && !swerveMoveFree(dir, floorY, a, b, need, need + band)) need += SWERVE_HEIGHT_STEP
+			while (need <= ceiling && !swerveMoveFree(dir, floorY, a, b, need, need + band, side)) need += SWERVE_HEIGHT_STEP
 			if (need > ceiling) return null.also { miss("in the way %.1f ahead up to y %.2f".format(b.first - progress, ceiling)) }
 			if (start == null) start = a.first
 			end = b.first
@@ -3154,23 +3170,26 @@ abstract class ObstaclePassingMode(
 		// nether's, only as high as there's room.
 		val aim = min(feetY + SWERVE_ABOVE, ceiling)
 		// Held at that height all the way over, nothing higher up in the way.
-		if (path.zipWithNext().any { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, aim + GLIDE_SIZE + SWERVE_HEAD_ROOM) })
+		if (stepAt != null) end = stepAt
+		if (path.zipWithNext().any { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, aim + GLIDE_SIZE + SWERVE_HEAD_ROOM, side) })
 			return null.also { miss("held at y %.2f, something higher up in the way".format(aim)) }
 		// Ended a few ticks later than planned: steering back lags behind, at its end it's still close to what's low.
-		return Hop(from, end + speed * SWERVE_END_TICKS, feetY, ceiling, from, false, aim = aim,
-			swerve = Swerve(swerve.offset, swerve.outAt, swerve.backAt, path, swerve.blockAt))
+		return Hop(from, if (stepAt != null) end else end + speed * SWERVE_END_TICKS, feetY, ceiling, from, stepAt != null,
+			aim = aim, swerve = Swerve(swerve.offset, swerve.outAt, swerve.backAt, path, swerve.blockAt))
 	}
 
 	/**
 	 * Whether the box swerving moves free from [a] to [b] (along and across the line [dir] down at [floorY]) between [low]
-	 * and [high], wider than yours by [SWERVE_SIDE_MARGIN]: the flight steers a bit off the path planned. The larger axis
+	 * and [high], wider than yours by [side]: the flight steers a bit off the path planned. The larger axis
 	 * first, either when they're about even.
 	 */
-	private fun SafeContext.swerveMoveFree(dir: Vec3d, floorY: Double, a: Pair<Double, Double>, b: Pair<Double, Double>, low: Double, high: Double): Boolean {
+	private fun SafeContext.swerveMoveFree(
+		dir: Vec3d, floorY: Double, a: Pair<Double, Double>, b: Pair<Double, Double>, low: Double, high: Double, side: Double = SWERVE_SIDE_MARGIN,
+	): Boolean {
 		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
 		val across = across(dir)
 		val origin = Vec3d(startPos.x, floorY, startPos.z)
-		val half = GLIDE_SIZE / 2 + SWERVE_SIDE_MARGIN
+		val half = GLIDE_SIZE / 2 + side
 		val from = origin.add(forward.multiply(a.first)).add(across.multiply(a.second))
 		val to = origin.add(forward.multiply(b.first)).add(across.multiply(b.second))
 		fun swept(ax: Double, az: Double, bx: Double, bz: Double) =
@@ -3202,7 +3221,7 @@ abstract class ObstaclePassingMode(
 		val offsets = listOf(swerve.offset, swerve.offset + step, swerve.offset + 2 * step).filter { abs(it) <= passerConfig.maxDodge + 1e-6 }
 		val again = offsets.firstNotNullOfOrNull { offset ->
 			(outs + listOf(progress).filter { swerve.outAt > progress }).firstNotNullOfOrNull { outAt ->
-				swervePlan(Swerve(offset, outAt, swerve.backAt, swerve.path, swerve.blockAt), dir, linePoint.y) { if (why.isEmpty() || it == SWERVE_FREE) why = it }
+				swervePlan(Swerve(offset, outAt, swerve.backAt, swerve.path, swerve.blockAt), dir, linePoint.y, SWERVE_HELD_MARGIN) { if (why.isEmpty() || it == SWERVE_FREE) why = it }
 			}
 		}
 		when {
