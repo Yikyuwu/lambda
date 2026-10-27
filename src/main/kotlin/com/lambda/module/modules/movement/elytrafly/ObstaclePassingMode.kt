@@ -403,6 +403,10 @@ abstract class ObstaclePassingMode(
 		private const val LAYER_AFTER_HOLE = 1.5
 		/** How many ticks of a dip a block deep there has to be at least to bounce on down there, about a bounce, see [dipLane]. */
 		private const val DIP_BOUNCE_TICKS = 12
+		/** How far below the floor you started on you're down in a dip, see [intoDip]. */
+		private const val DIP_DOWN_MARGIN = 0.05
+		/** How far in from a dip's ends its sides are looked at for the swing, see [dipSwingClear]. */
+		private const val DIP_SWING_ENDS = 1.0
 		/** How far before a dip bounced on down into its start may be seen from another spot, the same dip, see [dipAt]. */
 		private const val DIP_AGAIN = 1.5
 		/** Blocks besides lava that hurt or hold you without stopping you, see [isHazard]. */
@@ -1522,7 +1526,7 @@ abstract class ObstaclePassingMode(
 			val along = progress(playerPos)
 			when {
 				along > dip.endInclusive || inDip || onLayer -> commitDip("passObstacles", null)
-				hop == null && along in dip && player.isGliding && playerPos.y < baseY - 0.05 -> intoDip()
+				hop == null && along in dip && player.isGliding && playerPos.y < baseY - DIP_DOWN_MARGIN -> intoDip()
 			}
 		}
 		// Down on the floor or up on a layer of blocks on it, the line follows to where you bounce. Not while walking,
@@ -4549,6 +4553,10 @@ abstract class ObstaclePassingMode(
 				!point.boxHasFloor() && Vec3d(point.x, low, point.z).boxHasFloor() && spaceEmpty(lowBox(point).expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
 			}
 			if (!clear) return@firstNotNullOfOrNull noDipLane("%+.2f not clear down in it".format(offset))
+			// Diagonally the box swings out into its stair-step sides, e.g. a narrow trench: too fast for it down there,
+			// it's glided over like a hole at the floor's height, see [dipSwingClear].
+			if (!dipSwingClear(lanePoint, dir, start, end, low, speed))
+				return@firstNotNullOfOrNull noDipLane("%+.2f too narrow down in it for the swing at %.2f".format(offset, speed))
 			// Up out of it again at its end, like onto a layer.
 			if (!isStepUp(Vec3d(lanePoint.x, low, lanePoint.z), dir, end))
 				return@firstNotNullOfOrNull noDipLane("%+.2f no step up out of it at its end".format(offset))
@@ -4562,6 +4570,27 @@ abstract class ObstaclePassingMode(
 				Hop(down.start, down.end, down.feetY, down.topY, down.obstacle, false, down = true, lane = lane, low = down.low).also { it.intoDip = true }
 			}
 		}.also { if (it == null) dipMiss = closestMiss ?: "no lane" }
+	}
+
+	/**
+	 * Whether the box bouncing on down in the dip [start] to [end] ahead of [lanePoint], its floor at [low], clears what's
+	 * beside it at [speed] and the push of the next bounce: diagonally a tick's move goes along one axis and then the
+	 * other, the box swings out across the way the farther the faster, e.g. into the stair-step sides of a narrow
+	 * trench, that up on the floor are below the box. Its ends are left to the glides down into it and up out of it.
+	 */
+	private fun SafeContext.dipSwingClear(lanePoint: Vec3d, dir: Vec3d, start: Double, end: Double, low: Double, speed: Double): Boolean {
+		val swing = sweep(dir, swingSpeed(speed))
+		if (swing < 0.01) return true
+		val across = across(dir)
+		val offsets = doubleArrayOf(-1.0, -0.5, 0.5, 1.0).map { across.multiply(it * swing) }
+		return generateSequence(start + DIP_SWING_ENDS) { it + HOP_SCAN_STEP }.takeWhile { it < end - DIP_SWING_ENDS }.all { along ->
+			val point = lanePoint.add(dir.multiply(along))
+			offsets.all { offset ->
+				val at = point.add(offset)
+				spaceEmpty(Box(at.x - GLIDE_SIZE / 2, low + passerConfig.minObstacleHeight, at.z - GLIDE_SIZE / 2,
+					at.x + GLIDE_SIZE / 2, low + MAX_BOUNCE_RISE, at.z + GLIDE_SIZE / 2))
+			}
+		}
 	}
 
 	/**
@@ -5924,7 +5953,20 @@ abstract class ObstaclePassingMode(
 	 * Over a dip a block deep glided down into, see [dipLane]: the line goes down there before landing, the landing's
 	 * held back like on the floor, see [touchFloor] and Fake Lag.
 	 */
-	private fun intoDip() {
+	private fun SafeContext.intoDip() {
+		// Faster now than when it was planned, the swing down there would run into its sides: the line stays up here,
+		// over it like a hole, see [dipSwingClear]. Down in it already, it's bounced on down there as planned.
+		if (player.y > baseY - DIP_DOWN_MARGIN) dipAt?.let { dip ->
+			val dir = getSnappedDir()
+			val linePoint = player.pos.findClosestPointOnLine(dir)
+			val at = progress(linePoint)
+			val speed = player.velocity.horizontalLength()
+			if (!dipSwingClear(linePoint.add(dipLaneAt), dir, max(dip.start - at, 0.0), dip.endInclusive - at, baseY - STEP_HEIGHT, speed)) {
+				ElytraFly.debug { "Not into the dip, too narrow down in it for the swing at %.2f, gliding on over it at y %.2f".format(speed, baseY) }
+				commitDip("intoDip", null)
+				return
+			}
+		}
 		ElytraFly.debug { "Into the dip, bouncing on at y %.2f".format(baseY - STEP_HEIGHT) }
 		startPos = Vec3d(startPos.x, baseY - STEP_HEIGHT, startPos.z)
 	}
