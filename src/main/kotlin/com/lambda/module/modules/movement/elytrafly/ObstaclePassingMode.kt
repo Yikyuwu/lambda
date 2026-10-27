@@ -365,6 +365,13 @@ abstract class ObstaclePassingMode(
 		private const val UNDER_HOLD_SEARCH_TICKS = 120
 		private const val UNDER_HOLD_SEARCH_STEP = 6
 		/**
+		 * The first this many ticks of that looked at each: close by the window to start holding in may be a tick or two,
+		 * between coming down low enough and bouncing up off the floor into it, e.g. at 0.9 a tick from y 120.16 3.8 before a
+		 * floating block 4.7 on, only holding from 3 ticks on gets under it, from 0 or 6 doesn't: 6 apart it was judged
+		 * not made at all, and the miss told was the unheld run's, scraping the floor right before it.
+		 */
+		private const val UNDER_HOLD_FINE_TICKS = 18
+		/**
 		 * How far gliding in low under something gets a tick of speed, before it's down to [UNDER_HOLD_END_SPEED] and on
 		 * the floor: in a 1-high gap about 38 blocks from 1.0 a tick, 23 from 0.8, 53 from 1.2.
 		 */
@@ -1809,6 +1816,14 @@ abstract class ObstaclePassingMode(
 					skipHopAt = hop.start
 					commitHop("passObstacles", null)
 					if (dodgeAfterMob) commitNoLane("passObstacles")
+				}
+				// What it was judged with past it looked at again from where it really is, while it can still brake for what's
+				// after it: nothing getting past that from where the glide really ends, planned again, see [thenStillFollows].
+				hop.then != null && !hop.held && passTicks % RELOOK_TICKS == 0 && hop.start - progress > brakeDistance() &&
+					!thenStillFollows(hop, snappedDir, progress) -> {
+					ElytraFly.debug { "Past the obstacle at %.1f nothing gets past what's after it any more from where the glide ends, looking again".format(hop.start - progress) }
+					dropThread()
+					commitHop("passObstacles", null)
 				}
 				else -> {
 					// Chooser Decides: a much faster way over the hole than the one it picked, switched to.
@@ -3680,8 +3695,11 @@ abstract class ObstaclePassingMode(
 			fromChainStart(start) {
 				// On its lane, the floor bounced off on the way to it is that lane's.
 				planHop(point, forward, next.distance, anyway = true)?.with(lane = lane)?.let { over ->
-					val made = canGetOver(over, end.at, speed)
-					if (made || hopShort <= CHAIN_SHORT)
+					// Under it with a little less room, like [holdingFor] holds for it: where the glide before really ends
+					// differs a bit from this, a tick later or higher, and the window to start holding in to get under is a
+					// tick or two, e.g. judged under a floating block 5.2 on, it ended 0.15 higher and missed it.
+					val made = canGetOver(if (over.under) over.with(topY = over.topY - UNDER_TOP_MARGIN) else over, end.at, speed)
+					if (made || chainNearMiss(over))
 						return@run Continuation(if (made) hopExitSpeed else speed, over, null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
 				}
 				// Touched down on like [topWay] does.
@@ -3718,6 +3736,34 @@ abstract class ObstaclePassingMode(
 		val top = hop.touch ?: return end
 		if (abs(end.y - top.y) > 1e-3 || end.climb > 1e-6) return end
 		return HopEnd(end.speed + bounceGain(), end.at, end.y, JUMP_VELOCITY)
+	}
+
+	/**
+	 * Whether the last [canGetOver] of what follows, [hop], missed by so little it's planned again from where it really is
+	 * once there, see [CHAIN_SHORT]. Not under something: its miss is the unheld or late run coming down onto the floor
+	 * below it, bounced off up into it, e.g. 0.005 below the room under a floating block while no tick to start holding
+	 * from got under it.
+	 */
+	private fun chainNearMiss(hop: Hop) = !hop.under && hopShort <= CHAIN_SHORT
+
+	/**
+	 * Whether what [hop] was judged with past it, [Hop.then], still follows from where gliding over it from here really
+	 * ends, judged again like [withWhatFollows] judged it: the glide's end judged at plan time differs from the flown one,
+	 * e.g. higher and later, and right past it there's no time left to get under or over what follows or to brake. What
+	 * follows from here is kept as what's flown on to past it. Not made from here at all, that's the glide's own checks.
+	 */
+	private fun SafeContext.thenStillFollows(hop: Hop, dir: Vec3d, progress: Double): Boolean {
+		val (judged, then) = sandboxed {
+			withHopMemo {
+				val end = blockHopRun(hop, progress, player.velocity.horizontalLength(), strict = false)?.let { bouncedOff(hop, it) }
+					?: return@withHopMemo false to null
+				true to continuation(hop.lane, dir, end)
+			}
+		}
+		if (!judged) return true
+		if (then == null) return false
+		hop.then = then.takeIf { it.hop != null || it.lane != null }
+		return true
 	}
 
 	/**
@@ -4913,7 +4959,7 @@ abstract class ObstaclePassingMode(
 		val across = across(dir)
 		then.hop?.let { next ->
 			if (progress >= next.end) return
-			if (!canGetOver(next, progress) && hopShort > CHAIN_SHORT) {
+			if (!canGetOver(next, progress) && !chainNearMiss(next)) {
 				ElytraFly.debug { "Past it, ${then.text} not made from here any more ($hopMiss), looking again" }
 				return
 			}
@@ -6402,10 +6448,14 @@ abstract class ObstaclePassingMode(
 			hop.hole && onLayer && risesBefore(hop, progress, from).any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, from, NEXT_BOUNCE_HEIGHT_MARGIN) }
 		// Under something, held from whenever it still makes it: [holdingFor] holds as late as it can, not from a set
 		// distance, the bounces before may take it up into it there.
-		hop.under -> (0 until UNDER_HOLD_SEARCH_TICKS step UNDER_HOLD_SEARCH_STEP).any { canHop(hop, progress, it, from) }
+		hop.under -> underHoldTicks().any { canHop(hop, progress, it, from) }
 		// The one from close by last, its miss is the one told and gone by, see [hopShort].
 		else -> !hop.hole && !hop.under && fromNextBounce(hop, progress) || canHop(hop, progress, from = from)
 	}
+
+	/** From how many ticks on holding the height under something is looked at by [canGetOver], see [UNDER_HOLD_FINE_TICKS]. */
+	private fun underHoldTicks() = (0 until UNDER_HOLD_FINE_TICKS).asSequence() +
+		(UNDER_HOLD_FINE_TICKS until UNDER_HOLD_SEARCH_TICKS step UNDER_HOLD_SEARCH_STEP).asSequence()
 
 	/**
 	 * In how many ticks the last bounces before [hop] rise, bouncing on from here at [progress], the last first: only the
