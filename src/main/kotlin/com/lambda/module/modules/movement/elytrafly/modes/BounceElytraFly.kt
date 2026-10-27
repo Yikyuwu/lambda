@@ -478,10 +478,11 @@ class BounceElytraFly(
 	 * so the bounce would take you up about 2 blocks, into a low roof. Pitched down the wings lift less and you fall
 	 * like without them at 90, so the pitch is just enough down for the climb to top out at [ceilingY].
 	 */
-	private fun SafeContext.coastPitch(room: Double = ceilingY() - player.y, climb: Double = player.velocity.y): Double {
+	private fun SafeContext.coastPitch(
+		room: Double = ceilingY() - player.y, climb: Double = player.velocity.y, gravity: Double = player.finalGravity,
+	): Double {
 		if (room <= 0) return 90.0
 		if (climb <= 0) return COAST_PITCH
-		val gravity = player.finalGravity
 		// Topping out after room blocks takes this much pull down, and gliding pulls gravity * (1 - 0.75 * cos² pitch).
 		val needed = climb * climb / (2 * room)
 		val cosSq = ((1 - needed / gravity) / 0.75).coerceIn(0.0, 1.0)
@@ -505,39 +506,69 @@ class BounceElytraFly(
 	/** Like the rotation request above, with the roof over you now. */
 	override fun SafeContext.bouncePitch(): (y: Double, climb: Double) -> Double {
 		val ceiling = ceilingY()
+		val taken = modeInputs as BounceInputs?
+		val gravity = taken?.gravity ?: player.finalGravity
+		val pace = taken?.pace ?: pacer.pace
+		val throttle = taken?.throttle ?: pacer.throttle
+		val smart = taken?.smartPitch ?: smartPitch
+		val pitch = taken?.pitch ?: pitch
+		fun throttled(bounce: Double, level: Double) = FlightPacer.throttled(pace, throttle, bounce, level)
 		return { y, climb ->
-			val level = coastPitch(ceiling - y, climb)
+			val level = coastPitch(ceiling - y, climb, gravity)
 			when {
 				// Diving onto a layer just climbed up over, like the flight, see [stepLanding].
-				stepLanding && climb <= 0 -> pacer.throttled(90.0, level)
+				stepLanding && climb <= 0 -> throttled(90.0, level)
 				// Slowing down climbs at first, flying level is the lower one to plan with.
-				slowingForChunks || slowingToFit || coasting || isDodging -> level
-				!smartPitch -> pacer.throttled(pitch, level)
-				climb > -0.2 -> pacer.throttled(90.0, level)
+				pace == FlightPacer.Pace.Slowing || slowingToFit || pace == FlightPacer.Pace.Coasting || isDodging -> level
+				!smart -> throttled(pitch, level)
+				climb > -0.2 -> throttled(90.0, level)
 				else -> 4.0
 			}
 		}
 	}
 
-	override fun SafeContext.bounceKey(): Any? =
-		listOf(ceilingY(), stepLanding, pacer.pace, pacer.throttle, slowingToFit, isDodging, smartPitch, pitch)
+	override fun SafeContext.bounceKey(): Any? = (modeInputs as BounceInputs?).let { taken ->
+		listOf(ceilingY(), stepLanding, taken?.pace ?: pacer.pace, taken?.throttle ?: pacer.throttle, slowingToFit, isDodging,
+			taken?.smartPitch ?: smartPitch, taken?.pitch ?: pitch)
+	}
+
+	/**
+	 * What [bouncePitch], [bounceKey], [maxFlightY] and [maxHopY] read of the world, you and the flight, taken for a route
+	 * search on the route thread, see [captureModeInputs]: whether it's the nether, your height and gravity, how far up
+	 * the roof over you is ([roofRise], null with none within [ROOF_SCAN_HEIGHT]), the pace and the pitch settings.
+	 */
+	private class BounceInputs(
+		val nether: Boolean, val y: Double, val gravity: Double, val roofRise: Double?, val pace: FlightPacer.Pace, val throttle: Double,
+		val smartPitch: Boolean, val pitch: Double,
+	)
+
+	override fun SafeContext.captureModeInputs(): Any =
+		BounceInputs(world.registryKey == World.NETHER, player.y, player.finalGravity, roofRise(), pacer.pace, pacer.throttle, smartPitch, pitch)
+
+	/** Whether it's the nether, as taken for a search on the route thread, see [BounceInputs]. */
+	private val SafeContext.inNether get() = (modeInputs as BounceInputs?)?.nether ?: (world.registryKey == World.NETHER)
 
 	/**
 	 * Over an obstacle up to [MAX_HOP_RISE] above the flight line, over two blocks too, in the nether below
 	 * [MAX_NETHER_HOP_Y]. A roof elsewhere is up to the glide's own checks of its way.
 	 */
 	override fun SafeContext.maxHopY() =
-		if (world.registryKey == World.NETHER) max(maxFlightY(), min(MAX_NETHER_HOP_Y, startPos.y + MAX_HOP_RISE))
+		if (inNether) max(maxFlightY(), min(MAX_NETHER_HOP_Y, startPos.y + MAX_HOP_RISE))
 		else max(maxFlightY(), startPos.y + MAX_HOP_RISE)
 
 	override fun SafeContext.maxFlightY() =
-		if (world.registryKey == World.NETHER) min(startPos.y + MAX_COAST_RISE, min(MAX_NETHER_LAYER_FLIGHT_Y, MAX_NETHER_FLIGHT_Y + layerHeight))
+		if (inNether) min(startPos.y + MAX_COAST_RISE, min(MAX_NETHER_LAYER_FLIGHT_Y, MAX_NETHER_FLIGHT_Y + layerHeight))
 		else startPos.y + MAX_COAST_RISE
 
 	/** The highest your feet may go while flying level: below a block roof, the nether roof, and not far above the flight line. */
 	private fun SafeContext.ceilingY(ceiling: Double = maxFlightY()): Double = ceilingYIn(ceiling) { findCeilingY(ceiling) }
 
 	private fun SafeContext.findCeilingY(ceiling: Double): Double {
+		// Taken for a search on the route thread: the first rise with the roof in the way, the same one the scan below stops at.
+		(modeInputs as BounceInputs?)?.let { taken ->
+			val rise = taken.roofRise?.takeIf { taken.y + it - ROOF_SCAN_STEP < ceiling } ?: return ceiling
+			return min(ceiling, taken.y + rise - ROOF_SCAN_STEP - ROOF_MARGIN)
+		}
 		var rise = ROOF_SCAN_STEP
 		while (rise <= ROOF_SCAN_HEIGHT && player.y + rise - ROOF_SCAN_STEP < ceiling) {
 			if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, rise, 0.0)))
@@ -545,6 +576,16 @@ class BounceElytraFly(
 			rise += ROOF_SCAN_STEP
 		}
 		return ceiling
+	}
+
+	/** How far up from you the first box with the roof in it is, by [ROOF_SCAN_STEP]s up to [ROOF_SCAN_HEIGHT], null with none, see [findCeilingY]. */
+	private fun SafeContext.roofRise(): Double? {
+		var rise = ROOF_SCAN_STEP
+		while (rise <= ROOF_SCAN_HEIGHT) {
+			if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, rise, 0.0))) return rise
+			rise += ROOF_SCAN_STEP
+		}
+		return null
 	}
 
 	/**
