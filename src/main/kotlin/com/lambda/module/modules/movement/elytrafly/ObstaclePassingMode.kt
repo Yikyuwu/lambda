@@ -2053,6 +2053,18 @@ abstract class ObstaclePassingMode(
 			noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
+		// [freeLane] looked up there only: down here the way over to the lane and along it up to where the glide up onto the
+		// layer leaves bounce height is free too, e.g. not along a railing on the floor beside the layer, the box swinging
+		// out into its stair-step corners diagonally. Up to a tick's move and the box short of the layer's start on the lane.
+		val across = across(dir)
+		val speed = player.velocity.horizontalLength()
+		val path = steerPath(from.subtract(linePoint).dotProduct(across), dir, lane.target.dotProduct(across), lane.lean,
+			distance + next.distance - speed * LEAN_TICKS, upAt, holdSpeed = true)
+		steerPathHit(linePoint, dir, path, upAt - 1 - speed)?.let { hit ->
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, not over to the lane past it ${lane.target.describe(dir)} down here: $hit".format(distance, next.distance) }
+			noPastOnLayerYet[at.roundToLong()] = passTicks
+			return false
+		}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, dodging past it ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
 		commitLane("dodgePastOnLayer", lane, progress(start) + next.distance)
 		commitLaneUpAt(progress(start))
@@ -3299,7 +3311,9 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.swerveBack(dir: Vec3d): Boolean {
 		val progress = progress(player.pos)
-		val offset = player.pos.subtract(startPos).dotProduct(across(dir))
+		// Until then on to the lane picked past what's dodged, e.g. swinging over to it still, not held where you are now:
+		// that may be right beside what the lane was picked to keep clear of.
+		val offset = dodge?.dotProduct(across(dir)) ?: player.pos.subtract(startPos).dotProduct(across(dir))
 		var why = ""
 		// Not back across the line before past what's dodged, it may be right beside you still.
 		val backAt = max(progress, dodgeEnd + SWERVE_PAST)
@@ -3327,15 +3341,20 @@ abstract class ObstaclePassingMode(
 		val across = across(dir)
 		val origin = Vec3d(startPos.x, floorY, startPos.z)
 		val half = GLIDE_SIZE / 2 + side
-		val from = origin.add(forward.multiply(a.first)).add(across.multiply(a.second))
-		val to = origin.add(forward.multiply(b.first)).add(across.multiply(b.second))
+		val start = origin.add(forward.multiply(a.first)).add(across.multiply(a.second))
+		val move = origin.add(forward.multiply(b.first)).add(across.multiply(b.second)).subtract(start)
 		fun swept(ax: Double, az: Double, bx: Double, bz: Double) =
 			spaceEmpty(Box(min(ax, bx) - half, low, min(az, bz) - half, max(ax, bx) + half, high, max(az, bz) + half))
-		val dx = abs(to.x - from.x)
-		val dz = abs(to.z - from.z)
-		if (dx >= dz - SWING_EVEN && !(swept(from.x, from.z, to.x, from.z) && swept(to.x, from.z, to.x, to.z))) return false
-		if (dz >= dx - SWING_EVEN && !(swept(from.x, from.z, from.x, to.z) && swept(from.x, to.z, to.x, to.z))) return false
-		return true
+		val dx = abs(move.x)
+		val dz = abs(move.z)
+		// The flight's ticks fall elsewhere along the way than the planned ones: a tick's move starting half-way too, the
+		// corner the box swings out to between the axes sweeps a stair-step corner beside the way the planned ones miss.
+		return (if (dx + dz > SWING_EVEN) listOf(0.0, 0.5) else listOf(0.0)).all { phase ->
+			val from = start.add(move.multiply(phase))
+			val to = from.add(move)
+			!(dx >= dz - SWING_EVEN && !(swept(from.x, from.z, to.x, from.z) && swept(to.x, from.z, to.x, to.z))) &&
+				!(dz >= dx - SWING_EVEN && !(swept(from.x, from.z, from.x, to.z) && swept(from.x, to.z, to.x, to.z)))
+		}
 	}
 
 	/**
@@ -4306,7 +4325,11 @@ abstract class ObstaclePassingMode(
 			swingFitSpeed = swingFit(linePoint, dir, if (dodge != null) dodgeOffset else 0.0, off, passerConfig.dodgeLookAhead.toDouble())
 		}
 		val speed = player.velocity.horizontalLength()
-		val capped = swingFitSpeed >= SWING_FIT_MIN && speed + BOUNCE_SPEED_GAIN > swingFitSpeed
+		// Nothing fitting even slow is an obstacle in the band from where you are over to the lane, e.g. what's dodged on the
+		// line swinging out past it, passed some other way: it says nothing about the walls beside the way, capped or not
+		// stays as it was, not sprinting again faster than they fit, every other look.
+		if (swingFitSpeed < SWING_FIT_MIN) return
+		val capped = speed + BOUNCE_SPEED_GAIN > swingFitSpeed
 		if (capped != swingCapped) ElytraFly.debug {
 			if (capped) "Bouncing on without the sprint, the box fits between what's beside the way ahead up to %.2f a tick, at %.2f".format(swingFitSpeed, speed)
 			else "Sprinting again, %s".format(if (swingFitSpeed.isFinite()) "the box fits up to %.2f a tick, at %.2f".format(swingFitSpeed, speed) else "nothing close beside the way")
