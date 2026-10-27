@@ -105,6 +105,8 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     private var ranBeforeBreaking = false
     private var rounds = 1
     private var putBackCount = 0
+    /** take runs once per click and the shulker stays, so the full ender chest is only warned about once. */
+    private var warnedFull = false
     private var hotbarCooldown = 0
     /** Why [beforeBreaking] failed. The ender chest is still broken first, so it isn't left behind. */
     private var beforeBreakingFailure: String? = null
@@ -179,7 +181,8 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
         EnderChestContainer.update(handler.containerStacks.map { it.copy() })
         handler.playerSlots.firstOrNull { putBack(it.stack) }?.let { used ->
             if (handler.containerSlots.none { it.stack.isEmpty }) {
-                if (putBackCount == 0) warn("The ender chest is full, keeping ${used.stack.name.string}")
+                if (!warnedFull) warn("The ender chest is full, keeping ${used.stack.name.string}")
+                warnedFull = true
             } else if (submit { quickMove(used.id) }) {
                 putBackCount++
                 LOG.info("[EnderChestRestock] put back ${used.stack.name.string}")
