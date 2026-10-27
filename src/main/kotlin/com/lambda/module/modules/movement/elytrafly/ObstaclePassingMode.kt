@@ -342,8 +342,12 @@ abstract class ObstaclePassingMode(
 		 * touch down has no speed yet, its bounce pushes you on. Walked again there, it took off and stopped over and over.
 		 */
 		private const val STILL_TICKS = 3
-		/** How much faster after it gliding over a top has to be than touching down on it to glide instead, see [glidingFaster]. */
-		private const val TOUCH_MIN_GAIN = 0.02
+		/**
+		 * How much faster after it gliding over a top has to be than touching down on it to glide instead, see [glidingFaster].
+		 * Bounced off, the bounces after it speed you up on, the glide only coasts: at 0.02 floating blocks were glided over
+		 * and come to slower.
+		 */
+		private const val TOUCH_MIN_GAIN = 0.08
 		/** How much higher than needed gliding over has to get over to be done instead of touching down, see [glidingFaster]. */
 		private const val PLAIN_GLIDE_MARGIN = 0.2
 		/** How many bounces of a layer before its end with a hole after it it's landed on as late as before, see [stepLanding]. */
