@@ -6665,7 +6665,7 @@ abstract class ObstaclePassingMode(
 	 * The pitch that gets [climb] closest to closing in on [target] smoothly, from [y] at [speed], sinking at most [sink]
 	 * a tick.
 	 */
-	private fun holdPitch(y: Double, climb: Double, speed: Double, target: Double, gravity: Double, sink: Double = HOLD_SINK): Double {
+	protected fun holdPitch(y: Double, climb: Double, speed: Double, target: Double, gravity: Double, sink: Double = HOLD_SINK): Double {
 		val wanted = ((target - y) * 0.3).coerceIn(-sink, MAX_HOLD_CLIMB)
 		fun miss(pitch: Int) = abs(glideClimb(climb, speed, pitch, gravity) - wanted)
 		// Every few degrees and then each one around the best, simulated a few hundred times a tick: plain loops, the

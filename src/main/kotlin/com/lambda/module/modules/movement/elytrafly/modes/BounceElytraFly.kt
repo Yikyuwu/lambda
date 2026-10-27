@@ -180,6 +180,11 @@ class BounceElytraFly(
 	private val coasting get() = pacer.pace == FlightPacer.Pace.Coasting
 	/** The pitch asked for last tick, to turn from it bit by bit. */
 	private var lastPitch = 0.0
+	/**
+	 * The height glided at while slowing down or coasting for the chunks, from the top of a bounce until down. Each
+	 * bounce pushed it on, and looking straight down the whole way up, the dive back from it took it to the floor again.
+	 */
+	private var chunkGlideY: Double? = null
 	private var hitRoof = false
 
 	private val flightPaused
@@ -242,6 +247,10 @@ class BounceElytraFly(
 
 			if (autoPitch) {
 				val hold = hopPitch()
+				// From the top of the bounce on, the server takes the rise like a jump until there, see below.
+				if (!(slowingForChunks || coasting) || player.isOnGround || !player.isGliding || hold != null) chunkGlideY = null
+				else if (chunkGlideY == null && player.velocity.y <= 0) chunkGlideY = min(player.y, ceilingY())
+				val glideY = chunkGlideY
 				val target = when {
 					// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
 					// Also right before chunks that aren't loaded yet, gliding on would carry you into them.
@@ -252,6 +261,9 @@ class BounceElytraFly(
 					player.isOnGround -> COAST_PITCH
 					// Holding the height over an obstacle instead of bouncing into it.
 					hold != null -> hold
+					// Gliding on at that height, looking as far up as keeps it there: the wings take speed for the lift
+					// and no bounce pushes it on, slowing down far more than bouncing slowly.
+					glideY != null -> holdPitch(player.y, player.velocity.y, player.velocity.horizontalLength(), glideY, player.finalGravity)
 					// Straight down the glide moves like a jump on foot, which the server does until it takes the start.
 					// Slowing down or coasting, the whole way up: easing up into the brake while still rising, on 2b2t the
 					// server set it back at the top of the bounce again and again, 120 times in a few hours.
@@ -445,6 +457,7 @@ class BounceElytraFly(
 			holdPings = false
 			pacer.reset()
 			hitRoof = false
+			chunkGlideY = null
 			// The floor below when started in the air, else packets would be held back up there.
 			groundY = startPos.y
 			queuedTicks = 0
