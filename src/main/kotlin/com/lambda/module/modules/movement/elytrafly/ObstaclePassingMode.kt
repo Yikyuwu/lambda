@@ -1492,7 +1492,7 @@ abstract class ObstaclePassingMode(
 		fun point(along: Double, off: Vec3d, y: Double) = startPos.add(dir.multiply(along)).add(off).let { Vec3d(it.x, y, it.z) }
 		val line = listOf(point(progress - PATH_LINE_BEHIND, Vec3d.ZERO, startPos.y), point(progress + passerConfig.dodgeLookAhead, Vec3d.ZERO, startPos.y))
 		val hop = hop
-		val glide = if (hop == null || hopRunMemo != null || chainStart != null) emptyList() else {
+		val glide = if (hop == null || hopRunMemo != null || simFrame != null) emptyList() else {
 			val trace = mutableListOf(progress to player.y)
 			sandboxed {
 				glideTrace = trace
@@ -1506,8 +1506,9 @@ abstract class ObstaclePassingMode(
 		}
 		val swerve = hop?.swerve?.path.orEmpty().map { (along, off) -> point(along, across.multiply(off), startPos.y) }
 		val touch = hop?.touch?.let { touch ->
-			val from = touchSpot(touch, dir, touch.range.start)
-			val to = touchSpot(touch, dir, touch.range.endInclusive)
+			val frame = currentFrame()
+			val from = touchSpot(frame, touch, dir, touch.range.start)
+			val to = touchSpot(frame, touch, dir, touch.range.endInclusive)
 			Box(from.x, touch.y, from.z, to.x, touch.y + 0.05, to.z).expand(GLIDE_SIZE / 2, 0.0, GLIDE_SIZE / 2)
 		}
 		val dodge = dodge
