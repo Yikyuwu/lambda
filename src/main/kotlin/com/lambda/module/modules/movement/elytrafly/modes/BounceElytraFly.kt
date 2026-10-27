@@ -51,6 +51,7 @@ import com.lambda.util.player.PlayerUtils.canStartGliding
 import com.lambda.util.player.PlayerUtils.canTakeoff
 import net.minecraft.client.input.KeyboardInput.getMovementMultiplier
 import net.minecraft.entity.Entity
+import net.minecraft.entity.mob.EndermanEntity
 import net.minecraft.network.packet.Packet
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket
@@ -94,6 +95,11 @@ class BounceElytraFly(
 		private const val COAST_PITCH_UP = -3.0
 		/** Looking this far up the wings lift more than gravity pulls, so you climb and slow down. */
 		private const val SLOW_PITCH = -10.0
+		/** How far endermen can be looked at angry, their follow range, and twice vanilla's stare cone for a margin. */
+		private const val STARE_RANGE = 64.0
+		private const val STARE_CONE = 0.05
+		/** Most degrees the pitch moves off to not look an enderman in the eyes. */
+		private const val MAX_STARE_DODGE = 20
 		/** Most the pitch turns a tick when slowing down or coasting. */
 		private const val MAX_PITCH_STEP = 15.0
 
@@ -279,8 +285,11 @@ class BounceElytraFly(
 					player.velocity.y > -0.2 -> pacer.throttled(90.0, coastPitch())
 					else -> 4.0
 				}
-				lastPitch = target
-				rotationRequest { pitch(target) }.submit()
+				// Not straight down, the server takes the rise like a jump, nor on the ground tick, see above. Nor holding the
+				// height for what's ahead, planned to the degree.
+				val calm = if (target == 90.0 || player.isOnGround || hold != null) target else notStaring(target)
+				lastPitch = calm
+				rotationRequest { pitch(calm) }.submit()
 			}
 
 			if (handlePassingObstacles()) return@listen
@@ -536,6 +545,30 @@ class BounceElytraFly(
 			rise += ROOF_SCAN_STEP
 		}
 		return ceiling
+	}
+
+	/**
+	 * [pitch], or the closest one up to [MAX_STARE_DODGE] degrees off that doesn't look a calm enderman in the eyes: looked
+	 * at from up to [STARE_RANGE] blocks, closer than vanilla's 1 - 0.025 / distance, it gets angry and attacks, e.g.
+	 * one on the highway ahead while flying level.
+	 */
+	private fun SafeContext.notStaring(pitch: Double): Double {
+		val eye = player.eyePos
+		val eyes = world.getOtherEntities(player, player.boundingBox.expand(STARE_RANGE)) {
+			it is EndermanEntity && it.isAlive && !it.isAngry && player.canSee(it)
+		}.map { it.eyePos.subtract(eye) }
+		if (eyes.isEmpty()) return pitch
+		val yaw = RotationManager.activeRotation.yaw.toFloat()
+		fun stares(at: Double): Boolean {
+			val look = Vec3d.fromPolar(at.toFloat(), yaw)
+			return eyes.any { look.dotProduct(it.normalize()) > 1.0 - STARE_CONE / it.length() }
+		}
+		if (!stares(pitch)) return pitch
+		for (off in 1..MAX_STARE_DODGE) {
+			(pitch + off).takeIf { it < 90 && !stares(it) }?.let { return it }
+			(pitch - off).takeIf { it > -90 && !stares(it) }?.let { return it }
+		}
+		return pitch
 	}
 
 	/** At most [MAX_PITCH_STEP] from the last pitch towards [target]. */
