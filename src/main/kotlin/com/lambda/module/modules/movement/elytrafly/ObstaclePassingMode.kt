@@ -206,6 +206,8 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val SWERVE_SIDE_MARGIN = 0.25
 		private const val SWERVE_ABOVE = 0.3
+		/** Room kept above the box held swerving, under the nether's roof at y 123 held at 122.31 there's 0.09. */
+		private const val SWERVE_HEAD_ROOM = 0.05
 		/** Above the floor the box looked at for what's in the way starts, and how high bouncing takes it, 1.11 up and the box. */
 		private const val SWERVE_FLOOR_GAP = 0.01
 		private const val SWERVE_BOUNCE_BAND = 1.8
@@ -3117,7 +3119,8 @@ abstract class ObstaclePassingMode(
 		// Where on the way bouncing isn't free, held there as low as it is.
 		val bounceLow = floorY + SWERVE_FLOOR_GAP
 		val bounceHigh = floorY + SWERVE_BOUNCE_BAND
-		val band = GLIDE_SIZE + SWERVE_ABOVE + HOP_MARGIN
+		// As low as the box is free, a bit above that, see [Hop.targetY].
+		val band = GLIDE_SIZE + HOP_MARGIN
 		var start: Double? = null
 		var end = 0.0
 		var feetY = floorY
@@ -3135,11 +3138,12 @@ abstract class ObstaclePassingMode(
 		// Free bouncing all the way, a dodge, see [freeLane].
 		val from = start ?: return null.also { miss(SWERVE_FREE) }
 		if (feetY + HOP_MARGIN > ceiling) return null.also { miss("held at y %.2f, too high".format(feetY + HOP_MARGIN)) }
-		// Held at that height all the way over, nothing higher up in the way.
-		if (path.zipWithNext().any { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, feetY + band) })
-			return null.also { miss("held at y %.2f, something higher up in the way".format(feetY + HOP_MARGIN)) }
-		// Held a bit higher than just over it: holding the height it sinks as it slows down.
+		// Held a bit higher than just over it: holding the height it sinks as it slows down. Under a roof, e.g. the
+		// nether's, only as high as there's room.
 		val aim = min(feetY + SWERVE_ABOVE, ceiling)
+		// Held at that height all the way over, nothing higher up in the way.
+		if (path.zipWithNext().any { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, aim + GLIDE_SIZE + SWERVE_HEAD_ROOM) })
+			return null.also { miss("held at y %.2f, something higher up in the way".format(aim)) }
 		return Hop(from, end + HOP_SCAN_STEP, feetY, ceiling, from, false, aim = aim, swerve = Swerve(swerve.offset, swerve.outAt, swerve.backAt, path))
 	}
 
