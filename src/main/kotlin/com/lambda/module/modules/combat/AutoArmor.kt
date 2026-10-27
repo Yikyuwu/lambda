@@ -126,7 +126,7 @@ object AutoArmor : Module(
 			?.modifier?.value
 			?: 0.0
 		return doubleArrayOf(
-			if (stack.isDamageable && 1 - (stack.damage.toFloat() / stack.maxDamage) < minDurabilityPercentage.toFloat() / 100) -Double.MAX_VALUE else 0.0,
+			if (stack.isDamageable && stack.durabilityFraction < minDurabilityPercentage.toFloat() / 100) -Double.MAX_VALUE else 0.0,
 			if ((overriddenElytraPriority ?: elytraPriority) && stack.item == Items.ELYTRA) 1.0 else 0.0,
 			attribute(EntityAttributes.ARMOR),
 			attribute(EntityAttributes.ARMOR_TOUGHNESS),
