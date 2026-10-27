@@ -310,9 +310,13 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
                     }
                 }
             }
-            Phase.Opening -> if (++openAttempts < MAX_OPEN_ATTEMPTS) resume() else {
-                warn("Couldn't open the ender chest ($reason), breaking it")
-                collect()
+            Phase.Opening -> {
+                // A screen whose slots never loaded is still up, the retry would click the block with it open.
+                closeContainer()
+                if (++openAttempts < MAX_OPEN_ATTEMPTS) resume() else {
+                    warn("Couldn't open the ender chest ($reason), breaking it")
+                    collect()
+                }
             }
             Phase.Taking -> {
                 warn("Failed while taking items ($reason)")

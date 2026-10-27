@@ -40,7 +40,7 @@ import net.minecraft.util.math.BlockPos
  */
 abstract class ShulkerTask<P : StationPhase>(
     title: String,
-    opening: P,
+    private val opening: P,
     automated: Automated,
     holdWhile: () -> Boolean,
     private val placing: P,
@@ -144,6 +144,8 @@ abstract class ShulkerTask<P : StationPhase>(
     /** Each phase recovers its own way, since a placed shulker must never be left behind. */
     final override fun SafeContext.stepFailed(reason: String?) {
         cancelStep()
+        // A screen whose slots never loaded is still up, the retry would click the block with it open.
+        if (phase == opening) closeContainer()
 
         when (phase) {
             placing -> {
