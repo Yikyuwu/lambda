@@ -124,6 +124,8 @@ abstract class StationTask<P : StationPhase>(
     private val settleTimer = TickTimer()
     /** The chat or game menu open before a container, shown again once it's closed. */
     private var previousScreen: Screen? = null
+    /** The screen [open] opened, so a containerStep never clicks in one the server opened instead. */
+    private var openedHandler: ScreenHandler? = null
 
     /** Whether the last inventory action had time to settle. */
     protected val settled get() = settleTimer.hasSurpassed(moveDelay)
@@ -243,7 +245,8 @@ abstract class StationTask<P : StationPhase>(
             return failure("${pos.toShortString()} is ${pos.toCenterPos().distanceTo(player.pos).toInt()} blocks away. Did the station move?")
         enter(opening)
         previousScreen = mc.currentScreen.takeIf { it !is HandledScreen<*> }
-        runStep(OpenContainerTask(pos, this@StationTask)) {
+        runStep(OpenContainerTask(pos, this@StationTask)) { handler ->
+            openedHandler = handler
             clicks = 0
             this@StationTask.maxClicks = maxClicks
             resynced = false
@@ -261,6 +264,7 @@ abstract class StationTask<P : StationPhase>(
     ) {
         val handler = player.currentScreenHandler.takeIf { it != player.playerScreenHandler }
             ?: return phaseFailed("the container closed")
+        if (handler !== openedHandler) return phaseFailed("another screen opened")
         if (!settled) return
         // An item left on the cursor gets a few more clicks, closing would drop it with a full inventory.
         val cursorFull = !handler.cursorStack.isEmpty
