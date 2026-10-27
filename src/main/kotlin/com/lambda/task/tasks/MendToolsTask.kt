@@ -28,6 +28,7 @@ import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotat
 import com.lambda.interaction.managers.rotating.RotationSettle
 import com.lambda.threading.runSafeAutomated
 import com.lambda.util.CommunicationUtils.info
+import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.EntityUtils.isInReach
 import com.lambda.util.TickTimer
 import com.lambda.util.combat.CombatUtils.attackEntity
@@ -90,6 +91,7 @@ class MendToolsTask @Ta5kBuilder constructor(
         Dumping("dumping mended items", 200),
         Taking("taking damaged items", 200),
         Mending("mending", null),
+        PuttingBack("putting the armor back", null),
     }
 
     private var leftInChest = 0
@@ -107,6 +109,9 @@ class MendToolsTask @Ta5kBuilder constructor(
     private var damagedAtStart = 0
     /** What was worn before mending, by armor slot id, to put back when done. Empty for a slot that was empty. */
     private val originalArmor = mutableMapOf<Int, ItemStack>()
+    /** Why it gave up mending, it fails with this once what was worn is back. */
+    private var giveUpReason = ""
+    private var putBackTicks = 0
     private val hitTimer = TickTimer()
     private val stallTimer = TickTimer()
 
@@ -130,6 +135,7 @@ class MendToolsTask @Ta5kBuilder constructor(
             Phase.Dumping -> containerStep { dump(it) }
             Phase.Taking -> containerStep(onDone = { finishTaking() }) { take(it) }
             Phase.Mending -> mend()
+            Phase.PuttingBack -> putBack()
             Phase.Opening -> {}
         }
     }
@@ -232,8 +238,8 @@ class MendToolsTask @Ta5kBuilder constructor(
         if (player.blockPos != standPos) {
             when {
                 !standPos.isWithinDistance(player.pos, MAX_STAND_DISTANCE) ->
-                    failure("The stand position ${standPos.toShortString()} is far away. Did the farm move?")
-                ++walkTicks > STAND_TIMEOUT_TICKS -> failure("Couldn't get to the stand position ${standPos.toShortString()}")
+                    giveUp("The stand position ${standPos.toShortString()} is far away. Did the farm move?")
+                ++walkTicks > STAND_TIMEOUT_TICKS -> giveUp("Couldn't get to the stand position ${standPos.toShortString()}")
                 !BaritoneHandler.isActive -> BaritoneHandler.setGoalAndPath(GoalBlock(standPos))
             }
             stallTimer.reset()
@@ -251,18 +257,18 @@ class MendToolsTask @Ta5kBuilder constructor(
             stallTimer.reset()
         }
         if (stallTimer.hasSurpassed(config.stallTimeout * 20)) {
-            failure("${mending.joinToString { it.name.string }} wasn't mended for ${config.stallTimeout}s. Is the farm still running?")
+            giveUp("${mending.joinToString { it.name.string }} wasn't mended for ${config.stallTimeout}s. Is the farm still running?")
             return false
         }
 
         val sword = player.hotbarStacks.indexOfFirst(config::isSword)
         if (sword == -1) {
-            failure("No sword with Sweeping Edge III and no Fire Aspect in the hotbar")
+            giveUp("No sword with Sweeping Edge III and no Fire Aspect in the hotbar")
             return false
         }
         val swordStack = player.hotbarStacks[sword]
         if (swordStack.isDamageable && swordStack.durabilityFraction < MIN_SWORD_DURABILITY) {
-            failure("${swordStack.name.string} is about to break")
+            giveUp("${swordStack.name.string} is about to break")
             return false
         }
         if (!HotbarRequest(sword, this@MendToolsTask, nowOrNothing = false).submit().done) return false
@@ -274,7 +280,7 @@ class MendToolsTask @Ta5kBuilder constructor(
         // Right after joining entities take a moment to show up.
         if (target == null) {
             if (++missingTicks > MISSING_TIMEOUT_TICKS)
-                failure("No armor stand in reach")
+                giveUp("No armor stand in reach")
             return false
         }
         missingTicks = 0
@@ -349,6 +355,25 @@ class MendToolsTask @Ta5kBuilder constructor(
         return true
     }
 
+    /** Gives up mending, but puts back what was worn first like when done, so the damaged armor doesn't stay on. */
+    private fun SafeContext.giveUp(reason: String) {
+        if (originalArmor.isEmpty()) return failure(reason)
+        BaritoneHandler.cancel()
+        giveUpReason = reason
+        putBackTicks = 0
+        enter(Phase.PuttingBack)
+    }
+
+    private fun SafeContext.putBack() {
+        // Clicks the server keeps refusing would hold it here forever.
+        if (++putBackTicks > PUT_BACK_TIMEOUT_TICKS) {
+            warn("Couldn't put all of your armor back")
+            return failure(giveUpReason)
+        }
+        if (player.currentScreenHandler != player.playerScreenHandler || !settled) return
+        if (!restoreArmor()) failure(giveUpReason)
+    }
+
     private fun restartStallWatch() {
         lastDamage = -1
         stallTimer.reset()
@@ -364,6 +389,8 @@ class MendToolsTask @Ta5kBuilder constructor(
         private const val STAND_TIMEOUT_TICKS = 1200
         private const val MAX_STAND_DISTANCE = 16.0
         private const val MISSING_TIMEOUT_TICKS = 100
+        /** Enough for a click per armor slot at the longest move delay. */
+        private const val PUT_BACK_TIMEOUT_TICKS = 400
         private const val ARMOR_STAND_SEARCH_EXTRA = 2.0
         private const val LAG_MS = 500L
         private const val MIN_SWORD_DURABILITY = 0.05f
