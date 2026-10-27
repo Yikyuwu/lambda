@@ -28,6 +28,7 @@ import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.gui.components.ClickGuiLayout
 import com.lambda.interaction.handlers.FriendHandler
 import com.lambda.module.Module
+import com.lambda.module.modules.combat.AutoTotem
 import com.lambda.module.modules.network.AutoReconnect
 import com.lambda.module.tag.ModuleTag
 import com.lambda.sound.SoundHandler.playSound
@@ -75,6 +76,7 @@ import net.minecraft.entity.player.PlayerEntity
 import net.minecraft.entity.projectile.ProjectileEntity
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
+import net.minecraft.screen.slot.SlotActionType
 import net.minecraft.network.message.LastSeenMessageList
 import net.minecraft.network.packet.c2s.play.ChatMessageC2SPacket
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket
@@ -133,6 +135,9 @@ object AutoDisconnect : Module(
     private const val CRYSTALS_GROUP = "Crystals Settings"
     private const val CREEPERS_GROUP = "Creepers Settings"
     private const val TOTEM_GROUP = "Totem Settings"
+    /** The offhand's slot in the player's inventory screen, and the swap button that takes a slot to it. */
+    private const val OFFHAND_SLOT = 45
+    private const val OFFHAND_BUTTON = 40
     private const val PLAYERS_GROUP = "Players Settings"
     private const val ARMOR_GROUP = "Armor Settings"
     private const val ENTITY_GROUP = "Entity Settings"
@@ -302,6 +307,12 @@ object AutoDisconnect : Module(
     private fun SafeContext.requestDisconnect(reasonText: Text, disarmedTrigger: Reason? = null): Boolean {
         if (player.gameMode != GameMode.SURVIVAL && player.gameMode != GameMode.ADVENTURE || disconnectInProgress) return false
         disconnectInProgress = true
+        // A totem that popped with what triggers this, e.g. a lag spike's hits all coming in at once, gets no new one in
+        // hand that tick before leaving: back again you'd have none there. Swapped in right away, sent before leaving.
+        if (AutoTotem.isEnabled && player.offHandStack.item != Items.TOTEM_OF_UNDYING && player.currentScreenHandler === player.playerScreenHandler)
+            player.playerScreenHandler.slots
+                .firstOrNull { it.id != OFFHAND_SLOT && it.stack.item == Items.TOTEM_OF_UNDYING }
+                ?.let { interaction.clickSlot(player.playerScreenHandler.syncId, it.id, OFFHAND_BUTTON, SlotActionType.SWAP, player) }
         // Never reconnected automatically after leaving on purpose, AutoReconnect stays on for kicks and restarts.
         AutoReconnect.leftOnPurpose = true
         if (AutoReconnect.isEnabled && disableAutoReconnect) AutoReconnect.disable()
