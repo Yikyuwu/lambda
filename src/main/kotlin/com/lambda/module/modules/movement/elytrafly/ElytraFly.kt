@@ -366,9 +366,12 @@ object ElytraFly : Module(
     /** Whether the chooser that only logs runs, see [ObstaclePassingMode]. */
     val choosing get() = debugLog && chooserLog
 
+    /** While above 0 [debug] writes nothing, e.g. while the route planner looks from where a route is, see [ObstaclePassingMode]. */
+    var debugMuted = 0
+
     /** Writes [message] to the game log with [debugLog]. */
     fun debug(message: () -> String) {
-        if (debugLog) runSafe { LOG.info("[ElytraFly] at ${player.pos.short}: ${message()}") }
+        if (debugLog && debugMuted == 0) runSafe { LOG.info("[ElytraFly] at ${player.pos.short}: ${message()}") }
     }
 
     private var traceTicks = 0
