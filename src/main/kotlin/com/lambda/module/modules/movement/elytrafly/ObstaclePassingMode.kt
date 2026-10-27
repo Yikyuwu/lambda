@@ -521,6 +521,8 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_LANE_OFF = 0.15
 		/** How much later steering in toward the lane over a top in a hole is tried next, see [touchLane]. */
 		private const val TOUCH_SWITCH_STEP = 0.5
+		/** How long a top steered in toward too fast to get over is left out of touching down, see [steerInMisses]. */
+		private const val STEER_MISS_TICKS = 100
 		/** How long until a hole after a layer not gotten over yet from far is looked at again, see [layerHole]. */
 		private const val LAYER_HOLE_AGAIN_TICKS = 5
 		/**
@@ -913,6 +915,8 @@ abstract class ObstaclePassingMode(
 		val middle = (range.start + range.endInclusive) / 2
 		/** Over a hole, steered toward [lane] only from here along the line on, past what's in the way on it before. */
 		var switchAt = Double.NEGATIVE_INFINITY
+		/** Whether the flight looked at getting over it from where it really is at [switchAt] yet, see [steerInMisses]. */
+		var steerChecked = false
 		/** Stretches along the line flown tilted away from the line, the box swinging out only that way, see [leanYaw]. */
 		var leans: List<ClosedFloatingPointRange<Double>> = emptyList()
 		/**
@@ -1045,6 +1049,12 @@ abstract class ObstaclePassingMode(
 	private var dipMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
 	private var touchMiss = ""
+	/**
+	 * The top last given up on steering in toward it, too fast to get the box over it, see [steerInMisses]: the line it's
+	 * on, how far along it its middle is, its height and when, left out of [touchLane] for [STEER_MISS_TICKS].
+	 */
+	private var steerMiss: SteerMiss? = null
+	private class SteerMiss(val startPos: Vec3d, val middle: Double, val y: Double, val at: Int)
 
 	/**
 	 * The touch-down the last [touchLane] picked that missed only by a little, under [ANYWAY_SHORT] short or within the
@@ -1835,6 +1845,11 @@ abstract class ObstaclePassingMode(
 				// Past the top without touching down on it, held low for it: planned again from here.
 				hop.touch.let { it != null && !hop.touched && progress > it.range.endInclusive + TOUCH_NEAR } -> {
 					ElytraFly.debug { "Missed the top to touch down on, looking again" }
+					commitHop("passObstacles", null)
+				}
+				// Steering in toward the top's lane from here on, it doesn't get over it at the speed it has: planned again from
+				// here without it, gliding over the hole.
+				hop.touch.let { it != null && !hop.touched && hop.hole && steerInMisses(it, progress, snappedDir) } -> {
 					commitHop("passObstacles", null)
 				}
 				inTheWay != null -> {
@@ -6236,6 +6251,9 @@ abstract class ObstaclePassingMode(
 		// The way over to it free, the box swinging out to either side.
 		fun reachable(plan: Plan): Boolean {
 			if (plan.touch.middle - progress < speed * (TOUCH_DIVE_TICKS + 1)) return false
+			// Given up on steering in toward it just now, see [steerInMisses].
+			if (steerMiss.let { it != null && it.startPos == startPos && flightTicks - it.at <= STEER_MISS_TICKS &&
+					abs(it.middle - plan.touch.middle) <= 1.0 && abs(it.y - plan.touch.y) < 0.01 }) return false
 			// Steering in from [Touch.switchAt] on, by then, else by the top.
 			val by = if (plan.touch.switchAt > Double.NEGATIVE_INFINITY) min(plan.touch.switchAt, plan.touch.range.start) else plan.touch.range.start
 			if (by <= progress) return abs(off - plan.lane) <= TOUCH_LANE_OFF
@@ -6297,6 +6315,42 @@ abstract class ObstaclePassingMode(
 		}
 		touchMiss = miss ?: "no lane over a top free past the hole (${lanes.size} lanes over one, $free free)${tried.take(TOUCH_PLANS_TRIED).joinToString("") { ", $it" }}"
 		return hop
+	}
+
+	/**
+	 * Steering in toward the lane over [touch] in a hole from its [Touch.switchAt] on, see [touchLane]: once there, from
+	 * where it really is, heading the way it does at the speed it has, the turn taking on a tick later, whether it doesn't
+	 * get [TOUCH_MIN_OVERLAP] of the box over the top anywhere along it. Planned at [TOUCH_STEER_SPEED], it may come in
+	 * slow or fast: e.g. at 1.0 a tick from 0.09 farther out than the lane it came on it was 0.73 across over a top it
+	 * touched down on at 0.6 a tick, 0.52 across, and missed by a corner. Then left out of [touchLane] a while.
+	 */
+	private fun SafeContext.steerInMisses(touch: Touch, progress: Double, dir: Vec3d): Boolean {
+		if (touch.switchAt == Double.NEGATIVE_INFINITY || touch.steerChecked || progress < touch.switchAt) return false
+		touch.steerChecked = true
+		val across = across(dir)
+		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val speed = player.velocity.horizontalLength()
+		if (speed < PAST_TOP_MIN_SPEED) return false
+		val heading = atan2(player.velocity.dotProduct(across), player.velocity.dotProduct(forward))
+		val along = progress + speed * cos(heading)
+		val off = player.pos.subtract(startPos).dotProduct(across) + speed * sin(heading)
+		val path = steerOffsets(off, touch.lane.dotProduct(across), speed, touch.range.endInclusive - along, heading)
+		// The most of the box over it, between the ticks too, the flight's ticks fall anywhere along it.
+		var most = 0.0
+		for (i in 0 until path.lastIndex) for (k in 0 until 4) {
+			val (a0, o0) = path[i]
+			val (a1, o1) = path[i + 1]
+			val at = along + a0 + (a1 - a0) * k / 4
+			if (at !in touch.range) continue
+			most = max(most, topOverlap(startPos.add(forward.multiply(at)).add(across.multiply(o0 + (o1 - o0) * k / 4)), touch.y))
+		}
+		if (most >= TOUCH_MIN_OVERLAP) return false
+		steerMiss = SteerMiss(startPos, touch.middle, touch.y, flightTicks)
+		ElytraFly.debug {
+			"Steering in toward the top to touch down on at %.2f a tick from %+.2f across, at most %.0f%% of the box gets over it, not touching down on it"
+				.format(speed, player.pos.subtract(startPos).dotProduct(across), most / (GLIDE_SIZE * GLIDE_SIZE) * 100)
+		}
+		return true
 	}
 
 	/** Whether there's a top at [y] at [x], [z]: a whole block ending there with air above it. */
@@ -7653,8 +7707,8 @@ abstract class ObstaclePassingMode(
 	 * Steering from flying along the line [from] across it over to [to] at [speed], like [steerPath]: how far along and
 	 * across each tick, for [distance] along the line.
 	 */
-	private fun steerOffsets(from: Double, to: Double, speed: Double, distance: Double): List<Pair<Double, Double>> {
-		var heading = 0.0
+	private fun steerOffsets(from: Double, to: Double, speed: Double, distance: Double, startHeading: Double = 0.0): List<Pair<Double, Double>> {
+		var heading = startHeading
 		var off = from
 		var along = 0.0
 		val path = mutableListOf(along to off)
