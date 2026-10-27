@@ -3185,6 +3185,12 @@ abstract class ObstaclePassingMode(
 					ElytraFly.debug { "Not through the opening %+.2f across: $hit".format(thread.centre) }
 					continue
 				}
+				// What's low, e.g. a railing on the floor, all the way to it: each bounce comes down to the floor, the hold
+				// only gets up over it once it's risen.
+				steerPathHit(linePoint, dir, approach, over.start - progress - 1, high = STEP_HEIGHT)?.let { hit ->
+					ElytraFly.debug { "Not through the opening %+.2f across, low: $hit".format(thread.centre) }
+					continue
+				}
 				if (centres.any { abs(it - thread.centre) < THREAD_CENTRES_APART }) continue
 				centres += thread.centre
 				ways += HoleWay("thread", over.with(lane = across.multiply(thread.centre)), null, "%+.2f across".format(thread.centre), thread)
@@ -6867,10 +6873,10 @@ abstract class ObstaclePassingMode(
 	 * tick moves along one axis and then the other, the box swings out to the corner between, see [sweep]. As high as
 	 * [obstacleHit] looks. Where along the line, null when it's free.
 	 */
-	private fun SafeContext.steerPathHit(linePoint: Vec3d, dir: Vec3d, path: List<SteerState>, until: Double): String? {
+	private fun SafeContext.steerPathHit(linePoint: Vec3d, dir: Vec3d, path: List<SteerState>, until: Double, high: Double? = null): String? {
 		val across = across(dir)
 		val bottom = linePoint.y + passerConfig.minObstacleHeight
-		val top = linePoint.y + if (passerConfig.headHitters) 1.99 else passerConfig.minObstacleHeight + WIDTH_MARGIN
+		val top = linePoint.y + (high ?: if (passerConfig.headHitters) 1.99 else passerConfig.minObstacleHeight + WIDTH_MARGIN)
 		fun free(x: Double, z: Double) = spaceEmpty(Box(x - GLIDE_SIZE / 2, bottom, z - GLIDE_SIZE / 2, x + GLIDE_SIZE / 2, top, z + GLIDE_SIZE / 2)
 			.expand(LANE_CLEAR_MARGIN, 0.0, LANE_CLEAR_MARGIN))
 		fun point(state: SteerState) = linePoint.add(dir.multiply(state.along)).add(across.multiply(state.offset))
