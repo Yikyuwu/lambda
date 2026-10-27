@@ -30,6 +30,7 @@ import com.lambda.util.NamedEnum
 import net.minecraft.client.sound.PositionedSoundInstance
 import net.minecraft.sound.SoundEvent
 import net.minecraft.sound.SoundEvents
+import net.minecraft.util.Util
 import net.minecraft.util.math.Vec3d
 import org.lwjgl.glfw.GLFW
 import java.io.File
@@ -40,19 +41,19 @@ object StuckAlarm : Module(
     description = "Alerts you when you stop moving, e.g. when a digger or highway bot gets stuck",
     tag = ModuleTag.PLAYER,
 ) {
-    private val timeout by setting("Timeout", 30, 5..600, 1, unit = " s", description = "How long you must not have moved before the alarm goes off.")
-    private val minDistance by setting("Min Distance", 2.0, 0.5..32.0, 0.5, unit = " blocks", description = "Distance you must move within the timeout to count as moving.")
-    private val ignoreVertical by setting("Ignore Vertical", false, description = "Only count horizontal movement.")
-    private val mode by setting("Mode", AlarmMode.Once, description = "Alarm once and then stay quiet, or keep alarming until you react.")
-    private val repeatInterval by setting("Repeat Interval", 30, 5..600, 1, unit = " s", description = "How often the alarm repeats while you are still stuck.", visibility = { mode == AlarmMode.Repeat })
-    private val desktopNotification by setting("Desktop Notification", true, description = "Show one OS notification per stuck event that stays until you close it.")
-    private val osSound by setting("OS Sound", OsSound.SoftChime, description = "Sound played through the OS, independent of Minecraft's volume.")
-    private val osVolume by setting("OS Volume", 0.7, 0.0..1.0, 0.05, description = "Volume of the OS alarm sound.", visibility = { osSound != OsSound.None })
-    private val sound by setting("Sound", AlarmSound.None, description = "In-game sound played when the alarm goes off.")
-    private val volume by setting("Volume", 1.0, 0.0..1.0, 0.05, description = "Volume of the in-game alarm sound.", visibility = { sound != AlarmSound.None })
-    private val chat by setting("Chat", true, description = "Send a chat message when the alarm goes off.")
-    private val toast by setting("Toast", true, description = "Show a toast when the alarm goes off.")
-    private val flashWindow by setting("Flash Window", true, description = "Request window attention (flashes the taskbar) when the alarm goes off.")
+    private val timeout by setting("Timeout", 30, 5..600, 1, "How long you must not move before the alarm goes off", " s")
+    private val minDistance by setting("Min Distance", 2.0, 0.5..32.0, 0.5, "Distance to move within the timeout to count as moving", " blocks")
+    private val ignoreVertical by setting("Ignore Vertical", false, "Only count horizontal movement")
+    private val mode by setting("Mode", AlarmMode.Once, "Alarm once, or keep alarming until you react")
+    private val repeatInterval by setting("Repeat Interval", 30, 5..600, 1, "How often the alarm repeats", " s") { mode == AlarmMode.Repeat }
+    private val desktopNotification by setting("Desktop Notification", true, "Show an OS notification that stays until you close it")
+    private val osSound by setting("OS Sound", OsSound.SoftChime, "Sound played through the OS, independent of the game volume")
+    private val osVolume by setting("OS Volume", 0.7, 0.0..1.0, 0.05, "Volume of the OS sound") { osSound != OsSound.None }
+    private val sound by setting("Sound", AlarmSound.None, "In-game alarm sound")
+    private val volume by setting("Volume", 1.0, 0.0..1.0, 0.05, "Volume of the in-game sound") { sound != AlarmSound.None }
+    private val chat by setting("Chat", true, "Send a chat message")
+    private val toast by setting("Toast", true, "Show a toast")
+    private val flashWindow by setting("Flash Window", true, "Flash the taskbar")
 
     enum class AlarmMode(
         override val displayName: String,
@@ -83,30 +84,35 @@ object StuckAlarm : Module(
         Pling("Pling", "Note block pling", { SoundEvents.BLOCK_NOTE_BLOCK_PLING.value() }),
         Bell("Bell", "Village bell", { SoundEvents.BLOCK_BELL_USE }),
         Anvil("Anvil", "Anvil landing", { SoundEvents.BLOCK_ANVIL_LAND }),
-        Levelup("Level Up", "Experience level up", { SoundEvents.ENTITY_PLAYER_LEVELUP }),
+        LevelUp("Level Up", "Experience level up", { SoundEvents.ENTITY_PLAYER_LEVELUP }),
         None("None", "No sound", { null }),
     }
 
     private const val TITLE = "Lambda - StuckAlarm"
 
-    /** KDE's Ocean theme is much softer than the freedesktop one, so it is preferred when installed. */
+    /** KDE's Ocean sounds are softer, so they're preferred when installed. */
     private val soundDirs = listOf("/usr/share/sounds/ocean/stereo", "/usr/share/sounds/freedesktop/stereo")
 
-    private val osName = System.getProperty("os.name").lowercase()
-    private val isLinux = "linux" in osName
-    private val isMac = "mac" in osName
+    private val isLinux = Util.getOperatingSystem() == Util.OperatingSystem.LINUX
+    private val isMac = Util.getOperatingSystem() == Util.OperatingSystem.OSX
 
     private var anchor: Vec3d? = null
     private var anchorTime = 0L
     private var lastAlarm = 0L
     private var alarming = false
 
-    /** The running notification process; it exits once the user closes the notification. */
-    private var notification: Process? = null
+    /** The last notification. A new one replaces it, so they don't pile up over a long session. */
+    @Volatile private var notification: DesktopNotification? = null
+
+    /** [process] exits once the notification is closed. [id] lets a new one replace it, where that's possible. */
+    private class DesktopNotification(val process: Process, val id: String?)
 
     init {
         onEnable { reset() }
-        onDisable { reset() }
+        onDisable {
+            reset()
+            notification?.process?.destroy()
+        }
 
         listen<TickEvent.Pre> {
             val now = System.currentTimeMillis()
@@ -126,13 +132,13 @@ object StuckAlarm : Module(
             if (alarming) {
                 if (mode == AlarmMode.Once || !notificationOpen()) return@listen
                 if (now - lastAlarm < repeatInterval * 1000L) return@listen
-            } else if (desktopNotification) {
-                notification = sendDesktopNotification(message(stuckFor))
             }
 
+            val message = message(stuckFor)
+            if (!alarming && desktopNotification) Util.getIoWorkerExecutor().execute { sendDesktopNotification(message) }
             alarming = true
             lastAlarm = now
-            alarm(message(stuckFor))
+            alarm(message)
         }
     }
 
@@ -141,7 +147,7 @@ object StuckAlarm : Module(
         if (chat) warn(message)
         if (toast) toast(message, LogLevel.Warn)
         if (flashWindow) GLFW.glfwRequestWindowAttention(mc.window.handle)
-        playOsSound()
+        Util.getIoWorkerExecutor().execute { playOsSound() }
     }
 
     private fun message(stuckFor: Long) = "You haven't moved for ${stuckFor / 1000}s!"
@@ -153,13 +159,27 @@ object StuckAlarm : Module(
     }
 
     /** True while the notification is still shown, or when there is none to dismiss. */
-    private fun notificationOpen() = notification?.isAlive != false
+    private fun notificationOpen() = notification?.process?.isAlive != false
 
     /** `notify-send --wait` and `display alert` both block until the notification is closed. */
-    private fun sendDesktopNotification(message: String): Process? = when {
-        isLinux -> exec("notify-send", "--wait", "-u", "critical", "-t", "0", "-a", "Lambda", "-i", "dialog-warning", TITLE, message)
-        isMac -> exec("osascript", "-e", "display alert \"$TITLE\" message \"$message\" as critical")
-        else -> null
+    @Synchronized
+    private fun sendDesktopNotification(message: String) {
+        val previous = notification
+        previous?.process?.destroy()
+        val sent = when {
+            isLinux -> {
+                val replace = listOfNotNull(previous?.id?.let { "--replace-id=$it" })
+                val command = listOf("notify-send", "--wait", "--print-id", "-u", "critical", "-t", "0", "-a", "Lambda", "-i", "dialog-warning") +
+                    replace + listOf(TITLE, message)
+                exec(*command.toTypedArray(), readOutput = true)
+                    ?.let { DesktopNotification(it, runCatching { it.inputReader().readLine()?.trim() }.getOrNull()) }
+            }
+            isMac -> exec("osascript", "-e", "display alert \"$TITLE\" message \"$message\" as critical")?.let { DesktopNotification(it, null) }
+            else -> null
+        }
+        // Turned off while it was being sent.
+        if (!isEnabled) sent?.process?.destroy()
+        notification = sent
     }
 
     private fun playOsSound() {
@@ -178,9 +198,9 @@ object StuckAlarm : Module(
         }
     }
 
-    private fun exec(vararg command: String): Process? = runCatching {
+    private fun exec(vararg command: String, readOutput: Boolean = false): Process? = runCatching {
         ProcessBuilder(*command)
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectOutput(if (readOutput) ProcessBuilder.Redirect.PIPE else ProcessBuilder.Redirect.DISCARD)
             .redirectError(ProcessBuilder.Redirect.DISCARD)
             .start()
     }.getOrNull()
@@ -188,6 +208,5 @@ object StuckAlarm : Module(
     private fun reset() {
         anchor = null
         alarming = false
-        notification = null
     }
 }
