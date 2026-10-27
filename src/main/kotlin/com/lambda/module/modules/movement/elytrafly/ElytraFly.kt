@@ -366,8 +366,16 @@ object ElytraFly : Module(
     /** Whether the chooser that only logs runs, see [ObstaclePassingMode]. */
     val choosing get() = debugLog && chooserLog
 
-    /** While above 0 [debug] writes nothing, e.g. while the route planner looks from where a route is, see [ObstaclePassingMode]. */
-    var debugMuted = 0
+    /** Each thread's [debugMuted], a search apart mutes only its own thread. */
+    private val debugMutes = ThreadLocal.withInitial { IntArray(1) }
+
+    /**
+     * While above 0 [debug] writes nothing on this thread, e.g. while the route planner looks from where a route is, see
+     * [ObstaclePassingMode].
+     */
+    var debugMuted
+        get() = debugMutes.get()[0]
+        set(value) { debugMutes.get()[0] = value }
 
     /** Writes [message] to the game log with [debugLog]. */
     fun debug(message: () -> String) {
