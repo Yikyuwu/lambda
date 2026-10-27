@@ -126,6 +126,8 @@ abstract class StationTask<P : StationPhase>(
     private var previousScreen: Screen? = null
     /** The screen [open] opened, so a containerStep never clicks in one the server opened instead. */
     private var openedHandler: ScreenHandler? = null
+    /** Set when failing with an item on the cursor that fits nowhere, since closing would drop it. */
+    private var keepOpen = false
 
     /** Whether the last inventory action had time to settle. */
     protected val settled get() = settleTimer.hasSurpassed(moveDelay)
@@ -158,7 +160,7 @@ abstract class StationTask<P : StationPhase>(
 
         // Failing doesn't cancel, so nothing else would close the container or stop walking.
         onFailure {
-            closeContainer()
+            if (!keepOpen) closeContainer()
             BaritoneHandler.cancel()
         }
     }
@@ -285,9 +287,14 @@ abstract class StationTask<P : StationPhase>(
     }
 
     private fun SafeContext.putCursorAway(handler: ScreenHandler) {
-        val target = handler.playerSlots.firstOrNull { it.stack.isEmpty }
-            ?: handler.containerSlots.firstOrNull { it.stack.isEmpty }
-            ?: return failure("Nowhere to put the item on the cursor")
+        val cursor = handler.cursorStack
+        // E.g. a shulker box's slots refuse a shulker, clicking one would leave it on the cursor.
+        val target = handler.playerSlots.firstOrNull { it.stack.isEmpty && it.canInsert(cursor) }
+            ?: handler.containerSlots.firstOrNull { it.stack.isEmpty && it.canInsert(cursor) }
+            ?: run {
+                keepOpen = true
+                return failure("Nowhere to put ${cursor.name.string} on the cursor, leaving the container open so it isn't dropped")
+            }
         submit { pickup(target.id) }
     }
 
