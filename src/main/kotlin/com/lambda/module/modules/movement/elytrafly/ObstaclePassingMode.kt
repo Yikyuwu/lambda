@@ -4356,7 +4356,7 @@ abstract class ObstaclePassingMode(
 			// Bouncing on, once for all of them, see below.
 			val speeds by lazy(LazyThreadSafetyMode.NONE) { bounceSpeeds(linePoint.y, STEER_SIM_TICKS) }
 			for (offset in listOf(0.0, -step, step, -2 * step, 2 * step)) {
-				if (abs(offset) > passerConfig.maxDodge + 1e-6) continue
+				if (abs(offset) > searchConfig.maxDodge + 1e-6) continue
 				val lanePoint = linePoint.add(across.multiply(offset))
 				// Glided over from the first thing in its way: the lane's own, or the block in yours when that's sooner or
 				// nothing's on the lane there, an opening may well be right on it, e.g. the line between two floating blocks
@@ -4387,7 +4387,7 @@ abstract class ObstaclePassingMode(
 					over.start - progress - state.along <= max(v * lead, if (thread.maxSpeed.isFinite()) (v - thread.maxSpeed) / THREAD_HOLD_SLOWDOWN else 0.0)
 				}?.along ?: (over.start - progress)
 				if (heldFrom > 0) swingPathHit(linePoint, dir, bounced.map { it.along to it.offset }, heldFrom,
-					linePoint.y + passerConfig.minObstacleHeight, linePoint.y + STEP_HEIGHT)?.let { at ->
+					linePoint.y + searchConfig.minObstacleHeight, linePoint.y + STEP_HEIGHT)?.let { at ->
 					ElytraFly.debug { "Not through the opening %+.2f across, low: in the way %.1f ahead on the way over bouncing, held from %.1f".format(thread.centre, at, heldFrom) }
 					continue
 				}
