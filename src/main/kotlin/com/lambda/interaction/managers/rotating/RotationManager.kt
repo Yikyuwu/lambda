@@ -23,6 +23,7 @@ import com.lambda.context.SafeContext
 import com.lambda.event.events.PlayerEvent
 import com.lambda.event.events.RenderEvent
 import com.lambda.event.events.TickEvent
+import com.lambda.event.events.WorldEvent
 import com.lambda.event.events.TickEvent.Companion.ALL_STAGES
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.Manager
@@ -67,6 +68,13 @@ object RotationManager : Manager<RotationRequest>(
 
 	private var pauseVanillaOverrides = false
 
+	/**
+	 * Where you looked last, kept through a reconnect: the server puts you back looking where it last got told, e.g. back
+	 * along the highway where a bot last threw junk, not where you looked.
+	 */
+	private var lastView: Rotation? = null
+	private var restoreView = false
+
 	override fun load(): String {
 		super.load()
 
@@ -84,6 +92,20 @@ object RotationManager : Manager<RotationRequest>(
                 request?.age++
             }
             changedThisTick = false
+            // Not the new player's before the server placed it.
+            if (!restoreView) lastView = player.rotation
+        }
+
+        listen<WorldEvent.Join> { restoreView = lastView != null }
+
+        // Before the force rotate keeps the view the player has, see ClientPlayNetworkHandlerMixin.
+        listen<PlayerEvent.ServerForceRotate>({ Int.MAX_VALUE }) {
+            if (!restoreView) return@listen
+            restoreView = false
+            lastView?.let { view ->
+                player.yaw = view.yawF
+                player.pitch = view.pitchF
+            }
         }
 
 		listen<RenderEvent.UpdateTarget> {
