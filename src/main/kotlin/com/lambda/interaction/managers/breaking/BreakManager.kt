@@ -87,6 +87,7 @@ import com.lambda.util.item.ItemUtils.block
 import com.lambda.util.math.lerp
 import com.lambda.util.player.PlayerUtils.gamemode
 import com.lambda.util.player.PlayerUtils.swingHand
+import net.minecraft.block.Blocks
 import net.minecraft.client.sound.PositionedSoundInstance
 import net.minecraft.client.sound.SoundInstance
 import net.minecraft.entity.ItemEntity
@@ -503,7 +504,9 @@ object BreakManager : Manager<BreakRequest>(
 			if (tickStage !in primaryConfig.tickStageMask) return null
 			if (!PacketLimitHandler.canSendPackets(1, PacketType.PlayerAction)) return null
 
-			if (!primaryConfig.doubleBreak || secondaryBreak != null) {
+			// Glowstone broken at once with another block came back over and over on 2b2t, until the build was restarted.
+			val glowstone = primary.context.cachedState.isOf(Blocks.GLOWSTONE) || requestCtx.cachedState.isOf(Blocks.GLOWSTONE)
+			if (!primaryConfig.doubleBreak || secondaryBreak != null || glowstone) {
 				if (!primary.updatedThisTick) {
 					primary.cancelBreak()
 					return@let
