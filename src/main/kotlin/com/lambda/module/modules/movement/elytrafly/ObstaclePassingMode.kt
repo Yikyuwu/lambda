@@ -1051,11 +1051,10 @@ abstract class ObstaclePassingMode(
 		set(value) { laneCarpetsText = lazyOf(value) }
 	/** Whether a [planHop] since [startDodge] began found a way over but you're too slow to make it yet. */
 	private var hopTooSlow = false
+	/** How the last [canHop] went, the fields below read off it. */
+	private var lastHopRun = HopRun.NONE
 	/** Where [canHop] found the glide falls short, for the debug log. Put together only once read, most never are. */
-	private var hopMissText: Lazy<String> = lazyOf("")
-	private var hopMiss: String
-		get() = hopMissText.value
-		set(value) { hopMissText = lazyOf(value) }
+	private val hopMiss get() = lastHopRun.miss
 	/** Where the opening is that it lands before only to take off again slower, see [threadHold]. */
 	private var restartFor: Double? = null
 	/** The obstacle it last landed for to take off again slower to fit a lane, not again for it, see [startDodge]. */
@@ -1090,13 +1089,13 @@ abstract class ObstaclePassingMode(
 	/** Where the hole of [touchSide] starts along the line. */
 	private var touchHoleStart = 0.0
 	/** How far below what it needs the last simulation came out, infinite missing it otherwise. */
-	private var hopShort = Double.POSITIVE_INFINITY
+	private val hopShort get() = lastHopRun.short
 	/** The speed a tick [canHop] found the glide is past the hop at, when it makes it. */
-	private var hopExitSpeed = 0.0
+	private val hopExitSpeed get() = lastHopRun.exit
 	/** Where along the line, how high and climbing how fast [canHop] found the glide right past the hop, when it makes it. */
-	private var hopExitAt = 0.0
-	private var hopExitY = 0.0
-	private var hopExitClimb = 0.0
+	private val hopExitAt get() = lastHopRun.exitAt
+	private val hopExitY get() = lastHopRun.exitY
+	private val hopExitClimb get() = lastHopRun.exitClimb
 	/**
 	 * The frame the glides are simulated in instead of the flight's, see [inFrame], e.g. from where a way past ends for
 	 * what follows it, see [continuation]. Null for the flight's own, see [currentFrame].
@@ -1105,7 +1104,7 @@ abstract class ObstaclePassingMode(
 	/** Holding this height gliding on, no way past found and braking would come down into blocks, see [brake]. */
 	private var levelHoldY: Double? = null
 	/** The speed a tick [canHop] found the glide gets to the obstacle at, when it makes it. */
-	private var hopWallSpeed = 0.0
+	private val hopWallSpeed get() = lastHopRun.wall
 	/**
 	 * Bouncing without sprinting for the opening of the [Thread] that starts there along the line, see [threadHold]:
 	 * each jump then leaves the speed as it is, and bouncing slows down on its own.
@@ -1119,9 +1118,9 @@ abstract class ObstaclePassingMode(
 	var noSprint = false
 		private set
 	/** How many ticks the last [canHop] that got over took to the end of it, for the chooser, see [shadowChoose]. */
-	private var hopTicks = 0
+	private val hopTicks get() = lastHopRun.ticks
 	/** Whether the last [canHop] that got over touched down on its top on the way, see [touchedExit]. */
-	private var hopTouched = false
+	private val hopTouched get() = lastHopRun.touched
 	/** How long you've been down after braking, waiting for the server to end the glide. */
 	private var landedTicks = 0
 	/** Where along the line an obstacle is that a lane gets past only slower, see [slowingToFit]. */
@@ -2568,15 +2567,7 @@ abstract class ObstaclePassingMode(
 		private val hopTooSlow = this@ObstaclePassingMode.hopTooSlow
 		private val laneMissText = this@ObstaclePassingMode.laneMissText
 		private val laneCarpetsText = this@ObstaclePassingMode.laneCarpetsText
-		private val hopMissText = this@ObstaclePassingMode.hopMissText
-		private val hopShort = this@ObstaclePassingMode.hopShort
-		private val hopExitSpeed = this@ObstaclePassingMode.hopExitSpeed
-		private val hopExitAt = this@ObstaclePassingMode.hopExitAt
-		private val hopExitY = this@ObstaclePassingMode.hopExitY
-		private val hopExitClimb = this@ObstaclePassingMode.hopExitClimb
-		private val hopWallSpeed = this@ObstaclePassingMode.hopWallSpeed
-		private val hopTicks = this@ObstaclePassingMode.hopTicks
-		private val hopTouched = this@ObstaclePassingMode.hopTouched
+		private val lastHopRun = this@ObstaclePassingMode.lastHopRun
 		private val dipMiss = this@ObstaclePassingMode.dipMiss
 		private val touchMiss = this@ObstaclePassingMode.touchMiss
 		private val touchLaneText = this@ObstaclePassingMode.touchLaneText
@@ -2636,15 +2627,7 @@ abstract class ObstaclePassingMode(
 			outer.hopTooSlow = hopTooSlow
 			outer.laneMissText = laneMissText
 			outer.laneCarpetsText = laneCarpetsText
-			outer.hopMissText = hopMissText
-			outer.hopShort = hopShort
-			outer.hopExitSpeed = hopExitSpeed
-			outer.hopExitAt = hopExitAt
-			outer.hopExitY = hopExitY
-			outer.hopExitClimb = hopExitClimb
-			outer.hopWallSpeed = hopWallSpeed
-			outer.hopTicks = hopTicks
-			outer.hopTouched = hopTouched
+			outer.lastHopRun = lastHopRun
 			outer.dipMiss = dipMiss
 			outer.touchMiss = touchMiss
 			outer.touchLaneText = touchLaneText
@@ -6325,16 +6308,12 @@ abstract class ObstaclePassingMode(
 	 * [hopExitSpeed] as it was.
 	 */
 	private fun SafeContext.glidingFaster(hop: Hop, touching: Hop, progress: Double): String? {
-		val exit = hopExitSpeed
-		val miss = hopMissText
-		val short = hopShort
+		val before = lastHopRun
 		// Alike, both held from now: the one [canGetOver] found may be held a bounce later.
 		val touchExit = if (canHop(touching, progress, 0)) hopExitSpeed else null
 		// Not only just: a near miss of a simulation over a long hole is a fall into it, see [PLAIN_GLIDE_MARGIN].
 		val plainExit = if (canGetOver(hop, progress) && canHop(hop, progress, 0, margin = PLAIN_GLIDE_MARGIN)) hopExitSpeed else null
-		hopExitSpeed = exit
-		hopMissText = miss
-		hopShort = short
+		lastHopRun = lastHopRun.copy(exit = before.exit, missText = before.missText, short = before.short)
 		if (touchExit == null || plainExit == null || plainExit < touchExit + TOUCH_MIN_GAIN) return null
 		return "gliding over it keeps as much speed, %.2f a tick after it, %.2f touching down".format(plainExit, touchExit).also { touchMiss = it }
 	}
@@ -7343,31 +7322,39 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.canHop(
 		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = simSpeed(), margin: Double = 0.0,
 		gain: Double = frame().gain, turn: Boolean = frame().threaded(hop),
-	): Boolean {
-		val memo = hopRunMemo ?: return simulateHop(hop, progress, holdFrom, from, margin, gain, turn)
-		val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, turn, hop.held, hop.topped, hop.rose, hop.touchedAt, frame())
-		memo[key]?.let { run ->
-			hopMiss = run.miss
-			hopShort = run.short
-			hopExitSpeed = run.exit
-			hopExitAt = run.exitAt
-			hopExitY = run.exitY
-			hopExitClimb = run.exitClimb
-			hopTicks = run.ticks
-			hopWallSpeed = run.wall
-			hopTouched = run.touched
-			return run.made
+	): Boolean = hopRunOf(hop, progress, holdFrom, from, margin, gain, turn).made
+
+	/** [canHop] with all it found, kept in [lastHopRun] too. Simulated once per glide while the chooser looks, see [hopRunMemo]. */
+	private fun SafeContext.hopRunOf(
+		hop: Hop, progress: Double, holdFrom: Int? = null, from: Double = simSpeed(), margin: Double = 0.0,
+		gain: Double = frame().gain, turn: Boolean = frame().threaded(hop),
+	): HopRun {
+		val memo = hopRunMemo
+		val run = if (memo == null) simulateHop(hop, progress, holdFrom, from, margin, gain, turn) else {
+			val key = HopRunKey(hop, progress, holdFrom, from, margin, gain, turn, hop.held, hop.topped, hop.rose, hop.touchedAt, frame())
+			memo.getOrPut(key) { simulateHop(hop, progress, holdFrom, from, margin, gain, turn) }
 		}
-		return simulateHop(hop, progress, holdFrom, from, margin, gain, turn).also {
-			memo[key] = HopRun(it, hopMiss, hopShort, hopExitSpeed, hopExitAt, hopExitY, hopExitClimb, hopTicks, hopWallSpeed, hopTouched)
-		}
+		lastHopRun = run
+		return run
 	}
 
-	/** How [canHop] went for a glide simulated already, while the chooser looks, see [hopRunMemo]. */
-	private class HopRun(
-		val made: Boolean, val miss: String, val short: Double, val exit: Double, val exitAt: Double, val exitY: Double, val exitClimb: Double,
-		val ticks: Int, val wall: Double, val touched: Boolean,
-	)
+	/**
+	 * How a glide [canHop] simulated went: whether it [made] it, why not ([miss], [short]), where and how it's past it
+	 * ([exit] speed, [exitAt], [exitY], [exitClimb], after [ticks], [touched] down on its top on the way), and the speed
+	 * at the obstacle ([wall]). What a run doesn't find, e.g. the exit of one that misses, is the run's before it.
+	 */
+	private data class HopRun(
+		val made: Boolean, val missText: Lazy<String>, val short: Double, val exit: Double, val exitAt: Double, val exitY: Double,
+		val exitClimb: Double, val ticks: Int, val wall: Double, val touched: Boolean,
+	) {
+		/** Put together only once read, most never are. */
+		val miss get() = missText.value
+
+		companion object {
+			/** Before any. */
+			val NONE = HopRun(false, lazyOf(""), Double.POSITIVE_INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0.0, false)
+		}
+	}
 
 	/** A glide simulated by [canHop]: the [hop] itself, not one alike, from where with what in which frame, and how far it's flown already. */
 	private data class HopRunKey(
@@ -7477,7 +7464,7 @@ abstract class ObstaclePassingMode(
 		.add(if (touch.path.isEmpty()) touch.lane else across(dir).multiply(pathOffset(touch.path, along)))
 
 	/** [canHop] simulated. */
-	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double, turn: Boolean): Boolean {
+	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double, turn: Boolean): HopRun {
 		val f = frame()
 		val dir = getSnappedDir()
 		val across = across(dir)
@@ -7500,7 +7487,9 @@ abstract class ObstaclePassingMode(
 		var skipped = false
 		// Got to the obstacle, for [hopWallSpeed].
 		var atWall = progress >= hop.obstacle
-		if (atWall) hopWallSpeed = from
+		// What it doesn't find stays as the last run's, see [HopRun].
+		val before = lastHopRun
+		var wall = if (atWall) from else before.wall
 		// Where it started, for [hopMiss].
 		val startY = y
 		val startClimb = climb
@@ -7529,10 +7518,9 @@ abstract class ObstaclePassingMode(
 					// Over a hole after a layer bounced on up there, gliding on above the floor down below it.
 					if (hop.hole && f.onLayer && y > f.baseY + passerConfig.minObstacleHeight) return@run null
 					val ahead = along - progress
-					hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead with no floor to bounce off"
+					val missText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead with no floor to bounce off"
 						.format(startY, startClimb, startSpeed, ahead) }
-					hopShort = Double.POSITIVE_INFINITY
-					return false
+					return before.copy(made = false, missText = missText, short = Double.POSITIVE_INFINITY, wall = wall)
 				}
 				if (floor != null && y <= floor) {
 					y = floor
@@ -7574,10 +7562,9 @@ abstract class ObstaclePassingMode(
 			if (touch != null && !touched && !wasOnTop && !hop.hole && along in touch.range && y >= touch.y && y + climb <= touch.y) {
 				if (topMargin(touchSpot(f, touch, dir, along), touch.y) < TOUCH_EDGE) {
 					val ahead = along - progress
-					hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead on the top's edge"
+					val missText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead on the top's edge"
 						.format(startY, startClimb, startSpeed, ahead) }
-					hopShort = Double.POSITIVE_INFINITY
-					return false
+					return before.copy(made = false, missText = missText, short = Double.POSITIVE_INFINITY, wall = wall)
 				}
 				wasOnTop = true
 			}
@@ -7595,14 +7582,13 @@ abstract class ObstaclePassingMode(
 			// Bouncing on before it, down in a gap in the layer bounced on, into the side of the next of its blocks.
 			if (fromAlong < hop.start && intoLayerSide(f, fall, dir, hop.laneAt(along, across), fromAlong, fromY, along, y)) {
 				val ahead = fromAlong - progress
-				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down in a gap in the blocks %.1f ahead, into the side of the next"
+				val missText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down in a gap in the blocks %.1f ahead, into the side of the next"
 					.format(startY, startClimb, startSpeed, ahead) }
-				hopShort = Double.POSITIVE_INFINITY
-				return false
+				return before.copy(made = false, missText = missText, short = Double.POSITIVE_INFINITY, wall = wall)
 			}
 			if (!atWall && along >= hop.obstacle) {
 				atWall = true
-				hopWallSpeed = speed
+				wall = speed
 			}
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = touch?.range?.contains(along) == true
@@ -7611,11 +7597,10 @@ abstract class ObstaclePassingMode(
 				val atY = y
 				val ahead = along - progress
 				val topY = touch.y
-				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, below the top at y %.2f to touch down on"
+				val missText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, below the top at y %.2f to touch down on"
 					.format(startY, startClimb, startSpeed, atY, ahead, topY) }
 				// Not a near miss to go for anyway, see [hopShort].
-				hopShort = Double.POSITIVE_INFINITY
-				return false
+				return before.copy(made = false, missText = missText, short = Double.POSITIVE_INFINITY, wall = wall)
 			}
 			// Landed on the top this tick, the move across goes on past it standing on it.
 			val low = if (onTopNow || onTop && !touched) Double.NEGATIVE_INFINITY else hop.feetAt(along) + if (onTop) 0.0 else margin
@@ -7624,10 +7609,9 @@ abstract class ObstaclePassingMode(
 				val ahead = along - progress
 				val feet = hop.feetAt(along)
 				val topY = hop.topY
-				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
+				val missText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd be at y %.2f %.1f ahead, needs %.2f to %.2f"
 					.format(startY, startClimb, startSpeed, atY, ahead, feet, topY) }
-				hopShort = if (y > hop.topY) Double.POSITIVE_INFINITY else hop.feetAt(along) - y
-				return false
+				return before.copy(made = false, missText = missText, short = if (y > hop.topY) Double.POSITIVE_INFINITY else hop.feetAt(along) - y, wall = wall)
 			}
 			// The box's whole way, not only the heights over the obstacle: e.g. rising to them into a block hanging higher
 			// than the rays look, or bouncing off a top up into one. Told only when the glide makes it otherwise, a miss
@@ -7639,25 +7623,17 @@ abstract class ObstaclePassingMode(
 					val ahead = (blocked?.first ?: along) - progress
 					val atY = blocked?.second ?: y
 					val what = if (blocked != null) "the box would run into a block" else "coming down after it the box would run into a block higher than the rays look"
-					hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, $what %.1f ahead at y %.2f"
+					val missText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, $what %.1f ahead at y %.2f"
 						.format(startY, startClimb, startSpeed, ahead, atY) }
-					hopShort = Double.POSITIVE_INFINITY
-					return false
+					return before.copy(made = false, missText = missText, short = Double.POSITIVE_INFINITY, wall = wall)
 				}
-				hopExitSpeed = speed
-				hopExitAt = along
-				hopExitY = y
-				hopExitClimb = climb
-				hopTicks = tick + 1
 				// Down on it this tick, past its end along the line standing on it: on its middle near its end that's the tick
 				// it goes past the hop's end, bounced off it the next.
-				hopTouched = touched || onTopNow
-				return true
+				return before.copy(made = true, exit = speed, exitAt = along, exitY = y, exitClimb = climb, ticks = tick + 1, wall = wall,
+					touched = touched || onTopNow)
 			}
 		}
-		hopMiss = "not over it within $CAN_HOP_SIM_TICKS ticks"
-		hopShort = Double.POSITIVE_INFINITY
-		return false
+		return before.copy(made = false, missText = lazyOf("not over it within $CAN_HOP_SIM_TICKS ticks"), short = Double.POSITIVE_INFINITY, wall = wall)
 	}
 
 	/**
@@ -8696,7 +8672,7 @@ abstract class ObstaclePassingMode(
 		// Not put together yet, they'd hold on to the world through what they'd look up.
 		laneMiss = ""
 		laneCarpets = ""
-		hopMiss = ""
+		lastHopRun = lastHopRun.copy(missText = lazyOf(""))
 	}
 
 	/**
