@@ -4457,12 +4457,13 @@ abstract class ObstaclePassingMode(
 		val step = laneStep(dir) / 4
 		// The blocks under the box on each lane all along it.
 		val cells = HashSet<Long>()
+		val corners = doubleArrayOf(-GLIDE_SIZE / 2, GLIDE_SIZE / 2)
 		var along = start
 		while (along <= end) {
 			var side = -reach
 			while (side <= reach + 1e-6) {
 				val point = linePoint.add(dir.multiply(along)).add(across.multiply(side))
-				for (dx in arrayOf(-GLIDE_SIZE / 2, GLIDE_SIZE / 2)) for (dz in arrayOf(-GLIDE_SIZE / 2, GLIDE_SIZE / 2))
+				for (dx in corners) for (dz in corners)
 					cells += BlockPos.asLong(floor(point.x + dx).toInt(), 0, floor(point.z + dz).toInt())
 				side += step
 			}
@@ -4752,6 +4753,9 @@ abstract class ObstaclePassingMode(
 		val nz = doubleArrayOf(0.0, 1.0, across.z)
 		val k = DoubleArray(3) { across.x * nx[it] + across.z * nz[it] }
 		val out = ArrayList<Pair<Double, Double>>()
+		// Each box's corners grown by half the box, filled anew for each, see below.
+		val qx = DoubleArray(4)
+		val qz = DoubleArray(4)
 		var shiftX = 0.0
 		var shiftZ = 0.0
 		for (leg in 0..1) {
@@ -4777,8 +4781,8 @@ abstract class ObstaclePassingMode(
 				pMax[axis] = hi
 			}
 			for (box in boxes) {
-				val qx = doubleArrayOf(box.minX - half, box.maxX + half, box.minX - half, box.maxX + half)
-				val qz = doubleArrayOf(box.minZ - half, box.minZ - half, box.maxZ + half, box.maxZ + half)
+				qx[0] = box.minX - half; qx[1] = box.maxX + half; qx[2] = box.minX - half; qx[3] = box.maxX + half
+				qz[0] = box.minZ - half; qz[1] = box.minZ - half; qz[2] = box.maxZ + half; qz[3] = box.maxZ + half
 				var low = Double.NEGATIVE_INFINITY
 				var high = Double.POSITIVE_INFINITY
 				for (axis in 0..2) {
