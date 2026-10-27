@@ -19,6 +19,7 @@ package com.lambda.module.modules.player
 
 import com.lambda.Lambda.mc
 import com.lambda.event.events.TickEvent
+import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
@@ -114,7 +115,15 @@ object StuckAlarm : Module(
             notification?.process?.destroy()
         }
 
+        // Back from a disconnect, the time away isn't time stuck.
+        listen<WorldEvent.Join> { reset() }
+
         listen<TickEvent.Pre> {
+            // Waiting in the 2b2t queue you're a spectator who can't move, that's not being stuck.
+            if (player.isSpectator) {
+                reset()
+                return@listen
+            }
             val now = System.currentTimeMillis()
             val start = anchor
 
