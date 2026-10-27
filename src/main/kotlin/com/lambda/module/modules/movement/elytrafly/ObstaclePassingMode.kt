@@ -2243,85 +2243,160 @@ abstract class ObstaclePassingMode(
 	private var chooserNanos = 0L
 
 	/**
-	 * Runs [block] with everything the planners write on the way put back after: why not, how the last simulation went,
-	 * the side of a top to touch down on, and who committed to the plan. The plan itself none of them commits, it's
-	 * checked all the same and put back, logged.
+	 * Runs [block] with everything the planners write on the way put back after, see [PlanSnapshot]: why not, how the
+	 * last simulation went, the side of a top to touch down on, who committed to the plan, and the plan with all that
+	 * goes with it. The plan itself none of them commits, it's checked all the same and put back, logged.
 	 */
 	private inline fun <T> sandboxed(block: () -> T): T {
-		val rejection = hopRejection
-		val tooSlow = hopTooSlow
-		val noLane = laneMissText
-		val carpets = laneCarpetsText
-		val miss = hopMissText
-		val short = hopShort
-		val exit = hopExitSpeed
-		val exitAt = hopExitAt
-		val exitY = hopExitY
-		val exitClimb = hopExitClimb
-		val wall = hopWallSpeed
-		val ticks = hopTicks
-		val touched = hopTouched
-		val noDip = dipMiss
-		val noTouch = touchMiss
-		val touchText = touchLaneText
-		val side = touchSide
-		val holeStart = touchHoleStart
-		val noOpening = openingMiss
-		val noThread = threadMiss
-		val owners = planOwners.toList()
-		val planHop = hop
-		val planDodge = dodge
-		val planOffset = dodgeOffset
-		val planLean = dodgeLean
-		val planEnd = dodgeEnd
-		val planUpAt = dodgeUpAt
-		val planThread = thread
-		val planSlowFor = slowFor
-		val planSlowJumps = slowJumpsFor
-		val planDip = dipAt
-		val planDipLane = dipLaneAt
-		val planBrake = brakeAt
+		val before = PlanSnapshot()
 		try {
 			return block()
 		} finally {
-			hopRejection = rejection
-			hopTooSlow = tooSlow
-			laneMissText = noLane
-			laneCarpetsText = carpets
-			hopMissText = miss
-			hopShort = short
-			hopExitSpeed = exit
-			hopExitAt = exitAt
-			hopExitY = exitY
-			hopExitClimb = exitClimb
-			hopWallSpeed = wall
-			hopTicks = ticks
-			hopTouched = touched
-			dipMiss = noDip
-			touchMiss = noTouch
-			touchLaneText = touchText
-			touchSide = side
-			touchHoleStart = holeStart
-			openingMiss = noOpening
-			threadMiss = noThread
+			before.restore()
+		}
+	}
+
+	/**
+	 * What [sandboxed] puts back after a trial: the plan ([hop], the lane, the opening, slowing down, the dip, landing)
+	 * and the state committing to it resets with it, e.g. [dodgeTicks] and [onLane] by [commitLane], what the deciders
+	 * remember about what's ahead (skipped, landed for, no lane yet, the chooser's picks to look at again), the line's
+	 * height, and the miss texts and last simulation's results for the log. Not what's kept across trials on purpose:
+	 * the memos and caches, the chooser's ways and misses, the clocks and timings, the relook throttles and log dedupes.
+	 */
+	private inner class PlanSnapshot {
+		// Why not and how the last simulation went, for the log.
+		private val hopRejection = this@ObstaclePassingMode.hopRejection
+		private val hopTooSlow = this@ObstaclePassingMode.hopTooSlow
+		private val laneMissText = this@ObstaclePassingMode.laneMissText
+		private val laneCarpetsText = this@ObstaclePassingMode.laneCarpetsText
+		private val hopMissText = this@ObstaclePassingMode.hopMissText
+		private val hopShort = this@ObstaclePassingMode.hopShort
+		private val hopExitSpeed = this@ObstaclePassingMode.hopExitSpeed
+		private val hopExitAt = this@ObstaclePassingMode.hopExitAt
+		private val hopExitY = this@ObstaclePassingMode.hopExitY
+		private val hopExitClimb = this@ObstaclePassingMode.hopExitClimb
+		private val hopWallSpeed = this@ObstaclePassingMode.hopWallSpeed
+		private val hopTicks = this@ObstaclePassingMode.hopTicks
+		private val hopTouched = this@ObstaclePassingMode.hopTouched
+		private val dipMiss = this@ObstaclePassingMode.dipMiss
+		private val touchMiss = this@ObstaclePassingMode.touchMiss
+		private val touchLaneText = this@ObstaclePassingMode.touchLaneText
+		private val openingMiss = this@ObstaclePassingMode.openingMiss
+		private val threadMiss = this@ObstaclePassingMode.threadMiss
+		// The plan.
+		private val owners = planOwners.toList()
+		private val hop = this@ObstaclePassingMode.hop
+		private val dodge = this@ObstaclePassingMode.dodge
+		private val dodgeOffset = this@ObstaclePassingMode.dodgeOffset
+		private val dodgeLean = this@ObstaclePassingMode.dodgeLean
+		private val dodgeEnd = this@ObstaclePassingMode.dodgeEnd
+		private val dodgeUpAt = this@ObstaclePassingMode.dodgeUpAt
+		private val thread = this@ObstaclePassingMode.thread
+		private val slowFor = this@ObstaclePassingMode.slowFor
+		private val slowJumpsFor = this@ObstaclePassingMode.slowJumpsFor
+		private val dipAt = this@ObstaclePassingMode.dipAt
+		private val dipLaneAt = this@ObstaclePassingMode.dipLaneAt
+		private val brakeAt = this@ObstaclePassingMode.brakeAt
+		private val touchSide = this@ObstaclePassingMode.touchSide
+		private val touchHoleStart = this@ObstaclePassingMode.touchHoleStart
+		// What committing to it resets with it, see [commitLane], [commitNoLane], [commitSwingBack] and [brake].
+		private val dodgeTicks = this@ObstaclePassingMode.dodgeTicks
+		private val dodgeYaw = this@ObstaclePassingMode.dodgeYaw
+		private val dodgeCarpets = this@ObstaclePassingMode.dodgeCarpets
+		private val onLane = this@ObstaclePassingMode.onLane
+		private val dodgeAfterMob = this@ObstaclePassingMode.dodgeAfterMob
+		private val fitDodge = this@ObstaclePassingMode.fitDodge
+		private val atFitSpeed = this@ObstaclePassingMode.atFitSpeed
+		private val landing = this@ObstaclePassingMode.landing
+		private val brakeCarpets = this@ObstaclePassingMode.brakeCarpets
+		private val brakeY = this@ObstaclePassingMode.brakeY
+		private val landedTicks = this@ObstaclePassingMode.landedTicks
+		private val levelHoldY = this@ObstaclePassingMode.levelHoldY
+		private val layerSpeedUp = this@ObstaclePassingMode.layerSpeedUp
+		private val startPos = this@ObstaclePassingMode.startPos
+		// What the deciders remember about what's ahead.
+		private val skipAt = this@ObstaclePassingMode.skipAt
+		private val skipHopAt = this@ObstaclePassingMode.skipHopAt
+		private val restartFor = this@ObstaclePassingMode.restartFor
+		private val restartedFor = this@ObstaclePassingMode.restartedFor
+		private val noLaneAt = this@ObstaclePassingMode.noLaneAt
+		private val noLaneDodge = this@ObstaclePassingMode.noLaneDodge
+		private val noGapAt = this@ObstaclePassingMode.noGapAt
+		private val layerHoleAgain = this@ObstaclePassingMode.layerHoleAgain
+		private val chosenHole = this@ObstaclePassingMode.chosenHole
+		private val chosenLayerAt = this@ObstaclePassingMode.chosenLayerAt
+		private val chosenLine = this@ObstaclePassingMode.chosenLine
+		private val chosenLane = this@ObstaclePassingMode.chosenLane
+		private val chosenBlockAt = this@ObstaclePassingMode.chosenBlockAt
+
+		fun restore() {
+			val outer = this@ObstaclePassingMode
+			outer.hopRejection = hopRejection
+			outer.hopTooSlow = hopTooSlow
+			outer.laneMissText = laneMissText
+			outer.laneCarpetsText = laneCarpetsText
+			outer.hopMissText = hopMissText
+			outer.hopShort = hopShort
+			outer.hopExitSpeed = hopExitSpeed
+			outer.hopExitAt = hopExitAt
+			outer.hopExitY = hopExitY
+			outer.hopExitClimb = hopExitClimb
+			outer.hopWallSpeed = hopWallSpeed
+			outer.hopTicks = hopTicks
+			outer.hopTouched = hopTouched
+			outer.dipMiss = dipMiss
+			outer.touchMiss = touchMiss
+			outer.touchLaneText = touchLaneText
+			outer.openingMiss = openingMiss
+			outer.threadMiss = threadMiss
 			planOwners.clear()
 			planOwners += owners
-			slowJumpsFor = planSlowJumps
-			if (hop !== planHop || dodge != planDodge || dodgeOffset != planOffset || dodgeLean != planLean || dodgeEnd != planEnd ||
-				dodgeUpAt != planUpAt || thread !== planThread || slowFor != planSlowFor || dipAt != planDip || dipLaneAt != planDipLane || brakeAt != planBrake) {
+			outer.slowJumpsFor = slowJumpsFor
+			outer.touchSide = touchSide
+			outer.touchHoleStart = touchHoleStart
+			if (outer.hop !== hop || outer.dodge != dodge || outer.dodgeOffset != dodgeOffset || outer.dodgeLean != dodgeLean ||
+				outer.dodgeEnd != dodgeEnd || outer.dodgeUpAt != dodgeUpAt || outer.thread !== thread || outer.slowFor != slowFor ||
+				outer.dipAt != dipAt || outer.dipLaneAt != dipLaneAt || outer.brakeAt != brakeAt) {
 				ElytraFly.debug { "Chooser: changed the plan looking, put back" }
-				hop = planHop
-				dodge = planDodge
-				dodgeOffset = planOffset
-				dodgeLean = planLean
-				dodgeEnd = planEnd
-				dodgeUpAt = planUpAt
-				thread = planThread
-				slowFor = planSlowFor
-				dipAt = planDip
-				dipLaneAt = planDipLane
-				brakeAt = planBrake
+				outer.hop = hop
+				outer.dodge = dodge
+				outer.dodgeOffset = dodgeOffset
+				outer.dodgeLean = dodgeLean
+				outer.dodgeEnd = dodgeEnd
+				outer.dodgeUpAt = dodgeUpAt
+				outer.thread = thread
+				outer.slowFor = slowFor
+				outer.dipAt = dipAt
+				outer.dipLaneAt = dipLaneAt
+				outer.brakeAt = brakeAt
 			}
+			outer.dodgeTicks = dodgeTicks
+			outer.dodgeYaw = dodgeYaw
+			outer.dodgeCarpets = dodgeCarpets
+			outer.onLane = onLane
+			outer.dodgeAfterMob = dodgeAfterMob
+			outer.fitDodge = fitDodge
+			outer.atFitSpeed = atFitSpeed
+			outer.landing = landing
+			outer.brakeCarpets = brakeCarpets
+			outer.brakeY = brakeY
+			outer.landedTicks = landedTicks
+			outer.levelHoldY = levelHoldY
+			outer.layerSpeedUp = layerSpeedUp
+			outer.startPos = startPos
+			outer.skipAt = skipAt
+			outer.skipHopAt = skipHopAt
+			outer.restartFor = restartFor
+			outer.restartedFor = restartedFor
+			outer.noLaneAt = noLaneAt
+			outer.noLaneDodge = noLaneDodge
+			outer.noGapAt = noGapAt
+			outer.layerHoleAgain = layerHoleAgain
+			outer.chosenHole = chosenHole
+			outer.chosenLayerAt = chosenLayerAt
+			outer.chosenLine = chosenLine
+			outer.chosenLane = chosenLane
+			outer.chosenBlockAt = chosenBlockAt
 		}
 	}
 
