@@ -6226,7 +6226,7 @@ abstract class ObstaclePassingMode(
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = touch?.range?.contains(along) == true
 			// Coming over it lower than its top runs into its side.
-			if (onTop && fromAlong !in touch!!.range && !touched && y < touch.y) {
+			if (onTop && fromAlong !in touch.range && !touched && y < touch.y) {
 				val atY = y
 				val ahead = along - progress
 				val topY = touch.y
@@ -7186,8 +7186,7 @@ abstract class ObstaclePassingMode(
 		val across = across(dir)
 		val here = Vec3d(player.x - linePoint.x, 0.0, player.z - linePoint.z).dotProduct(across)
 		val ahead = linePoint.add(dir.multiply(player.velocity.horizontalLength() * LAND_AHEAD_TICKS))
-		val step = laneStep(dir) / 4
-		val sides = (passerConfig.maxDodge / step + 1e-6).toInt()
+		val (step, sides) = quarterLanes(dir)
 		// Room at your height on the way over there too, beside the hole may be right at the wall. The box swings out at speed.
 		val swing = sweep(dir)
 		fun roomAt(spot: Vec3d) = spaceEmpty(Box(spot.x - GLIDE_SIZE / 2 - swing, player.y, spot.z - GLIDE_SIZE / 2 - swing,
