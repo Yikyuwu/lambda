@@ -329,7 +329,8 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 						}
 						supports
 					}.flatten()
-						.also { supports -> buildConfig.onSpleef(supports.filter { !isPassable(it) }) }
+						// Only guards when something is spleefed, not e.g. while the player or a ghast is in the way.
+						.also { supports -> if (supports.isNotEmpty()) buildConfig.onSpleef(supports.filter { !isPassable(it) }) }
 						.forEach { support ->
 							sim(support, blockState(support), TargetState.Empty)
 						}
