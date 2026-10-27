@@ -4316,6 +4316,18 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * Whether a swerve past the block of [swerve] fits at [FIT_SPEED] from here, landing first to take off again that slow:
+	 * with room to land before it and not landed for it already, see [restartedFor].
+	 */
+	private fun SafeContext.slowerSwerveFits(swerve: Swerve, linePoint: Vec3d, dir: Vec3d, progress: Double): Boolean {
+		val distance = swerve.blockAt - progress
+		if (flyer.horizontalSpeed <= FIT_SPEED || distance <= landingDistance() + RESTART_ROOM) return false
+		if (restartedFor?.let { abs(it - swerve.blockAt) < RESTART_SAME } == true) return false
+		val off = flyer.pos.subtract(startPos).dotProduct(across(dir))
+		return sandboxed { swerveWays(linePoint, dir, distance, off, FIT_SPEED) }.isNotEmpty()
+	}
+
+	/**
 	 * Whether the box swerving moves free from [a] to [b] (along and across the line [dir] down at [floorY]) between [low]
 	 * and [high], wider than yours by [side]: the flight steers a bit off the path planned. The larger axis
 	 * first, either when they're about even.
@@ -4374,6 +4386,13 @@ abstract class ObstaclePassingMode(
 			again != null -> commitHop("reswerve", hop.goneOnAs(again))
 			// Clear of what's low from here on, the glide ends where it was planned to.
 			why == SWERVE_FREE -> {}
+			// Too fast for it now, e.g. still slowing down for it: landing to take off again slower and swerve then, like
+			// for a lane that only fits slower. Not the other side instead, steering over there's too late by now.
+			!hop.held && slowerSwerveFits(swerve, linePoint, dir, progress) -> {
+				restartFor = swerve.blockAt
+				restartedFor = swerve.blockAt
+				return brake(swerve.blockAt, "Not swerving past it at this speed any more ($why), landing to take off again slower").let { true }
+			}
 			!hop.held -> {
 				ElytraFly.debug { "Not swerving past it any more ($why), bouncing on along the line" }
 				skipHopAt = hop.start
