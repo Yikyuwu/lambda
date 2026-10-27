@@ -6692,14 +6692,15 @@ abstract class ObstaclePassingMode(
 	 */
 	protected fun SafeContext.touchFloor(): Double? {
 		// Diving onto it, held whatever the hop does meanwhile, e.g. ended or planned again the tick before touching down.
-		// Only let go of on the game thread.
+		// Only let go of on the game thread. Also asked from the network thread, so it reads you straight, not through the
+		// [flyer] view the game thread may drop meanwhile.
 		diveTop?.let { (y, since) ->
-			if (flyer.isGliding && flightTicks - since in 0..TOUCH_DIVE_HOLD_TICKS) return y
+			if (player.isGliding && flightTicks - since in 0..TOUCH_DIVE_HOLD_TICKS) return y
 			if (MinecraftClient.getInstance().isOnThread) diveTop = null
 		}
 		val hop = hop ?: return null
 		val touch = hop.touch ?: return null
-		val progress = progress(flyer.pos)
+		val progress = progress(player.pos)
 		return touch.y.takeIf {
 			if (hop.touched) flightTicks - hop.touchedAt <= 1
 			else progress >= touch.range.start - TOUCH_HELD_AROUND && progress <= touch.range.endInclusive + TOUCH_HELD_AROUND
