@@ -57,6 +57,8 @@ object FreeLook : Module(
     init {
         onEnable {
             camera = player.rotation
+            // A join's wait left over from before it was turned off, else a later setback would move the camera.
+            awaitingSpawnRotation = false
             previousPerspective = mc.options.perspective
             if (togglePerspective) mc.options.perspective = Perspective.THIRD_PERSON_BACK
         }
