@@ -267,6 +267,13 @@ abstract class ObstaclePassingMode(
 		 * 0.1 of a pillar beside the way and sank down onto the railing held only 0.15 above it.
 		 */
 		private const val SWERVE_SIDE_MARGIN = 0.25
+		/**
+		 * The speed a swerve too fast for is planned at to slow down for, and the room after landing for it to get going
+		 * again before steering out. In the simulator a pillar on a railed diagonal fits a swerve from 0.6 to 0.7, 0.85
+		 * was too fast for the box's swing; from standing it's back up to 0.8 after about 25 blocks.
+		 */
+		private const val SWERVE_FIT_SPEED = 0.7
+		private const val SWERVE_RESTART_ROOM = 10.0
 		/** Less once committed to it, so the next bounce a little off doesn't drop it, see [reswerve]. */
 		private const val SWERVE_HELD_MARGIN = 0.12
 		private const val SWERVE_ABOVE = 0.3
@@ -1675,7 +1682,8 @@ abstract class ObstaclePassingMode(
 		passTicks++
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
-		if (slowFor?.let { progress(player.pos) > it } == true || !player.isGliding) commitSlowFor("passObstacles", null)
+		// Down to take off again slower for it, still slow on the way there, else the sprint bounces speed it up again.
+		if (slowFor?.let { progress(player.pos) > it } == true || !player.isGliding && restartedFor == null) commitSlowFor("passObstacles", null)
 		if (restartedFor?.let { progress(player.pos) > it } == true) restartedFor = null
 		// Past the hole with the top to touch down on, its side isn't kept for anything ahead any more.
 		if (touchSide?.let { progress(player.pos) > it.second } == true) commitTouchSide(null)
@@ -1792,6 +1800,7 @@ abstract class ObstaclePassingMode(
 			if (restartFor == at) {
 				restartFor = null
 				skipHopAt = null
+				commitSlowFor("passObstacles", at)
 				ElytraFly.debug { "Landed to come in slower for the opening %.1f ahead, taking off again".format(at - progress(playerPos)) }
 				return false
 			}
@@ -2159,7 +2168,7 @@ abstract class ObstaclePassingMode(
 				val slowLane = distance > brakeDistance() + DODGE_STEER_AHEAD && flyer.horizontalSpeed > FIT_SPEED &&
 					freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null
 				val slowSwerve = if (slowLane || distance <= brakeDistance() + DODGE_STEER_AHEAD || flyer.horizontalSpeed <= FIT_SPEED) null
-					else sandboxed { swerveWays(linePoint, dir, distance, from.subtract(linePoint).dotProduct(across(dir)), FIT_SPEED) }.firstOrNull()
+					else sandboxed { swerveWays(linePoint, dir, distance, from.subtract(linePoint).dotProduct(across(dir)), SWERVE_FIT_SPEED) }.firstOrNull()
 				if (slowLane || slowSwerve != null) {
 					commitSlowFor("startDodge", at)
 					// The swerve at that speed taken on right away: looked at anew at the speed it still has, it never fits
@@ -4159,11 +4168,10 @@ abstract class ObstaclePassingMode(
 					ElytraFly.debug { "Not through the opening %+.2f across: $hit".format(thread.centre) }
 					continue
 				}
-				// What's low, e.g. a railing on the floor, all the way to it: each bounce comes down to the floor, the hold
-				// only gets up over it once it's risen.
-				// Diagonally each tick's move goes along one axis and then the other, the box swinging out to the one side that
-				// takes it to, like the game does, see [swingPathHit].
-				swingPathHit(linePoint, dir, approach.map { it.along to it.offset }, over.start - progress - 1,
+				// What's low, e.g. a railing on the floor, while still bouncing: each bounce comes down to the floor. Held, it's
+				// up over it, e.g. the low blocks in front of an opening in a field of them. Diagonally each tick's move goes
+				// along one axis and then the other, the box swinging out to the one side that takes it to, see [swingPathHit].
+				if (bouncing > 0) swingPathHit(linePoint, dir, approach.map { it.along to it.offset }, bouncing,
 					linePoint.y + passerConfig.minObstacleHeight, linePoint.y + STEP_HEIGHT)?.let { at ->
 					ElytraFly.debug { "Not through the opening %+.2f across, low: in the way %.1f ahead on the way over".format(thread.centre, at) }
 					continue
@@ -4329,10 +4337,12 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.slowerSwerveFits(swerve: Swerve, linePoint: Vec3d, dir: Vec3d, progress: Double): Boolean {
 		val distance = swerve.blockAt - progress
-		if (flyer.horizontalSpeed <= FIT_SPEED || distance <= landingDistance() + RESTART_ROOM) return false
+		if (flyer.horizontalSpeed <= SWERVE_FIT_SPEED || distance <= landingDistance()) return false
 		if (restartedFor?.let { abs(it - swerve.blockAt) < RESTART_SAME } == true) return false
 		val off = flyer.pos.subtract(startPos).dotProduct(across(dir))
-		return sandboxed { swerveWays(linePoint, dir, distance, off, FIT_SPEED) }.isNotEmpty()
+		// Down before it has to steer out, with room to get going again first.
+		val slow = sandboxed { swerveWays(linePoint, dir, distance, off, SWERVE_FIT_SPEED) }.firstOrNull()?.hop?.swerve ?: return false
+		return slow.outAt - progress > landingDistance() + SWERVE_RESTART_ROOM
 	}
 
 	/**
