@@ -4159,11 +4159,10 @@ abstract class ObstaclePassingMode(
 					ElytraFly.debug { "Not through the opening %+.2f across: $hit".format(thread.centre) }
 					continue
 				}
-				// What's low, e.g. a railing on the floor, all the way to it: each bounce comes down to the floor, the hold
-				// only gets up over it once it's risen.
-				// Diagonally each tick's move goes along one axis and then the other, the box swinging out to the one side that
-				// takes it to, like the game does, see [swingPathHit].
-				swingPathHit(linePoint, dir, approach.map { it.along to it.offset }, over.start - progress - 1,
+				// What's low, e.g. a railing on the floor, while still bouncing: each bounce comes down to the floor. Held, it's
+				// up over it, e.g. the low blocks in front of an opening in a field of them. Diagonally each tick's move goes
+				// along one axis and then the other, the box swinging out to the one side that takes it to, see [swingPathHit].
+				if (bouncing > 0) swingPathHit(linePoint, dir, approach.map { it.along to it.offset }, bouncing,
 					linePoint.y + passerConfig.minObstacleHeight, linePoint.y + STEP_HEIGHT)?.let { at ->
 					ElytraFly.debug { "Not through the opening %+.2f across, low: in the way %.1f ahead on the way over".format(thread.centre, at) }
 					continue
