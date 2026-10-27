@@ -6355,8 +6355,10 @@ abstract class ObstaclePassingMode(
 		if (thread?.hopStart == hop.start || progress < hop.obstacle) return null
 		if (hop.touch?.let { !hop.touched || progress <= it.range.endInclusive } == true) return null
 		// Any number of blocks up from the level bounced on, the highest under you: from the floor right onto a layer two
-		// high too, the levels below it are stepped down onto off its end, see [setLevel].
-		return generateSequence(startPos.y + STEP_HEIGHT) { it + STEP_HEIGHT }.takeWhile { it <= hop.feetY - 0.5 && it <= player.y }
+		// high too, the levels below it are stepped down onto off its end, see [setLevel]. A block up only past something
+		// higher, else it'd have been glided up onto, see [isStepUp]; higher, the glide over that layer itself too.
+		return generateSequence(startPos.y + STEP_HEIGHT) { it + STEP_HEIGHT }
+			.takeWhile { it <= hop.feetY - (if (it < startPos.y + STEP_HEIGHT + 0.01) 0.5 else 0.0) && it <= player.y }
 			.toList().asReversed().firstOrNull { layerY ->
 				val up = Vec3d(player.pos.x, layerY, player.pos.z)
 				topOverlap(player.pos, layerY) >= GLIDE_SIZE * GLIDE_SIZE * 0.99 &&
