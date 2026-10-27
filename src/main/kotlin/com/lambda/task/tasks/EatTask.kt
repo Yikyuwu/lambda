@@ -24,6 +24,7 @@ import com.lambda.context.SafeContext
 import com.lambda.event.events.TickEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.managers.hotbar.HotbarRequest
+import com.lambda.interaction.managers.rotating.RotationManager
 import com.lambda.interaction.material.container.containers.HotbarContainer
 import com.lambda.interaction.material.container.containers.InventoryContainer
 import com.lambda.task.Task
@@ -97,7 +98,15 @@ class EatTask @Ta5kBuilder constructor(
 
             eatStack = player.mainHandStack
 
-            (interaction.interactItem(player, Hand.MAIN_HAND) as? ActionResult.Success)?.let {
+            // Vanilla sends your look with the use, a rotation module's one the server has would jump to it and back,
+            // gliding that's set back. Sent with the server's.
+            val (yaw, pitch) = player.yaw to player.pitch
+            player.yaw = RotationManager.serverRotation.yawF
+            player.pitch = RotationManager.serverRotation.pitchF
+            val used = interaction.interactItem(player, Hand.MAIN_HAND)
+            player.yaw = yaw
+            player.pitch = pitch
+            (used as? ActionResult.Success)?.let {
                 if (it.swingSource == ActionResult.SwingSource.CLIENT) player.swingHand(Hand.MAIN_HAND)
                 mc.gameRenderer.firstPersonRenderer.resetEquipProgress(Hand.MAIN_HAND)
                 mc.options.useKey.isPressed = true
