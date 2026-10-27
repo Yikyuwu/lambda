@@ -297,6 +297,11 @@ abstract class ObstaclePassingMode(
 		 * sinking a cm below the top there, the next of its blocks is in the way, see [intoLayerSide].
 		 */
 		private const val MIN_GAP = 1.5
+		/**
+		 * A hole this short on a lane beside a hole is glided over in a bounce, the lane is still bounced on past it, e.g.
+		 * where the stair-stepped rim of a diagonal dip misses a block, see [floorLane].
+		 */
+		private const val SIDE_STEP_GAP = 2.5
 		/** How far the box may stick out over the floor around a gap in a layer and still come down in it, see [intoLayerSide]. */
 		private const val GAP_FALL_MARGIN = 0.1
 		/**
@@ -4642,30 +4647,69 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * A lane beside the hole [start] to [end] ahead of [from] with floor all along it, nothing on it, and steered over to
-	 * before the hole: bounced on past it instead of braking for it. The closest, null with none.
+	 * before the hole: bounced on past it instead of braking for it, or of a long glide over it that costs speed. Holes
+	 * on it up to [SIDE_STEP_GAP] long are glided over in a bounce, a layer a block high right after it is bounced up
+	 * onto, like after the hole on the line. Up on a layer ending at the hole, [floorY] is the floor down there the lane
+	 * is bounced on once off it: steered over to up there before the hole, looked at from where the layer ends on that
+	 * lane. The closest, null with none.
 	 */
-	private fun SafeContext.floorLane(from: Vec3d, linePoint: Vec3d, dir: Vec3d, start: Double, end: Double): Lane? {
+	private fun SafeContext.floorLane(from: Vec3d, linePoint: Vec3d, dir: Vec3d, start: Double, end: Double, floorY: Double? = null): Lane? {
 		val across = across(dir)
 		val (step, sides) = quarterLanes(dir)
 		val here = from.subtract(linePoint).dotProduct(across)
 		val at = progress(from)
 		val room = bounceRoom()
-		return (-sides..sides).filter { it != 0 }.sortedBy { abs(it * step - here) }.firstNotNullOfOrNull { side ->
+		fun low(point: Vec3d) = if (floorY == null) point else Vec3d(point.x, floorY, point.z)
+		// Off a layer, a bounce before the hole on: before that it's up on the layer.
+		val lookFrom = if (floorY == null) 0.0 else max(0.0, start - room)
+		fun laneAt(side: Int): Lane? {
 			val offset = side * step
 			val lanePoint = linePoint.add(across.multiply(offset))
-			// Floor under all of the box, also where steering only gets it close to the lane, toward the hole.
-			fun floorAll(point: Vec3d) = holesAhead(point, dir).none { it.start < at + end + room && it.endInclusive > at }
-			if (!floorAll(lanePoint) || !floorAll(linePoint.add(across.multiply(offset - sign(offset - here) * LANE_REACHED)))) return@firstNotNullOfOrNull null
-			if (lanePoint.obstacleHit(dir, end + DODGE_MARGIN) != null) return@firstNotNullOfOrNull null
+			// Floor under all of the box, also where steering only gets it close to the lane, toward the hole. A short hole
+			// on it is glided over bouncing on.
+			fun floorAll(point: Vec3d) = holesAhead(low(point), dir).none {
+				it.start < at + end + room && it.endInclusive > at + lookFrom && it.endInclusive - it.start > SIDE_STEP_GAP
+			}
+			if (!floorAll(lanePoint) || !floorAll(linePoint.add(across.multiply(offset - sign(offset - here) * LANE_REACHED)))) return null
+			// Off a layer, from where it ends on this lane: up there it's the floor bounced on until then.
+			val clearFrom = if (floorY == null) 0.0 else {
+				val up = lanePoint.add(dir.multiply(lookFrom))
+				generateSequence(0.0) { it + HOP_SCAN_STEP }.takeWhile { it <= end - lookFrom }
+					.firstOrNull { !up.add(dir.multiply(it)).boxHasFloor() }?.let { lookFrom + it + HOP_SCAN_STEP } ?: return null
+			}
+			val clearPoint = low(lanePoint).add(dir.multiply(clearFrom))
+			clearPoint.obstacleHit(dir, end - clearFrom + DODGE_MARGIN)?.let { hit ->
+				// A layer a block high once past the hole, bounced up onto like after the hole on the line: nothing on it, and
+				// floor up there with no gap a bounce comes down in, e.g. along its stair-stepped side askew.
+				if (clearFrom + hit.distance < end - HOLE_SCAN_STEP) return null
+				val up = clearPoint.add(0.0, STEP_HEIGHT, 0.0)
+				if (up.obstacleDistance(dir, hit.distance + STEP_CLEAR) != null) return null
+				var gap = 0.0
+				var along = hit.distance + HOP_SCAN_STEP
+				while (along <= hit.distance + STEP_CLEAR) {
+					gap = if (up.add(dir.multiply(along)).boxHasFloor()) 0.0 else gap + HOP_SCAN_STEP
+					if (gap > SIDE_STEP_GAP / 2) return null
+					along += HOP_SCAN_STEP
+				}
+			}
 			// Over on it well before the hole: steering over to it, the hole is looked at from where you are, see [steerDodge].
+			// Up on a layer before its end, off it it's down on the floor.
 			val reached = laneReachedAt(here, dir, offset, start)
-			if (reached == null || reached > start - brakeDistance()) return@firstNotNullOfOrNull null
+			if (reached == null || reached > start - (if (floorY == null) brakeDistance() else STEP_ON)) return null
 			// Nothing on the lanes swung across on the way over from where you are.
 			val from = (here / step).roundToInt()
 			if ((min(from, side)..max(from, side)).any { it != side && it != from &&
-					linePoint.add(across.multiply(it * step)).obstacleHit(dir, reached + 1) != null }) return@firstNotNullOfOrNull null
-			Lane(across.multiply(offset), 0, offset)
+					linePoint.add(across.multiply(it * step)).obstacleHit(dir, reached + 1) != null }) return null
+			return Lane(across.multiply(offset), 0, offset)
 		}
+		val lanes = HashMap<Int, Lane?>()
+		fun lane(side: Int): Lane? = if (side == 0 || abs(side) > sides) null else lanes.getOrPut(side) { laneAt(side) }
+		// The closest, then the middle of the free ones next to it: clear of what's at both its sides, e.g. a dip's rim
+		// between the dip and the wall.
+		val first = (-sides..sides).filter { it != 0 }.sortedBy { abs(it * step - here) }.firstOrNull { lane(it) != null } ?: return null
+		val lowest = generateSequence(first) { it - 1 }.takeWhile { lane(it) != null }.last()
+		val highest = generateSequence(first) { it + 1 }.takeWhile { lane(it) != null }.last()
+		return lane(listOf((lowest + highest).floorDiv(2), (lowest + highest + 1).floorDiv(2)).minBy { abs(it * step - here) })
 	}
 
 	/**
@@ -5209,6 +5253,21 @@ abstract class ObstaclePassingMode(
 		// On a lane beside the line, e.g. dodging, the hole may start a bit later there than on the line.
 		val (holeLine, hole) = listOf(linePoint, line).distinct().firstNotNullOfOrNull { point -> holeAfterEdge(point, dir, edge)?.let { point to it } }
 			?: return null.also { ElytraFly.debug { "The blocks end %.1f ahead, no hole right after it".format(edge) } }
+		// Dodging on a lane with floor down there beside the hole on the line, held past its end, e.g. side-stepping it:
+		// bounced on down there off the edge, the line's hole isn't what's flown over.
+		if (holeLine != linePoint && dodge != null && dodgeEnd >= hole.endInclusive &&
+			holesAhead(linePoint.add(0.0, baseY - linePoint.y, 0.0), dir).none { it.start < hole.endInclusive && it.endInclusive > hole.start && it.endInclusive - it.start > SIDE_STEP_GAP }) {
+			ElytraFly.debug { "The blocks end %.1f ahead, a hole right after it on the line, floor down there beside it on the lane".format(edge) }
+			return null
+		}
+		val besideFrom = Vec3d(player.x, line.y, player.z)
+		val besideAt = progress(besideFrom)
+		// Floor beside it down there to bounce on past it, steered over to up here: taken over any glide over it or
+		// touch-down in it, those glide on after the top and slow down, e.g. along a dip with single blocks in it, its rim.
+		floorLane(besideFrom, line, dir, hole.start - besideAt, hole.endInclusive - besideAt, baseY)?.let { beside ->
+			ElytraFly.debug { "The blocks end %.1f ahead, a hole %.1f long right after it, side-stepping it on the floor down there ${beside.target.describe(dir)}".format(edge, hole.endInclusive - hole.start) }
+			return commitLane("layerHole", beside, hole.endInclusive + DODGE_MARGIN)
+		}
 		// The side of the top it's not over to yet only kept dodging over to it, see [touchSide].
 		val side = touchSide
 		val holeStart = touchHoleStart
@@ -5847,8 +5906,14 @@ abstract class ObstaclePassingMode(
 			if (lane != Vec3d.ZERO && !onCarpets && line.boxHasFloor()) return false
 			offTheLayer()
 			// Off it on a lane, down there what's beside the way may be as high as the layer was, e.g. a railing: held over
-			// it back to the line, not dropped down into its side.
-			if (lane != Vec3d.ZERO && !onCarpets) return swerveBack(dir)
+			// it back to the line, not dropped down into its side. Not side-stepping a hole on the line down there: bounced on
+			// along the lane until past it, see [floorLane].
+			if (lane != Vec3d.ZERO && !onCarpets) {
+				val floorLine = Vec3d(line.x, baseY, line.z)
+				if (holesAhead(floorLine, dir).any { it.start < dodgeEnd && it.endInclusive - it.start > SIDE_STEP_GAP } &&
+					holesAhead(floorLine.add(lane), dir).none { it.start < dodgeEnd && it.endInclusive - it.start > SIDE_STEP_GAP }) return false
+				return swerveBack(dir)
+			}
 			return false
 		}
 		// The next bounce would come down in a gap in it, into the side of the layer after it: glided across.
