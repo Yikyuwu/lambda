@@ -3246,6 +3246,11 @@ abstract class ObstaclePassingMode(
 					}
 				}
 				if (stone != null && judged(stone)?.second != null) return@withHopMemo over to null
+				// Over both touching down on a top on the way, e.g. a floating block right after a low one: bounced off it rather
+				// than glided over it, losing speed.
+				withTouch(both, from, dir).takeIf { it.touch != null }?.let { touching ->
+					judged(touching)?.second?.let { return@withHopMemo touching to it }
+				}
 				val bothThen = judged(both)?.second
 				if (bothThen == null) miss += ", nor over both and on ($hopMiss)"
 				bothThen?.let { both to it }
