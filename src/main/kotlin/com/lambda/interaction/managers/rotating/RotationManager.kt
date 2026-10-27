@@ -33,6 +33,7 @@ import com.lambda.interaction.managers.rotating.RotationManager.activeRotation
 import com.lambda.interaction.managers.rotating.RotationManager.serverRotation
 import com.lambda.interaction.managers.rotating.RotationManager.updateActiveRotation
 import com.lambda.threading.runSafe
+import com.lambda.util.FolderRegistry
 import com.lambda.util.extension.rotation
 import com.lambda.util.math.Vec2d
 import com.lambda.util.math.lerp
@@ -69,11 +70,24 @@ object RotationManager : Manager<RotationRequest>(
 	private var pauseVanillaOverrides = false
 
 	/**
-	 * Where you looked last, kept through a reconnect: the server puts you back looking where it last got told, e.g. back
-	 * along the highway where a bot last threw junk, not where you looked.
+	 * Where you looked last in a world, kept through a reconnect and a restart, see [viewFile]: the server puts you back
+	 * looking where it last got told, e.g. back along the highway where a bot last threw junk, and a fresh player keeps
+	 * whatever it has, e.g. where you looked in 2b2t's queue. Not in the queue, you're a spectator there.
 	 */
 	private var lastView: Rotation? = null
 	private var restoreView = false
+	/** How often where you look is saved, also for a crash. */
+	private const val VIEW_SAVE_TICKS = 200
+	private val viewFile get() = FolderRegistry.cache.resolve("last-view.txt").toFile()
+
+	private fun loadView() = runCatching {
+		viewFile.readText().trim().split(" ").let { (yaw, pitch) -> Rotation(yaw.toDouble(), pitch.toDouble()) }
+	}.getOrNull()
+
+	private fun saveView() {
+		val view = lastView ?: return
+		runCatching { viewFile.writeText("${view.yaw} ${view.pitch}") }
+	}
 
 	override fun load(): String {
 		super.load()
@@ -92,20 +106,26 @@ object RotationManager : Manager<RotationRequest>(
                 request?.age++
             }
             changedThisTick = false
-            // Not the new player's before the server placed it.
-            if (!restoreView) lastView = player.rotation
+            // Not the new player's before the server placed it, nor the queue's.
+            if (!restoreView && !player.isSpectator) lastView = player.rotation
+            if (player.age % VIEW_SAVE_TICKS == 0) saveView()
         }
 
-        listen<WorldEvent.Join> { restoreView = lastView != null }
+        listen<WorldEvent.Join> {
+            if (lastView == null) lastView = loadView()
+            restoreView = true
+        }
 
-        // Before the force rotate keeps the view the player has, see ClientPlayNetworkHandlerMixin.
+        listen<WorldEvent.Leave> { saveView() }
+
+        // Before the force rotate keeps the view the player has, see ClientPlayNetworkHandlerMixin. In the queue on
+        // until the world, with none kept where the server says.
         listen<PlayerEvent.ServerForceRotate>({ Int.MAX_VALUE }) {
-            if (!restoreView) return@listen
+            if (!restoreView || player.isSpectator) return@listen
             restoreView = false
-            lastView?.let { view ->
-                player.yaw = view.yawF
-                player.pitch = view.pitchF
-            }
+            val view = lastView ?: Rotation(it.yaw, it.pitch)
+            player.yaw = view.yawF
+            player.pitch = view.pitchF
         }
 
 		listen<RenderEvent.UpdateTarget> {
