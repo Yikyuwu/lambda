@@ -3126,9 +3126,11 @@ abstract class ObstaclePassingMode(
 				val over = planHop(lanePoint, dir, wall, swings = false, anyway = true) ?: continue
 				val thread = threadPlan(linePoint, dir, offset, over, off) ?: continue
 				// Steered over to it right away, bouncing: free on the way there until held, e.g. not across a railing beside
-				// the way into the side of it.
+				// the way into the side of it. Only until it's held, up there it's above what's low in front of it, e.g. a field
+				// of floating blocks, from the hold's lead on, see [holdingFor].
+				val bouncing = over.start - progress - speed * leadTicks(over)
 				val approach = steerPath(off, dir, thread.centre, thread.lean, over.start - progress, over.start - progress)
-				steerPathHit(linePoint, dir, approach, over.start - progress)?.let { hit ->
+				if (bouncing > 0) steerPathHit(linePoint, dir, approach, bouncing)?.let { hit ->
 					ElytraFly.debug { "Not through the opening %+.2f across: $hit".format(thread.centre) }
 					continue
 				}
