@@ -84,9 +84,13 @@ object RotationManager : Manager<RotationRequest>(
 		viewFile.readText().trim().split(" ").let { (yaw, pitch) -> Rotation(yaw.toDouble(), pitch.toDouble()) }
 	}.getOrNull()
 
+	/** What's in [viewFile], it's only written when that changed. */
+	private var savedView: Rotation? = null
+
 	private fun saveView() {
 		val view = lastView ?: return
-		runCatching { viewFile.writeText("${view.yaw} ${view.pitch}") }
+		if (view == savedView) return
+		runCatching { viewFile.writeText("${view.yaw} ${view.pitch}") }.onSuccess { savedView = view }
 	}
 
 	override fun load(): String {
@@ -116,7 +120,11 @@ object RotationManager : Manager<RotationRequest>(
             restoreView = true
         }
 
-        listen<WorldEvent.Leave> { saveView() }
+        listen<WorldEvent.Leave> {
+            saveView()
+            // It holds on to its requester, e.g. a task, until a trace reads it.
+            lastRejected = null
+        }
 
         // Before the force rotate keeps the view the player has, see ClientPlayNetworkHandlerMixin. In the queue on
         // until the world, with none kept where the server says.
