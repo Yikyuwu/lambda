@@ -549,6 +549,12 @@ abstract class ObstaclePassingMode(
 		private const val SWING_FIT_ABOVE = 0.4
 		/** Slower than this no tick fits, it's in the way, not beside it, see [swingFit]. */
 		private const val SWING_FIT_MIN = 0.5
+		/**
+		 * How far ahead [swingCap] looks, in ticks at your speed and blocks more: the next two bounces' jumps. What's
+		 * beside the way farther on is passed like any other obstacle, slowed down for when it's a tunnel still.
+		 */
+		private const val SWING_FIT_LOOK_TICKS = 24.0
+		private const val SWING_FIT_LOOK_MARGIN = 3.0
 		/** How often [swingFit] is looked at again, in ticks. */
 		private const val SWING_FIT_TICKS = 2
 		/** How much faster than now a lane is picked for, bouncing over to it speeds you up, diagonally by a block a tick or so. */
@@ -3672,20 +3678,18 @@ abstract class ObstaclePassingMode(
 	 * it is and bouncing slows down on its own. Not when nothing fits even slow, that's an obstacle in the way.
 	 */
 	private fun SafeContext.swingCap(linePoint: Vec3d, dir: Vec3d) {
-		if (!passerConfig.dodge || !player.isGliding) {
+		// Gliding over or through something, or bouncing on a top up above the floor, the way on was planned with the
+		// sprint jumps, through an opening as slow as that fits, see [threadHold].
+		if (!passerConfig.dodge || !player.isGliding || hop != null || player.y > startPos.y + BOUNCE_PEAK + SWING_FIT_ABOVE) {
 			swingFitSpeed = Double.POSITIVE_INFINITY
 			swingCapped = false
 			return
 		}
 		if (flightTicks - swingFitTick >= SWING_FIT_TICKS) {
 			swingFitTick = flightTicks
-			val across = across(dir)
-			val lane = when {
-				dodge != null -> dodgeOffset
-				else -> hop?.lane?.dotProduct(across) ?: 0.0
-			}
-			val off = player.pos.subtract(linePoint).dotProduct(across)
-			swingFitSpeed = swingFit(linePoint, dir, lane, off, passerConfig.dodgeLookAhead.toDouble())
+			val off = player.pos.subtract(linePoint).dotProduct(across(dir))
+			val look = min(passerConfig.dodgeLookAhead.toDouble(), player.velocity.horizontalLength() * SWING_FIT_LOOK_TICKS + SWING_FIT_LOOK_MARGIN)
+			swingFitSpeed = swingFit(linePoint, dir, if (dodge != null) dodgeOffset else 0.0, off, look)
 		}
 		val speed = player.velocity.horizontalLength()
 		val capped = swingFitSpeed >= SWING_FIT_MIN && speed + BOUNCE_SPEED_GAIN > swingFitSpeed
@@ -4376,7 +4380,7 @@ abstract class ObstaclePassingMode(
 		val across = across(dir)
 		val lanePoint = linePoint.add(across.multiply(lane))
 		val to = (lanePoint.obstacleHit(dir, look, speed = 0.0, mobs = false)?.distance?.minus(1.0) ?: look)
-		if (to < 2.0) return Double.POSITIVE_INFINITY
+		if (to < 4.0) return Double.POSITIVE_INFINITY
 		val low = min(lane, off) - SWING_FIT_MARGIN
 		val high = max(lane, off) + SWING_FIT_MARGIN
 		val speed = player.velocity.horizontalLength()
@@ -4387,16 +4391,21 @@ abstract class ObstaclePassingMode(
 		// As far out to either side as the box swings at the fastest looked at, from its middle out to its corner.
 		val reach = GLIDE_SIZE / 2 * (abs(d.x) + abs(d.z)) + top * abs(d.x * d.z) + 1.0
 		val boxes = swingBoxes(linePoint, d, 0.0, to, low - reach, high + reach, minY, maxY)
-		fun fits(v: Double) = swingClear(linePoint, dir, 0.0, to, v, boxes, low, high)
-		if (fits(top)) return Double.POSITIVE_INFINITY
-		if (!fits(SWING_FIT_MIN)) return 0.0
-		var fast = top
-		var slow = SWING_FIT_MIN
-		repeat(7) {
-			val v = (slow + fast) / 2
-			if (fits(v)) slow = v else fast = v
+		fun fitOver(from: Double, until: Double): Double {
+			fun fits(v: Double) = swingClear(linePoint, dir, from, until, v, boxes, low, high)
+			if (fits(top)) return Double.POSITIVE_INFINITY
+			if (!fits(SWING_FIT_MIN)) return 0.0
+			var fast = top
+			var slow = SWING_FIT_MIN
+			repeat(7) {
+				val v = (slow + fast) / 2
+				if (fits(v)) slow = v else fast = v
+			}
+			return slow
 		}
-		return slow
+		// Walls run along the way: only what limits both halves of it. A block beside it in one is an obstacle, passed
+		// like any other, e.g. through a field of them.
+		return max(fitOver(0.0, to / 2), fitOver(to / 2, to))
 	}
 
 	/**
