@@ -662,6 +662,11 @@ abstract class ObstaclePassingMode(
 		 * that far it'd stall, while one after it gets there.
 		 */
 		private const val THREAD_HOLD_RISES = 3
+		/**
+		 * About how much speed holding the height sheds a block, see [threadHold]: an opening that only fits slower is held
+		 * from as far before it as that takes, e.g. 62 before one fitting up to 0.95 at 1.75.
+		 */
+		private const val THREAD_HOLD_SLOWDOWN = 0.013
 		/** The pitch the jump tick of a bounce is flown at, level, see BounceElytraFly. */
 		private const val JUMP_PITCH = 0.0
 		/** How high a bounce takes your feet off the floor where nothing else caps it. */
@@ -4141,6 +4146,8 @@ abstract class ObstaclePassingMode(
 		// side. Which one gets past what follows too is up to the simulation, see [continuation].
 		if (lineHop == null) {
 			val centres = mutableListOf<Double>()
+			// Bouncing on, once for all of them, see below.
+			val speeds by lazy(LazyThreadSafetyMode.NONE) { bounceSpeeds(linePoint.y, STEER_SIM_TICKS) }
 			for (offset in listOf(0.0, -step, step, -2 * step, 2 * step)) {
 				if (abs(offset) > passerConfig.maxDodge + 1e-6) continue
 				val lanePoint = linePoint.add(across.multiply(offset))
@@ -4161,10 +4168,20 @@ abstract class ObstaclePassingMode(
 				}
 				// What's low, e.g. a railing on the floor, while still bouncing: each bounce comes down to the floor. Held, it's
 				// up over it, e.g. the low blocks in front of an opening in a field of them. Diagonally each tick's move goes
-				// along one axis and then the other, the box swinging out to the one side that takes it to, see [swingPathHit].
-				if (bouncing > 0) swingPathHit(linePoint, dir, approach.map { it.along to it.offset }, bouncing,
+				// along one axis and then the other, the box swinging out to the one side that takes it to, see [swingPathHit],
+				// the farther the faster: flown at the speed the bounces get it to, not slowing down like gliding, a lane by
+				// a railing looked at 0.86 had the box run into its corners at 1.33. Bouncing until it's held like
+				// [threadHold] holds: for the climb, or slowing down to what fits from as far as that takes, e.g. 62 before
+				// a single block missing from a diagonal wall at 1.75.
+				val bounced = steerPath(off, dir, thread.centre, thread.lean, over.start - progress, over.start - progress, speeds = speeds)
+				val lead = leadTicks(over)
+				val heldFrom = bounced.firstOrNull { state ->
+					val v = state.speed
+					over.start - progress - state.along <= max(v * lead, if (thread.maxSpeed.isFinite()) (v - thread.maxSpeed) / THREAD_HOLD_SLOWDOWN else 0.0)
+				}?.along ?: (over.start - progress)
+				if (heldFrom > 0) swingPathHit(linePoint, dir, bounced.map { it.along to it.offset }, heldFrom,
 					linePoint.y + passerConfig.minObstacleHeight, linePoint.y + STEP_HEIGHT)?.let { at ->
-					ElytraFly.debug { "Not through the opening %+.2f across, low: in the way %.1f ahead on the way over".format(thread.centre, at) }
+					ElytraFly.debug { "Not through the opening %+.2f across, low: in the way %.1f ahead on the way over bouncing, held from %.1f".format(thread.centre, at, heldFrom) }
 					continue
 				}
 				if (centres.any { abs(it - thread.centre) < THREAD_CENTRES_APART }) continue
@@ -7526,6 +7543,36 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * Your speed each tick bouncing on off the floor at [level] from where the ways past are looked for from, see
+	 * [lookingFrom], for [ticks], each bounce speeding you up like [bounceRises]: the speed a tick's move goes at, the box
+	 * swinging out the farther diagonally, e.g. into a railing's stair-step corners at 1.33 where it was looked at 0.86
+	 * slowing down like gliding.
+	 */
+	private fun SafeContext.bounceSpeeds(level: Double, ticks: Int): List<Double> {
+		val gravity = flyer.finalGravity
+		val bounce = bouncePitch()
+		val gain = frame().gain
+		var y = lookY()
+		var climb = lookClimb()
+		var speed = lookSpeed()
+		return List(ticks) {
+			var pitch = bounce(y, climb)
+			if (y <= level && climb <= 0) {
+				y = level
+				climb = JUMP_VELOCITY
+				speed += gain
+				pitch = JUMP_PITCH
+			}
+			glide(climb, speed, pitch, gravity).let { (c, s) ->
+				climb = c
+				speed = s
+			}
+			y += climb
+			speed
+		}
+	}
+
+	/**
 	 * Whether holding the height with [holdPitch] gets you over [hop] from [progress] on, bouncing off the floor
 	 * on the way if need be. From [holdFrom] ticks on, by default once close enough like [holdingFor]. Simulates the glide
 	 * tick by tick, at [from] a tick for now, with vanilla's [turn] of the velocity through an opening, see [glide].
@@ -8064,10 +8111,12 @@ abstract class ObstaclePassingMode(
 	 * The way across the line you take for [distance] along it, steering with [steerYaw] from [offset] across it over
 	 * to [target], then from [leanFrom] on tilted [lean] across it, once over at [target] or coming from the side it
 	 * tilts to, like [leaning]. The flight turns a tenth of the way to where you look each tick, so it lags behind.
-	 * With [holdSpeed] at your speed all the way, bouncing on holds it, else slowing down like gliding.
+	 * With [holdSpeed] at your speed all the way, bouncing on holds it, with [speeds] at those each tick, else slowing
+	 * down like gliding.
 	 */
 	private fun SafeContext.steerPath(
 		offset: Double, dir: Vec3d, target: Double, lean: Int, leanFrom: Double, distance: Double, holdSpeed: Boolean = false,
+		speeds: List<Double>? = null,
 	): List<SteerState> {
 		val across = across(dir)
 		val velocity = lookVelocity()
@@ -8076,15 +8125,17 @@ abstract class ObstaclePassingMode(
 		var off = offset
 		var along = 0.0
 		val path = mutableListOf(SteerState(along, off, heading, speed))
-		repeat(if (holdSpeed) STEER_SIM_TICKS else HOP_SIM_TICKS) {
+		repeat(if (holdSpeed || speeds != null) STEER_SIM_TICKS else HOP_SIM_TICKS) { tick ->
 			if (along >= distance) return path
+			// At the speed given for each tick, e.g. bouncing on, see [bounceSpeeds].
+			if (speeds != null && speeds.isNotEmpty()) speed = speeds[min(tick, speeds.lastIndex)]
 			val drift = speed * sin(heading) * STEER_DAMPING_TICKS
 			val aim = if (lean != 0 && along >= leanFrom && (target - off) * lean <= LANE_REACHED) Math.toRadians(LEAN_DEGREES) * lean
 				else atan2(target - off - drift, DODGE_STEER_AHEAD)
 			heading += (aim - heading) * 0.1
 			off += speed * sin(heading)
 			along += speed * cos(heading)
-			if (!holdSpeed) speed *= 0.99
+			if (!holdSpeed && speeds == null) speed *= 0.99
 			path.add(SteerState(along, off, heading, speed))
 		}
 		return path
