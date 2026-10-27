@@ -369,6 +369,26 @@ abstract class ObstaclePassingMode(
 		 */
 		private const val TOUCH_MIN_OVERLAP = GLIDE_SIZE * GLIDE_SIZE / 6
 		/**
+		 * How far inside a top's edges, along x and z, the middle of the box has to be to come down on it, a quarter of the
+		 * box: three quarters of it over the top each way. Not in a hole, see [touchLane]. Nearer its edge the move across
+		 * that tick may carry it off the top, it's never come down on there, glided on past it instead, see [topMargin].
+		 * Simulated, all of the box over it (0.3) or 0.2 a single block was hardly ever come down on at a tick's speed, the
+		 * parkour field's stepping stones not at all, the tick it comes over it decides how far in it is.
+		 */
+		private const val TOUCH_EDGE = 0.15
+		/** How far to either side of the lane through a top's middle the way there is looked at, see [topHops]. */
+		private const val TOUCH_AIM_WINDOW = 0.15
+		/** How far across from the lane a top was found on the lane through its middle is looked for, see [topHops]. */
+		private const val TOUCH_AIM_REACH = 0.75
+		/** The steps the lanes and spots along them are looked at in for the one through a top's middle, see [topHops]. */
+		private const val TOUCH_AIM_STEP = 0.1
+		/** How many of the ways onto a top, the lane most inside its edges first, are simulated at most, see [topHops]. */
+		private const val TOUCH_AIM_TRIES = 4
+		/** The ways along x and z a top's edges are looked for, see [topMargin]. */
+		private val TOP_SIDES = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
+		/** A move's axes this close in length, either may go first, see [swingPathHit]. */
+		private const val SWING_EVEN = 1e-4
+		/**
 		 * How far the box has to reach over the top each way to dive onto it, a sliver of its corner is enough to come
 		 * down on, see [topUnderSoon].
 		 */
@@ -709,6 +729,8 @@ abstract class ObstaclePassingMode(
 		var rose = false
 		/** Over [touch] once and diving onto it, it doesn't stop halfway, see [hopPitch]. */
 		var overTop = false
+		/** Past where the box comes most inside [touch]'s edges without coming far enough in, glided on past it, see [hopPitch]. */
+		var skipped = false
 		/** Gliding [down] into a dip a block deep to bounce on down there, see [dipLane]. */
 		var intoDip = false
 		/** Over the hole right after the end of a layer, planned from up on it and kept to the hole's end, see [layerHole]. */
@@ -768,6 +790,27 @@ abstract class ObstaclePassingMode(
 		var switchAt = Double.NEGATIVE_INFINITY
 		/** Stretches along the line flown tilted away from the line, the box swinging out only that way, see [leanYaw]. */
 		var leans: List<ClosedFloatingPointRange<Double>> = emptyList()
+		/**
+		 * Which way across the line the heading is held on the way to it, the box swinging out between the axes only that
+		 * way, 0 when it may swing either way, see [topHops] and [heldLean].
+		 */
+		var lean = 0
+		/**
+		 * Where across the line it is on the way to it, steered over to [lane]: along the line and across it, a tick apart,
+		 * see [topHops]. Empty when on [lane] already.
+		 */
+		var path: List<Pair<Double, Double>> = emptyList()
+	}
+
+	/** Across the line at [along] it on [path] (along and across it a tick apart), the last spot past its end. */
+	private fun pathOffset(path: List<Pair<Double, Double>>, along: Double): Double {
+		if (along <= path.first().first) return path.first().second
+		for (i in 1 until path.size) {
+			val (a0, o0) = path[i - 1]
+			val (a1, o1) = path[i]
+			if (along <= a1) return if (a1 > a0) o0 + (o1 - o0) * (along - a0) / (a1 - a0) else o1
+		}
+		return path.last().second
 	}
 
 	abstract val passerConfig: PasserSettings
@@ -1039,17 +1082,39 @@ abstract class ObstaclePassingMode(
 		val steeringIn = touch != null && along >= touch.switchAt && along <= touch.range.endInclusive &&
 			along >= touch.range.start - speed * TOUCH_SKIM_TICKS &&
 			across(getSnappedDir()).let { side -> abs(player.pos.subtract(startPos).dotProduct(side) - touch.lane.dotProduct(side)) } > TOUCH_LANE_OFF
-		val dive = near && (steeringIn || topUnderSoon(touch!!.y))
+		val coming = near && (steeringIn || topUnderSoon(touch!!.y))
 		// Down onto it as near its middle as it gets: on the tick the box is over it the most, unless the next is more. Off
 		// to the side of its middle that's halfway across it along the way, as far from where it came onto it as from where
 		// it'd leave it. On its edge it'd slide off it in the same tick, a move goes down first, then across. Once down, it
 		// doesn't stop halfway.
 		val now = hop.touch?.let { topOverlap(player.pos, it.y) } ?: 0.0
 		val next by lazy { hop.touch?.let { topOverlap(player.pos.add(player.velocity.x, 0.0, player.velocity.z), it.y) } ?: 0.0 }
-		val overTop = hop.touch == null || now >= TOUCH_MIN_OVERLAP && (hop.overTop || now >= next)
+		// Not in a hole: down on it on the tick the box is the most inside its edges, a quarter of the box in at least, see
+		// [TOUCH_EDGE], else glided on past it. On its edge, e.g. 88% of the box over it diving and 14% the tick after, it came
+		// down a tick late or the move across carried it off. Dived and not down on it there, pulled up, not onto its edge.
+		val centred = hop.touch?.takeIf { !hop.hole }
+		val inside = centred?.let { topMargin(player.pos, it.y) } ?: 0.0
+		val insideNext by lazy { centred?.let { topMargin(player.pos.add(player.velocity.x, 0.0, player.velocity.z), it.y) } ?: 0.0 }
+		if (centred != null && hop.overTop && !hop.touched && inside < TOUCH_EDGE) {
+			hop.overTop = false
+			ElytraFly.debug { "Not down on the top where it's %.2f in from its edge, pulling up, not onto its edge".format(inside) }
+		}
+		val overTop = when {
+			hop.touch == null -> true
+			centred != null -> inside >= TOUCH_EDGE && (hop.overTop || inside >= insideNext)
+			else -> now >= TOUCH_MIN_OVERLAP && (hop.overTop || now >= next)
+		}
+		// Past the tick most inside its edges without coming that far in: glided on past it, held up off it again, not
+		// skimming just above it, see [Hop.holdY].
+		if (centred != null && !overTop && !hop.overTop && !hop.touched && insideNext < inside && !hop.skipped) {
+			hop.skipped = true
+			ElytraFly.debug { "Not in from the top's edge enough to come down on it, at most %.2f, gliding on past it".format(inside) }
+		}
+		val dive = coming && !(hop.skipped && !overTop)
 		fun percent(overlap: Double) = overlap / (GLIDE_SIZE * GLIDE_SIZE) * 100
 		if (near) ElytraFly.debug {
-			"  touch: %.2f along (top %.2f..%.2f), coming over it %b, %.0f%% of the box over it now, %.0f%% next tick, y %.3f climbing %.3f".format(
+			val edge = if (centred != null) ", %.2f in from its edge now, %.2f next tick".format(inside, insideNext) else ""
+			"  touch: %.2f along (top %.2f..%.2f), coming over it %b, %.0f%% of the box over it now, %.0f%% next tick$edge, y %.3f climbing %.3f".format(
 				along, touch!!.range.start, touch.range.endInclusive, dive, percent(now), percent(next), player.y, player.velocity.y)
 		}
 		if (dive && overTop) {
@@ -1095,6 +1160,34 @@ abstract class ObstaclePassingMode(
 		// Summed right away, the positions iterated are one and the same, moved along: kept in a list, all would be the last.
 		return blocksUnder(at, y, half).sumOf { if (!topAt(it.x + 0.5, it.z + 0.5, y)) 0.0
 			else (min(at.x + half, it.x + 1.0) - max(at.x - half, it.x.toDouble())) * (min(at.z + half, it.z + 1.0) - max(at.z - half, it.z.toDouble())) }
+	}
+
+	/**
+	 * How far inside the edges of the tops at [y] the middle of the box at [at] is, along x and z, through tops next to its
+	 * block too: 0 off them, at most a block. Half the box in, all of it is over them.
+	 */
+	private fun SafeContext.topMargin(at: Vec3d, y: Double): Double {
+		if (!topAt(at.x, at.z, y)) return 0.0
+		val bx = floor(at.x).toInt()
+		val bz = floor(at.z).toInt()
+		var inside = 1.0
+		for ((dx, dz) in TOP_SIDES) {
+			var d = when {
+				dx > 0 -> bx + 1 - at.x
+				dx < 0 -> at.x - bx
+				dz > 0 -> bz + 1 - at.z
+				else -> at.z - bz
+			}
+			var x = bx + dx
+			var z = bz + dz
+			while (d < inside && topAt(x + 0.5, z + 0.5, y)) {
+				d += 1.0
+				x += dx
+				z += dz
+			}
+			inside = min(inside, d)
+		}
+		return inside
 	}
 
 	/** Whether the box at [at] is over a top at [y] by [overlap] at least each way, see [topUnderSoon]. */
@@ -2881,7 +2974,13 @@ abstract class ObstaclePassingMode(
 		val top = laneSurfaces(point, dir, progress + speed, progress + hit + TOP_WAY_PAST, surfaceRises(point)).firstOrNull { touch ->
 			touch.middle > progress + max(reach, topLead(player.y, climb, touch.y, speed)) && roomOffTop(touch, point, dir, speed)
 		} ?: return null
-		return HoleWay("top", topHop(point, top, across(dir).multiply(lane)), null, "y%.0f %.1f ahead on %+.2f".format(top.y, top.middle - progress, lane))
+		val hop = topHops(point, dir, top, lane, progress, player.y, speed, off).take(TOUCH_AIM_TRIES).firstOrNull { hop ->
+			val aimed = hop.lane.dotProduct(across(dir))
+			// Over to the lane through its middle in time for the dive too, and down on it from here.
+			(abs(aimed - off) <= TOUCH_LANE_OFF || steerReach(off, dir, aimed, hit)?.let { it <= hop.touch!!.middle - progress - speed * (TOUCH_DIVE_TICKS + 1) } == true) &&
+				canGetOver(hop, progress) && touchedExit(hop) != null
+		} ?: return null
+		return HoleWay("top", hop, null, "y%.0f %.1f ahead on %+.2f".format(top.y, top.middle - progress, hop.lane.dotProduct(across(dir))))
 	}
 
 	/**
@@ -2893,9 +2992,52 @@ abstract class ObstaclePassingMode(
 		return speed * if (skimming) TOP_WAY_SKIM_TICKS else (TOUCH_DIVE_TICKS + 1).toDouble()
 	}
 
-	/** Touching down on [top] on [lane] across the line, [point] on it, and bounced off it as high as the glide may go. */
-	private fun SafeContext.topHop(point: Vec3d, top: Touch, lane: Vec3d) =
-		Hop(top.range.start - HOP_SCAN_STEP, top.range.endInclusive, point.y + passerConfig.minObstacleHeight, maxHopY(), top.range.start, false, lane = lane, touch = top)
+	/**
+	 * Touching down on [top], found on [lane] across the line, [point] on it, and bounced off it as high as the glide may
+	 * go. On the lane through its middle: of the lanes within [TOUCH_AIM_REACH], the one coming over it the most inside its
+	 * edges first, see [topMargin], else on [lane]. Only where the glide there from [from] along the line, [off] across it, at [y] and
+	 * [speed], gets through at every tick with the box swinging out between the axes, steered over to it, see
+	 * [swingPathHit], and on it until down on the top, see [passage]: the heading is held to the side the box may swing
+	 * to, see [Touch.lean]. On a diagonal, on the lane of the opening it came through, 0.37 off the middle of a top beside
+	 * a block, the box clipped the block's corner and came down on the top's edge. The ways that get there, the lane most
+	 * inside its edges first: which tick it comes over it on decides how far in, the glide simulation looks, see [canHop].
+	 */
+	private fun SafeContext.topHops(point: Vec3d, dir: Vec3d, top: Touch, lane: Double, from: Double, y: Double, speed: Double, off: Double): Sequence<Hop> = sequence {
+		val across = across(dir)
+		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val at = progress(point)
+		val linePoint = point.subtract(across.multiply(lane))
+		fun spot(along: Double, offset: Double) = linePoint.add(forward.multiply(along - at)).add(across.multiply(offset))
+		// Where across the line it is along it steering over to a lane from [off], see [steerOffsets].
+		fun pathTo(offset: Double) = steerOffsets(off, offset, speed, top.range.endInclusive + 1 - from).map { (along, across) -> from + along to across }
+		// How far in from its edges it comes over it at most steering over to a lane, to a mm: still on the way over to
+		// it, it comes over it elsewhere, e.g. 5 blocks after an opening 0.35 over from its lane it was still 0.27 short.
+		fun deepest(offset: Double): Int {
+			val path = pathTo(offset)
+			return generateSequence(top.range.start - 0.5) { it + TOUCH_AIM_STEP }.takeWhile { it <= top.range.endInclusive + 0.5 }
+				.maxOf { (topMargin(spot(it, pathOffset(path, it)), top.y) * 1000).roundToInt() }
+		}
+		val reach = (TOUCH_AIM_REACH / TOUCH_AIM_STEP).roundToInt()
+		val lanes = (-reach..reach).filter { it != 0 }.map { lane + it * TOUCH_AIM_STEP }.map { it to deepest(it) }
+			.sortedWith(compareBy({ -it.second }, { abs(it.first - lane) })).map { it.first } + lane
+		val rises = surfaceRises(point)
+		for (offset in lanes) {
+			val touch = laneSurfaces(linePoint.add(across.multiply(offset)), dir, max(from + speed, top.range.start - 2), top.range.endInclusive + 2, rises)
+				.firstOrNull { it.y == top.y && it.range.start <= top.range.endInclusive && it.range.endInclusive >= top.range.start } ?: continue
+			val minY = top.y
+			val maxY = max(y, top.y + TOUCH_ABOVE) + GLIDE_SIZE
+			val way = passage(linePoint, dir, from - at, touch.range.endInclusive - at, minY, maxY, speed, offset, TOUCH_AIM_WINDOW)
+				?.takeIf { it.width >= THREAD_MIN_WIDTH } ?: continue
+			val path = steerOffsets(off, way.centre, speed, touch.middle - from)
+			if (swingPathHit(spot(from, 0.0), dir, path, touch.middle - from, minY, maxY) != null) continue
+			val onto = across.multiply(way.centre)
+			yield(Hop(touch.range.start - HOP_SCAN_STEP, touch.range.endInclusive, point.y + passerConfig.minObstacleHeight, maxHopY(),
+				touch.range.start, false, lane = onto, touch = Touch(touch.range, touch.y, onto).also {
+					it.lean = way.lean
+					it.path = pathTo(way.centre)
+				}))
+		}
+	}
 
 	/**
 	 * How fast [way] past a block is after it from the [start] in [CHOOSER_STARTS], null when it doesn't get past: a glide
@@ -3006,8 +3148,10 @@ abstract class ObstaclePassingMode(
 					val middle = point.add(forward.multiply(touch.middle - end.at))
 					touch.middle > end.at + topLead(end.y, end.climb, touch.y, speed) && topAt(middle.x, middle.z, touch.y) && roomOffTop(touch, point, forward, speed)
 				}?.let { top ->
-					val hop = topHop(point, top, lane)
-					blockHopRun(hop, end.at, speed)?.let { return@run Continuation(it.speed, hop, null, end.at + next.distance, "onto the top at y %.0f %.1f on".format(top.y, top.middle - end.at)) }
+					val offset = lane.dotProduct(across(dir))
+					topHops(point, forward, top, offset, end.at, end.y, speed, offset).take(TOUCH_AIM_TRIES).forEach { hop ->
+						blockHopRun(hop, end.at, speed)?.let { return@run Continuation(it.speed, hop, null, end.at + next.distance, "onto the top at y %.0f %.1f on".format(top.y, top.middle - end.at)) }
+					}
 				}
 			}
 			if (next.distance >= MIN_DODGE_DISTANCE) {
@@ -4196,6 +4340,11 @@ abstract class ObstaclePassingMode(
 		val reached = laneReachedAt(here, dir, plan.centre, wall)
 		if (reached == null || reached > wall - 1)
 			return null.also { threadMiss = "%+.2f where it gets through, can't be steered over to in time".format(plan.centre) }
+		// The way over to it too, the box swinging out to the side it steers to: a spot by a field's wall, steered over to,
+		// had the box run into the wall's corners.
+		swingPathHit(linePoint, dir, steerOffsets(here, plan.centre, speed, wall), wall - 1, minY, maxY)?.let { hit ->
+			return null.also { threadMiss = "%+.2f where it gets through, the way over to it runs into something %.1f ahead".format(plan.centre, hit) }
+		}
 		return Thread(linePoint, dir, from, to, minY, maxY, plan.centre, plan.width, plan.lean, maxSpeed, over.obstacle, over.start,
 			max(at + to, over.obstacle + DODGE_MARGIN))
 	}
@@ -4689,6 +4838,9 @@ abstract class ObstaclePassingMode(
 		// may take you higher than the top, sinking to just above it after.
 		val touching = hop.with(touch = touch, topY = max(hop.topY, maxHopY()))
 		if (canGetOver(touching, progress(player.pos))) {
+			// Coming over it nowhere far enough inside its edges, it'd glide on past it low: glided over as planned instead.
+			if (touchedExit(touching) == null)
+				return hop.also { touchMiss = "it'd come over the top at y %.2f nowhere %.2f inside its edges".format(touch.y, TOUCH_EDGE) }
 			glidingFaster(hop, touching, progress(player.pos))?.let { return hop }
 			return touching.also { touchMiss = "" }
 		}
@@ -5605,6 +5757,10 @@ abstract class ObstaclePassingMode(
 	/** Whether [hop] is the one through an opening that only fits slower, see [Thread]. */
 	private fun threaded(hop: Hop) = thread?.let { it.hopStart == hop.start && it.maxSpeed.isFinite() } == true
 
+	/** Where the box is over [touch] at [along] the line [dir], on its lane or on the way over to it, see [Touch.path]. */
+	private fun touchSpot(touch: Touch, dir: Vec3d, along: Double): Vec3d = startPos.add(dir.multiply(along))
+		.add(if (touch.path.isEmpty()) touch.lane else across(dir).multiply(pathOffset(touch.path, along)))
+
 	/** [canHop] simulated. */
 	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double, turn: Boolean): Boolean {
 		val dir = getSnappedDir()
@@ -5622,6 +5778,9 @@ abstract class ObstaclePassingMode(
 		var touched = hop.touched
 		// Came down on the top to touch down on last tick, bounced off it this one.
 		var onTopNow = false
+		// Diving onto it on the tick most inside its edges, see [hopPitch], or past that tick without and glided on past it.
+		var dove = false
+		var skipped = false
 		// Got to the obstacle, for [hopWallSpeed].
 		var atWall = progress >= hop.obstacle
 		if (atWall) hopWallSpeed = from
@@ -5669,16 +5828,42 @@ abstract class ObstaclePassingMode(
 			holding = holding || if (holdFrom != null) tick >= holdFrom else hop.start - along <= speed * leadTicks(hop)
 			if (holding && hop.hole && (y >= hop.targetY - TOPPED_MARGIN || rose && climb <= 0)) topped = true
 			if (holding && climb > 0) rose = true
-			// Like the flight: skimming just above the top to touch down on until over it, then down onto it, see [hopPitch].
-			val overTop = touch?.range?.contains(along) ?: true
-			val dive = hop.diving(along, speed, touched)
+			// Like the flight: skimming just above the top to touch down on until over it, then down onto it, see [hopPitch]. Not
+			// in a hole, only on the tick the box is the most inside its edges, far enough in, see [TOUCH_EDGE]: none
+			// is, it's glided on past.
+			val coming = hop.diving(along, speed, touched)
+			val overTop = when {
+				touch == null -> true
+				hop.hole || touched -> along in touch.range
+				else -> {
+					val inside = topMargin(touchSpot(touch, dir, along), touch.y)
+					val next = topMargin(touchSpot(touch, dir, along + speed), touch.y)
+					(inside >= TOUCH_EDGE && (dove || inside >= next)).also {
+						dove = it && (dove || coming)
+						if (!it && next < inside) skipped = true
+					}
+				}
+			}
+			// Past where it'd come down most inside its edges without: up off it again, not skimming it.
+			val dive = coming && !(skipped && !overTop)
 			val pitch = if (holding) holdPitch(y, climb, speed, hop.holdY(y, along, topped, touched, dive, overTop), gravity,
 				hop.sinkAt(dive && overTop)) else if (jumped) JUMP_PITCH else bounce(y, climb)
 			glide(climb, speed, pitch, gravity, turn).let { (c, s) ->
 				climb = c
 				speed = s
 			}
-			val wasOnTop = overTop && touch != null
+			var wasOnTop = overTop && touch != null
+			// Down on it where it isn't diving onto it, e.g. too slow to hold the height: on its edge that's no way past.
+			if (touch != null && !touched && !wasOnTop && !hop.hole && along in touch.range && y >= touch.y && y + climb <= touch.y) {
+				if (topMargin(touchSpot(touch, dir, along), touch.y) < TOUCH_EDGE) {
+					val ahead = along - progress
+					hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down %.1f ahead on the top's edge"
+						.format(startY, startClimb, startSpeed, ahead) }
+					hopShort = Double.POSITIVE_INFINITY
+					return false
+				}
+				wasOnTop = true
+			}
 			val fromAlong = along
 			val fromY = y
 			// The move goes down first, at where the box is: over the top, coming down through its height lands on it, on
@@ -5704,7 +5889,7 @@ abstract class ObstaclePassingMode(
 			// Over the top to touch down on coming down onto it, it stops the fall, from the next tick on it's bounced off.
 			val onTop = touch?.range?.contains(along) == true
 			// Coming over it lower than its top runs into its side.
-			if (onTop && !wasOnTop && !touched && y < touch!!.y) {
+			if (onTop && fromAlong !in touch!!.range && !touched && y < touch.y) {
 				val atY = y
 				val ahead = along - progress
 				val topY = touch.y
@@ -5746,7 +5931,9 @@ abstract class ObstaclePassingMode(
 				hopExitY = y
 				hopExitClimb = climb
 				hopTicks = tick + 1
-				hopTouched = touched
+				// Down on it this tick, past its end along the line standing on it: on its middle near its end that's the tick
+				// it goes past the hop's end, bounced off it the next.
+				hopTouched = touched || onTopNow
 				return true
 			}
 		}
@@ -6013,6 +6200,32 @@ abstract class ObstaclePassingMode(
 			val from = point(path[i])
 			val to = point(path[i + 1])
 			if (!free(to.x, from.z) || !free(from.x, to.z) || !free(to.x, to.z)) return "in the way %.1f ahead on the way over".format(path[i + 1].along)
+		}
+		return null
+	}
+
+	/**
+	 * How far along the line from [origin] the box steered along [path] (along and across it each tick, see [steerOffsets])
+	 * first runs into something before [until], between [minY] and [maxY]. Each tick's move goes along its larger axis
+	 * first, then the other, the box swept over both: steering over to a side it swings out to that side, e.g. over to a
+	 * lane by a field's wall the box ran into the wall's corners. Either axis first when they're about even. Null when free.
+	 */
+	private fun SafeContext.swingPathHit(origin: Vec3d, dir: Vec3d, path: List<Pair<Double, Double>>, until: Double, minY: Double, maxY: Double): Double? {
+		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val across = across(dir)
+		val half = GLIDE_SIZE / 2
+		fun point(step: Pair<Double, Double>) = origin.add(forward.multiply(step.first)).add(across.multiply(step.second))
+		fun swept(ax: Double, az: Double, bx: Double, bz: Double) =
+			spaceEmpty(Box(min(ax, bx) - half, minY, min(az, bz) - half, max(ax, bx) + half, maxY, max(az, bz) + half))
+		for (i in 0 until path.lastIndex) {
+			if (path[i].first >= until) break
+			val from = point(path[i])
+			val to = point(path[i + 1])
+			val dx = abs(to.x - from.x)
+			val dz = abs(to.z - from.z)
+			val xFirst = dx >= dz - SWING_EVEN && !(swept(from.x, from.z, to.x, from.z) && swept(to.x, from.z, to.x, to.z))
+			val zFirst = dz >= dx - SWING_EVEN && !(swept(from.x, from.z, from.x, to.z) && swept(from.x, to.z, to.x, to.z))
+			if (xFirst || zFirst) return path[i + 1].first
 		}
 		return null
 	}
@@ -6989,6 +7202,8 @@ abstract class ObstaclePassingMode(
 				val side = hop.lane.dotProduct(across(dir)).let { if (abs(it) < 1e-6) 0.0 else sign(it) }
 				fartherOut(steerYaw(linePoint, hop.lane, dir), leanYaw(dir, side.toInt()), across(dir), side)
 			}
+			// Onto a top with the heading held to the side the box may swing out to on the way, see [topHops].
+			hop.touch != null && !hop.touched && hop.touch.lean != 0 -> heldLean(linePoint, dir, hop.touch.lane, hop.touch.lean)
 		// On the lane with the top to touch down on until bounced off it, see [touchLane]. Beside an obstacle only shortly
 		// before it, see [laneTouch].
 			hop.touch != null && !hop.touched && (hop.hole || progress >= hop.touch.range.start - TOUCH_APPROACH) ->
@@ -7024,9 +7239,23 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		val target = centre - if (last) 0.0 else thread.lean * THREAD_PRE
-		val steer = steerYaw(linePoint, across.multiply(target), dir)
-		if (!last || thread.lean == 0) return steer
-		return fartherOut(steer, leanYaw(dir, thread.lean, THREAD_TILT), across, thread.lean.toDouble())
+		if (!last) return steerYaw(linePoint, across.multiply(target), dir)
+		return heldLean(linePoint, dir, across.multiply(target), thread.lean)
+	}
+
+	/**
+	 * Onto [target] with the heading held at least [THREAD_TILT] to [lean] across the line, so it never turns back across
+	 * the diagonal: that'd swap which axis goes first and the box would swing out the other way. Still farther than
+	 * [THREAD_PRE] out on the side it leans to, it can't get over leaning: steered over freely first, e.g. a lane 1.7 over
+	 * picked 62 ahead was held short at 0.9 over and the box ran into the opening's side. Plainly steered with [lean] 0.
+	 */
+	private fun SafeContext.heldLean(linePoint: Vec3d, dir: Vec3d, target: Vec3d, lean: Int): Double {
+		val steer = steerYaw(linePoint, target, dir)
+		if (lean == 0) return steer
+		val across = across(dir)
+		val short = (player.pos.subtract(linePoint).dotProduct(across) - target.dotProduct(across)) * lean
+		if (short > THREAD_PRE) return steer
+		return fartherOut(steer, leanYaw(dir, lean, THREAD_TILT), across, lean.toDouble())
 	}
 
 	/**
