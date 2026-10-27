@@ -4155,16 +4155,17 @@ abstract class ObstaclePassingMode(
 				// of floating blocks, from the hold's lead on, see [holdingFor].
 				val bouncing = over.start - progress - speed * leadTicks(over)
 				val approach = steerPath(off, dir, thread.centre, thread.lean, over.start - progress, over.start - progress)
-				// Diagonally a tick's move goes one axis and then the other, the box swings out that far beside the way.
-				val swing = sweep(dir)
-				if (bouncing > 0) steerPathHit(linePoint, dir, approach, bouncing, swing = swing)?.let { hit ->
+				if (bouncing > 0) steerPathHit(linePoint, dir, approach, bouncing)?.let { hit ->
 					ElytraFly.debug { "Not through the opening %+.2f across: $hit".format(thread.centre) }
 					continue
 				}
 				// What's low, e.g. a railing on the floor, all the way to it: each bounce comes down to the floor, the hold
 				// only gets up over it once it's risen.
-				steerPathHit(linePoint, dir, approach, over.start - progress - 1, high = STEP_HEIGHT, swing = swing)?.let { hit ->
-					ElytraFly.debug { "Not through the opening %+.2f across, low: $hit".format(thread.centre) }
+				// Diagonally each tick's move goes along one axis and then the other, the box swinging out to the one side that
+				// takes it to, like the game does, see [swingPathHit].
+				swingPathHit(linePoint, dir, approach.map { it.along to it.offset }, over.start - progress - 1,
+					linePoint.y + passerConfig.minObstacleHeight, linePoint.y + STEP_HEIGHT)?.let { at ->
+					ElytraFly.debug { "Not through the opening %+.2f across, low: in the way %.1f ahead on the way over".format(thread.centre, at) }
 					continue
 				}
 				if (centres.any { abs(it - thread.centre) < THREAD_CENTRES_APART }) continue
