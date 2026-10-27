@@ -49,6 +49,7 @@ import com.lambda.task.Task
 import com.lambda.threading.runGameScheduled
 import com.lambda.threading.runSafe
 import com.lambda.util.CommunicationUtils.warn
+import com.lambda.util.math.isLoaded
 import com.lambda.util.NamedEnum
 import com.lambda.util.Timer
 import com.lambda.util.extension.isElytraFlying
@@ -341,6 +342,19 @@ object ElytraFly : Module(
             }
         }
 
+        // Never into chunks that aren't loaded: with the server too laggy to send them, nothing there holds you up and
+        // you fall through the world, while the server holds you where it last had you, e.g. for mobs to hit. Stopped
+        // at their edge instead, down onto the floor before it. Last of all, after anything else changed the move.
+        listen<MovementEvent.Player.Pre>({ Int.MIN_VALUE }) { event ->
+            val here = player.pos.isLoaded
+            val stop = !here || !player.pos.add(event.movement.x, 0.0, event.movement.z).isLoaded
+            if (stop && !atUnloaded) this@ElytraFly.warn(if (here) "Stopped before chunks that aren't loaded, the server isn't sending them" else "In a chunk that isn't loaded, holding still")
+            atUnloaded = stop
+            if (!stop) return@listen
+            event.movement = if (here) Vec3d(0.0, event.movement.y, 0.0) else Vec3d.ZERO
+            player.velocity = if (here) Vec3d(0.0, player.velocity.y, 0.0) else Vec3d.ZERO
+        }
+
         listen<ClientEvent.Sound> { event ->
             if (!mute) return@listen
             if (event.sound.id != SoundEvents.ITEM_ELYTRA_FLYING.id) return@listen
@@ -363,6 +377,8 @@ object ElytraFly : Module(
     private val recent = ArrayDeque<String>()
     private var lastSurroundings: Vec3d? = null
     private var hitWall = false
+    /** Held back from chunks that aren't loaded last tick, warned once per stop. */
+    private var atUnloaded = false
     private var lastHorizontalSpeed = 0.0
     /** Where the player was at the end of the last tick, to tell what the move since ran into, see [sweptInto]. */
     private var lastTickPos: Vec3d? = null
