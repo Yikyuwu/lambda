@@ -2041,7 +2041,12 @@ abstract class ObstaclePassingMode(
 		if (!tooHighToGlideOver(start, dir, next.distance)) return false
 		// Steering over from where you are, at its height on the way there: the layer starts within reach of a glide.
 		val lane = freeLane(from.add(up), linePoint.add(up), dir, distance + next.distance, Vec3d.ZERO) ?: run {
-			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, no free lane past it from here ($laneMiss)".format(distance, next.distance) }
+			val noLane = laneMiss
+			// One fits slower, slowing down from now on, up there it'd be too late, like [startDodge] does on the floor.
+			val slower = player.velocity.horizontalLength() > FIT_SPEED && slowFor == null &&
+				freeLane(from.add(up), linePoint.add(up), dir, distance + next.distance, Vec3d.ZERO, speed = FIT_SPEED) != null
+			if (slower) commitSlowFor("dodgePastOnLayer", at)
+			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, no free lane past it from here ($noLane)${if (slower) ", slowing down to %.2f to fit one".format(FIT_SPEED) else ""}".format(distance, next.distance) }
 			noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
