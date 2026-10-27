@@ -90,6 +90,17 @@ import kotlin.math.sin
  */
 private fun laneVec(lane: Vec3d) = if (lane.horizontalLengthSquared() < 1e-9) Vec3d.ZERO else lane
 
+/** Across the line at [along] it on [path] (along and across it a tick apart), the last spot past its end. */
+private fun pathOffset(path: List<Pair<Double, Double>>, along: Double): Double {
+	if (along <= path.first().first) return path.first().second
+	for (i in 1 until path.size) {
+		val (a0, o0) = path[i - 1]
+		val (a1, o1) = path[i]
+		if (along <= a1) return if (a1 > a0) o0 + (o1 - o0) * (along - a0) / (a1 - a0) else o1
+	}
+	return path.last().second
+}
+
 abstract class ObstaclePassingMode(
 	override val c: Config,
 	flyMode: FlyMode
@@ -184,6 +195,29 @@ abstract class ObstaclePassingMode(
 		private const val MAX_LANDING_TICKS = 40
 		/** How close to a lane the swing over to it counts as on it. */
 		private const val LANE_REACHED = 0.3
+		/** Swerving past a block, on the lane this far before it and steered back this far after it, see [Swerve]. */
+		private const val SWERVE_LEAD = 1.0
+		private const val SWERVE_PAST = 1.0
+		/** Back on the line this close, it bounces on, see [swervePlan]. */
+		private const val SWERVE_BACK_ON = 0.15
+		/**
+		 * Room kept beside the box swerving, and how high above what's low it's held. In the simulator the box came within
+		 * 0.1 of a pillar beside the way and sank down onto the railing held only 0.15 above it.
+		 */
+		private const val SWERVE_SIDE_MARGIN = 0.25
+		private const val SWERVE_ABOVE = 0.3
+		/** Above the floor the box looked at for what's in the way starts, and how high bouncing takes it, 1.11 up and the box. */
+		private const val SWERVE_FLOOR_GAP = 0.01
+		private const val SWERVE_BOUNCE_BAND = 1.8
+		/** How finely the height held over what's low is looked for. */
+		private const val SWERVE_HEIGHT_STEP = 0.05
+		/** Longest block along the line swerved past, and the farthest steering over to the lane may take. */
+		private const val SWERVE_MAX_BLOCK = 16.0
+		private const val SWERVE_MAX_REACH = 60.0
+		/** How often the swerve flown is planned again from where you are, see [reswerve]. */
+		private const val SWERVE_RELOOK_TICKS = 4
+		/** Why [swervePlan] has none when there's nothing to hold over on the way. */
+		private const val SWERVE_FREE = "free bouncing, a dodge"
 		/** How far below the floor's height you count as having fallen into a hole. */
 		private const val FELL_IN = 0.1
 		/** Room kept around a magma cube on every side, it hops about meanwhile. */
@@ -698,8 +732,12 @@ abstract class ObstaclePassingMode(
 		val raised: List<Pair<ClosedFloatingPointRange<Double>, Double>> = emptyList(),
 		/** A top on the way, e.g. a pillar, touched down on and bounced off instead of glided over. */
 		val touch: Touch? = null,
+		/** Out to a lane beside what's on the line and back, held over what's low on the way, see [Swerve]. */
+		val swerve: Swerve? = null,
 	) {
 		val lane = laneVec(lane)
+		/** Across the line at [along] it, [across] being the way across: [lane], or where [swerve] is there. */
+		fun laneAt(along: Double, across: Vec3d): Vec3d = if (swerve == null) lane else laneVec(across.multiply(pathOffset(swerve.path, along)))
 		val targetY = aim ?: when {
 			under -> (feetY + topY) / 2
 			hole -> topY - min(HOP_MARGIN, (topY - feetY) / 2)
@@ -709,7 +747,7 @@ abstract class ObstaclePassingMode(
 		fun with(
 			down: Boolean = this.down, lane: Vec3d = this.lane, stepHeight: Double = this.stepHeight, touch: Touch? = this.touch,
 			topY: Double = this.topY,
-		) = Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim, raised, touch).also {
+		) = Hop(start, end, feetY, topY, obstacle, step, down, lane, stepHeight, low, under, hole, open, cube, anyway, aim, highAim, raised, touch, swerve).also {
 				it.waiting = waiting
 				it.held = held
 				it.heldCheckedAt = heldCheckedAt
@@ -721,6 +759,16 @@ abstract class ObstaclePassingMode(
 				it.chosen = chosen
 				it.then = then
 			}
+		/** [other], this one planned again, e.g. a swerve from where you are, going on from how this one went so far. */
+		fun goneOnAs(other: Hop) = other.also {
+			it.waiting = waiting
+			it.held = held
+			it.heldCheckedAt = heldCheckedAt
+			it.topped = topped
+			it.rose = rose
+			it.chosen = chosen
+			it.then = then
+		}
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -809,16 +857,16 @@ abstract class ObstaclePassingMode(
 		var path: List<Pair<Double, Double>> = emptyList()
 	}
 
-	/** Across the line at [along] it on [path] (along and across it a tick apart), the last spot past its end. */
-	private fun pathOffset(path: List<Pair<Double, Double>>, along: Double): Double {
-		if (along <= path.first().first) return path.first().second
-		for (i in 1 until path.size) {
-			val (a0, o0) = path[i - 1]
-			val (a1, o1) = path[i]
-			if (along <= a1) return if (a1 > a0) o0 + (o1 - o0) * (along - a0) / (a1 - a0) else o1
-		}
-		return path.last().second
+	/**
+	 * Past what's on the line, out to [offset] across it from [outAt] along it, back from [backAt], held over what's low on
+	 * the way from the hop's start to its end, e.g. a railing beside a pillar in the middle of the highway. Where across
+	 * the line it is along the way, along and across it a tick apart, [path], steered like the flight does, see [steerYaw].
+	 */
+	private class Swerve(val offset: Double, val outAt: Double, val backAt: Double, val path: List<Pair<Double, Double>>) {
+		/** Where across the line to steer to at [along] it. */
+		fun targetAt(along: Double) = if (along >= outAt && along < backAt) offset else 0.0
 	}
+
 
 	abstract val passerConfig: PasserSettings
 
@@ -1542,6 +1590,8 @@ abstract class ObstaclePassingMode(
 				ElytraFly.debug { "Bumped into a wall right after a knockback, flying on" }
 			else return brake(progress(playerPos) + 1, "Hit a wall")
 		}
+		// A swerve planned again from where you really are, see [reswerve].
+		hop?.let { if (reswerve(it, closestLinePoint, snappedDir)) return false }
 		hop?.let { hop ->
 			val progress = progress(playerPos)
 			// Off the end of the layer the hole after it was planned from, the line goes down like gliding off it, see
@@ -1570,7 +1620,8 @@ abstract class ObstaclePassingMode(
 			val lookFrom = if (onDodgeLane) dodgeLanePoint(closestLinePoint, snappedDir)
 				else Vec3d(playerPos.x, closestLinePoint.y, playerPos.z)
 			val skip = if (onDodgeLane) (dodgeEnd + DODGE_MARGIN - progress).coerceAtLeast(0.0) else 0.0
-			val inTheWay = if (before > skip) lookFrom.add(snappedDir.multiply(skip)).obstacleHit(snappedDir, before - skip, lean = tilt) else null
+			// Out beside it and back, the box's whole way was simulated, the line's rays would see what's beside it on the way.
+			val inTheWay = if (before > skip && hop.swerve == null) lookFrom.add(snappedDir.multiply(skip)).obstacleHit(snappedDir, before - skip, lean = tilt) else null
 			// A simulation of the glide, once a tick is enough.
 			// No floor in sight, it glides on as far as it can anyway.
 			// Over a magma cube once held it climbs on anyway, missing it by a bit it bumps into it higher up at worst.
@@ -1641,7 +1692,8 @@ abstract class ObstaclePassingMode(
 				!holdingFor(hop, progress) && hop.start - progress > brakeDistance() && !makesIt -> {
 					if (!hop.waiting) ElytraFly.debug { "Can't get over the obstacle at %.1f yet ($hopMiss), bouncing on to look again".format(hop.start - progress) }
 					hop.waiting = true
-					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
+					// Not out beside it yet, bouncing out there it'd come down on what it's held over.
+					dodgeYaw = if (hop.swerve != null) steerYaw(closestLinePoint, Vec3d.ZERO, snappedDir) else hopYaw(closestLinePoint, hop, snappedDir, progress)
 					return false
 				}
 				// Too fast for the opening, landing to come in slower just now, see [threadHold]: nothing commits another way.
@@ -1656,7 +1708,16 @@ abstract class ObstaclePassingMode(
 				// A hole this close there's no landing before, and dropping the glide leaves you lost over it. Missing a
 				// block by a hair, braking this close runs into it all the same. As high as it goes, the simulation misses
 				// by a little at times where the flight doesn't.
-				!makesIt && (hop.hole || !hop.under && !hop.low && hopShort <= ANYWAY_SHORT) -> {
+				// Out beside it held over what's low there already, dropping it now comes down on that: held on the way planned.
+				// Missing it by height, held on the way planned; into a block, landing rather.
+				!makesIt && hop.swerve != null && hop.held -> {
+					if (!hopShort.isFinite()) return brake(progress + 1, "Swerving past it, $hopMiss")
+					if (!hop.waiting) ElytraFly.debug { "Swerving past it, not quite making it any more ($hopMiss), holding on the way out and back anyway" }
+					hop.waiting = true
+					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
+					return false
+				}
+				!makesIt && (hop.hole || !hop.under && !hop.low && hop.swerve == null && hopShort <= ANYWAY_SHORT) -> {
 					if (!hop.held) ElytraFly.debug { "Can't quite get over it at %.1f ($hopMiss), holding as high as it goes anyway".format(hop.start - progress) }
 					hop.held = true
 					hop.heldCheckedAt = flightTicks
@@ -2687,7 +2748,7 @@ abstract class ObstaclePassingMode(
 
 	/** Whether [a] and [b] are the same way over: on the same lane, touching down on the same top the same way, or neither. */
 	private fun sameWay(a: Hop, b: Hop): Boolean {
-		if (a.lane.squaredDistanceTo(b.lane) > 1e-6 || (a.touch == null) != (b.touch == null)) return false
+		if (a.lane.squaredDistanceTo(b.lane) > 1e-6 || (a.touch == null) != (b.touch == null) || a.swerve?.offset != b.swerve?.offset) return false
 		val (at, bt) = (a.touch ?: return true) to b.touch!!
 		return abs(at.middle - bt.middle) < 0.5 && at.y == bt.y && at.lane.squaredDistanceTo(bt.lane) < 1e-6
 	}
@@ -2871,14 +2932,19 @@ abstract class ObstaclePassingMode(
 					val (ways, end, dodgePast) = blockWays(from, linePoint, dir, distance)
 					// The first start of each, the others in order of how fast it got past from that one while it may be the pick.
 					fun exit(way: HoleWay, start: Int) = blockWayExit(way, start, from, linePoint, dir, end, dodgePast)
-					val pick = pickWay(ways, ::exit)
+					// Nothing else gets past it: out beside it gliding over what's low there and back, see [swerveWays].
+					val swerves = mutableListOf<HoleWay>()
+					val pick = pickWay(ways, ::exit) ?: if (distance < MIN_DODGE_DISTANCE) null else {
+						swerves += swerveWays(linePoint, dir, distance, from.subtract(linePoint).dotProduct(across(dir)))
+						pickWay(swerves, ::exit)
+					}
 					// The plan judged alike, from every start.
 					val current = when {
 						planned != null -> HoleWay("plan", planned, null, "")
 						plannedLane != null -> HoleWay("dodge", null, plannedLane, "")
 						else -> null
 					}?.also { way -> rateWay(way) { start -> exit(way, start) } }
-					Triple(pick, current, ways.size)
+					Triple(pick, current, ways.size + swerves.size)
 				} finally {
 					anyHeightTops = false
 				}
@@ -2984,6 +3050,147 @@ abstract class ObstaclePassingMode(
 		if (distance >= MIN_DODGE_DISTANCE) freeLanesAround(from, linePoint, dir, dodgePast)
 			.forEach { lane -> ways += HoleWay("dodge", null, lane, "to %+.2f${lane.leanText()}".format(lane.offset)) }
 		return Triple(ways, end, dodgePast)
+	}
+
+	/**
+	 * Past the block [distance] ahead on the line no lane is free beside at bounce height, e.g. a pillar in the middle of
+	 * a highway with a railing on either side: out to a lane beside it and back, held just above what's low on the way,
+	 * the railing, until the box is clear of it again, see [Swerve]. Steered out from [off] across the line so it's on the
+	 * lane [SWERVE_LEAD] before the block, back [SWERVE_PAST] after it, see [swervePlan]. The closest such lane to either
+	 * side, none on a side with none.
+	 */
+	private fun SafeContext.swerveWays(linePoint: Vec3d, dir: Vec3d, distance: Double, off: Double): List<HoleWay> {
+		val progress = progress(player.pos)
+		val speed = player.velocity.horizontalLength()
+		val floorY = linePoint.y
+		val at = progress + distance
+		// How far the block goes on along the line, as high as bouncing goes.
+		var blockEnd = at
+		while (blockEnd < at + SWERVE_MAX_BLOCK && !swerveMoveFree(dir, floorY, blockEnd to 0.0, blockEnd to 0.0, floorY + SWERVE_FLOOR_GAP, floorY + SWERVE_BOUNCE_BAND))
+			blockEnd += HOP_SCAN_STEP
+		if (blockEnd >= at + SWERVE_MAX_BLOCK) {
+			ElytraFly.debug { "No swerve past it: longer than %.0f along the line".format(SWERVE_MAX_BLOCK) }
+			return emptyList()
+		}
+		val misses = mutableListOf<String>()
+		val step = laneStep(dir)
+		val offsets = (1..(2 * passerConfig.maxDodge / step).toInt()).map { it * step / 2 }
+		return listOf(-1.0, 1.0).mapNotNull { side ->
+			offsets.firstNotNullOfOrNull { size ->
+				val offset = side * size
+				fun miss(why: String) { misses += "%+.2f $why".format(offset) }
+				// How far steering over to it takes, from the line straight on.
+				val reach = steerOffsets(0.0, offset, speed, SWERVE_MAX_REACH).firstOrNull { abs(it.second - offset) < LANE_REACHED }?.first
+				if (reach == null) null.also { miss("not over there within %.0f".format(SWERVE_MAX_REACH)) }
+				else swervePlan(Swerve(offset, max(progress, at - SWERVE_LEAD - reach), blockEnd + SWERVE_PAST, emptyList()), dir, floorY, ::miss)?.let { hop ->
+					HoleWay("swerve", hop, null, "out to %+.2f and back, held at y %.2f from %.1f to %.1f ahead".format(offset, hop.targetY, hop.start - progress, hop.end - progress))
+				}
+			}
+		}.also { if (it.isEmpty()) ElytraFly.debug { "No swerve past it: ${misses.joinToString()}" } }
+	}
+
+	/**
+	 * The glide for [swerve], steered like the flight from where you are now until back on the line past it, null when
+	 * that doesn't get past, why told to [miss]. Each tick's move looked at one axis and then the other, a box wider than
+	 * yours: free bouncing where it's over the floor at [floorY], else held as low as it's free over what's under it,
+	 * below [maxHopY], from where that starts to where it ends.
+	 */
+	private fun SafeContext.swervePlan(swerve: Swerve, dir: Vec3d, floorY: Double, miss: (String) -> Unit): Hop? {
+		val across = across(dir)
+		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val progress = progress(player.pos)
+		val speed = player.velocity.horizontalLength()
+		val ceiling = maxHopY()
+		// Steered like the flight, see [steerYaw], until back on the line past it.
+		var o = player.pos.subtract(startPos).dotProduct(across)
+		var h = atan2(player.velocity.dotProduct(across), player.velocity.dotProduct(forward))
+		var along = progress
+		val path = mutableListOf(along to o)
+		while (path.size <= CAN_HOP_SIM_TICKS && (along < swerve.backAt || abs(o) > SWERVE_BACK_ON)) {
+			val drift = speed * sin(h) * STEER_DAMPING_TICKS
+			h += (atan2(swerve.targetAt(along) - o - drift, DODGE_STEER_AHEAD) - h) * 0.1
+			o += speed * sin(h)
+			along += speed * cos(h)
+			path += along to o
+		}
+		if (abs(o) > SWERVE_BACK_ON) return null.also { miss("not back on the line in time") }
+		// Where on the way bouncing isn't free, held there as low as it is.
+		val bounceLow = floorY + SWERVE_FLOOR_GAP
+		val bounceHigh = floorY + SWERVE_BOUNCE_BAND
+		val band = GLIDE_SIZE + SWERVE_ABOVE + HOP_MARGIN
+		var start: Double? = null
+		var end = 0.0
+		var feetY = floorY
+		for (i in 0 until path.lastIndex) {
+			val a = path[i]
+			val b = path[i + 1]
+			if (swerveMoveFree(dir, floorY, a, b, bounceLow, bounceHigh)) continue
+			var need = floorY + SWERVE_FLOOR_GAP
+			while (need <= ceiling && !swerveMoveFree(dir, floorY, a, b, need, need + band)) need += SWERVE_HEIGHT_STEP
+			if (need > ceiling) return null.also { miss("in the way %.1f ahead up to y %.2f".format(b.first - progress, ceiling)) }
+			if (start == null) start = a.first
+			end = b.first
+			feetY = max(feetY, need)
+		}
+		// Free bouncing all the way, a dodge, see [freeLane].
+		val from = start ?: return null.also { miss(SWERVE_FREE) }
+		if (feetY + HOP_MARGIN > ceiling) return null.also { miss("held at y %.2f, too high".format(feetY + HOP_MARGIN)) }
+		// Held at that height all the way over, nothing higher up in the way.
+		if (path.zipWithNext().any { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, feetY + band) })
+			return null.also { miss("held at y %.2f, something higher up in the way".format(feetY + HOP_MARGIN)) }
+		// Held a bit higher than just over it: holding the height it sinks as it slows down.
+		val aim = min(feetY + SWERVE_ABOVE, ceiling)
+		return Hop(from, end + HOP_SCAN_STEP, feetY, ceiling, from, false, aim = aim, swerve = Swerve(swerve.offset, swerve.outAt, swerve.backAt, path))
+	}
+
+	/**
+	 * Whether the box swerving moves free from [a] to [b] (along and across the line [dir] down at [floorY]) between [low]
+	 * and [high], wider than yours by [SWERVE_SIDE_MARGIN]: the flight steers a bit off the path planned. The larger axis
+	 * first, either when they're about even.
+	 */
+	private fun SafeContext.swerveMoveFree(dir: Vec3d, floorY: Double, a: Pair<Double, Double>, b: Pair<Double, Double>, low: Double, high: Double): Boolean {
+		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val across = across(dir)
+		val origin = Vec3d(startPos.x, floorY, startPos.z)
+		val half = GLIDE_SIZE / 2 + SWERVE_SIDE_MARGIN
+		val from = origin.add(forward.multiply(a.first)).add(across.multiply(a.second))
+		val to = origin.add(forward.multiply(b.first)).add(across.multiply(b.second))
+		fun swept(ax: Double, az: Double, bx: Double, bz: Double) =
+			spaceEmpty(Box(min(ax, bx) - half, low, min(az, bz) - half, max(ax, bx) + half, high, max(az, bz) + half))
+		val dx = abs(to.x - from.x)
+		val dz = abs(to.z - from.z)
+		if (dx >= dz - SWING_EVEN && !(swept(from.x, from.z, to.x, from.z) && swept(to.x, from.z, to.x, to.z))) return false
+		if (dz >= dx - SWING_EVEN && !(swept(from.x, from.z, from.x, to.z) && swept(from.x, to.z, to.x, to.z))) return false
+		return true
+	}
+
+	/**
+	 * The swerve committed to planned again from where you really are every [SWERVE_RELOOK_TICKS], see [swervePlan]:
+	 * faster or slower than planned it steers out and back elsewhere along the way. Not getting past any more, dropped
+	 * before it's held, it goes on along the line; held out over what's low already, landing there is all that's left.
+	 * Whether it landed.
+	 */
+	private fun SafeContext.reswerve(hop: Hop, linePoint: Vec3d, dir: Vec3d): Boolean {
+		val swerve = hop.swerve ?: return false
+		if (passTicks % SWERVE_RELOOK_TICKS != 0) return false
+		var why = ""
+		val again = swervePlan(swerve, dir, linePoint.y) { why = it }
+		val progress = progress(player.pos)
+		when {
+			again != null -> commitHop("reswerve", hop.goneOnAs(again))
+			// Clear of what's low from here on, the glide ends where it was planned to.
+			why == SWERVE_FREE -> {}
+			!hop.held -> {
+				ElytraFly.debug { "Not swerving past it any more ($why), bouncing on along the line" }
+				skipHopAt = hop.start
+				commitHop("reswerve", null)
+			}
+			else -> {
+				brake(progress + 1, "Swerving past it, not getting past any more ($why)")
+				return true
+			}
+		}
+		return false
 	}
 
 	/**
@@ -5299,7 +5506,7 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.laneFromGlide(hop: Hop, linePoint: Vec3d, dir: Vec3d, progress: Double): Hop? {
 		// On the line, or on the lane dodged to, swinging back to the line too.
 		val current = dodge ?: Vec3d.ZERO
-		if (hop.lane != current || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole || passTicks % RELOOK_TICKS != 0) return null
+		if (hop.lane != current || hop.swerve != null || hop.cube || hop.step || hop.down || hop.under || hop.low && !hop.hole || passTicks % RELOOK_TICKS != 0) return null
 		// Its lane was picked free past the hole, see [touchLane]. Planned up on a layer with what's on its lane, see
 		// [layerHole]: over to another meanwhile it steered across what's dodged, e.g. a column right beside it.
 		if (hop.touch != null && !hop.touched || hop.fromLayer) return null
@@ -5710,6 +5917,7 @@ abstract class ObstaclePassingMode(
 		hop: Hop, progress: Double, startY: Double, startClimb: Double, startSpeed: Double, gain: Double, count: Int = Int.MAX_VALUE,
 	): List<Int> {
 		val dir = getSnappedDir()
+		val across = across(dir)
 		val gravity = player.finalGravity
 		val bounce = bouncePitch()
 		var y = startY
@@ -5722,7 +5930,7 @@ abstract class ObstaclePassingMode(
 			if (along >= hop.start || rises.size >= count) break
 			var jumped = false
 			if (y <= startPos.y && climb <= 0) {
-				val floor = floorAt(dir, along, hop.lane) ?: break
+				val floor = floorAt(dir, along, hop.laneAt(along, across)) ?: break
 				if (y <= floor) {
 					y = floor
 					climb = JUMP_VELOCITY
@@ -5740,7 +5948,7 @@ abstract class ObstaclePassingMode(
 			y += climb
 			along += speed
 			// Down in a gap in the layer there's no bounce off it, see [intoLayerSide].
-			if (intoLayerSide(fall, dir, hop.lane, from, fromY, along, y)) break
+			if (intoLayerSide(fall, dir, hop.laneAt(along, across), from, fromY, along, y)) break
 		}
 		return rises
 	}
@@ -5837,6 +6045,7 @@ abstract class ObstaclePassingMode(
 	/** [canHop] simulated. */
 	private fun SafeContext.simulateHop(hop: Hop, progress: Double, holdFrom: Int?, from: Double, margin: Double, gain: Double, turn: Boolean): Boolean {
 		val dir = getSnappedDir()
+		val across = across(dir)
 		val gravity = player.finalGravity
 		var topped = hop.topped
 		var rose = hop.rose
@@ -5881,7 +6090,7 @@ abstract class ObstaclePassingMode(
 			}
 			// Only off floor that's there, e.g. not in a hole on the way.
 			else if (y <= startPos.y && climb <= 0) {
-				val floor = floorAt(dir, along, hop.lane) ?: run {
+				val floor = floorAt(dir, along, hop.laneAt(along, across)) ?: run {
 					// Over a hole after a layer bounced on up there, gliding on above the floor down below it.
 					if (hop.hole && onLayer && y > baseY + passerConfig.minObstacleHeight) return@run null
 					val ahead = along - progress
@@ -5948,7 +6157,7 @@ abstract class ObstaclePassingMode(
 			} else y += climb
 			along += speed
 			// Bouncing on before it, down in a gap in the layer bounced on, into the side of the next of its blocks.
-			if (fromAlong < hop.start && intoLayerSide(fall, dir, hop.lane, fromAlong, fromY, along, y)) {
+			if (fromAlong < hop.start && intoLayerSide(fall, dir, hop.laneAt(along, across), fromAlong, fromY, along, y)) {
 				val ahead = fromAlong - progress
 				hopMissText = lazy(LazyThreadSafetyMode.NONE) { "from y %.2f climbing %.2f at %.2f, it'd come down in a gap in the blocks %.1f ahead, into the side of the next"
 					.format(startY, startClimb, startSpeed, ahead) }
@@ -5987,10 +6196,10 @@ abstract class ObstaclePassingMode(
 			// The box's whole way, not only the heights over the obstacle: e.g. rising to them into a block hanging higher
 			// than the rays look, or bouncing off a top up into one. Told only when the glide makes it otherwise, a miss
 			// above is the one to tell, e.g. how near it is, see [hopShort].
-			if (blockedAt == null) boxMove(dir, hop.lane, fromAlong, boxY, along, y)?.let { boxY = it } ?: run { blockedAt = along to y }
+			if (blockedAt == null) boxMove(dir, hop.laneAt(along, across), fromAlong, boxY, along, y)?.let { boxY = it } ?: run { blockedAt = along to y }
 			if (along > hop.end) {
 				val blocked = blockedAt
-				if (blocked != null || !clearComingDown(dir, hop.lane, along, y, climb, speed, gravity, bounce)) {
+				if (blocked != null || !clearComingDown(dir, hop.laneAt(along, across), along, y, climb, speed, gravity, bounce)) {
 					val ahead = (blocked?.first ?: along) - progress
 					val atY = blocked?.second ?: y
 					val what = if (blocked != null) "the box would run into a block" else "coming down after it the box would run into a block higher than the rays look"
@@ -7267,6 +7476,8 @@ abstract class ObstaclePassingMode(
 		// swaps, e.g. the box clipped a block's corner beside a field's lane 25 past where it went in.
 		val threading = thread?.takeIf { progress < it.passEnd && it.hopStart == hop.start && hop.lane == dodge }
 		return when {
+			// Out beside what's on the line and back, the way it was planned, see [Swerve].
+			hop.swerve != null -> steerYaw(linePoint, laneVec(across(dir).multiply(hop.swerve.targetAt(progress))), dir)
 			threading != null -> threadYaw(linePoint, dir, progress, threading)
 			// On the lane through a hole past what's beside it, tilted away from the line, see [touchLane].
 			// Steering out farther still if need be, not in.
