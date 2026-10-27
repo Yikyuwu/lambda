@@ -1668,6 +1668,16 @@ abstract class ObstaclePassingMode(
 					dropThread()
 					commitHop("passObstacles", null)
 				}
+				// Glided over something higher, e.g. off a top two blocks high touched down on, now all over a layer a block
+				// high that goes on with nothing higher on it to where the glide ends: down onto it to bounce on. Held on over
+				// it the glide only slows down, bouncing keeps the speed, e.g. for a hole after the layer.
+				downOntoLayer(hop, progress, snappedDir) -> {
+					ElytraFly.debug { "Down onto the blocks below what's glided over, bouncing on at y %.2f".format(baseY + STEP_HEIGHT) }
+					// Landed on early, the last bounce off its end may come too low for a hole right after it, see [holeSoonAfterLayer].
+					stepLanding = !holeSoonAfterLayer(closestLinePoint, snappedDir)
+					startPos = Vec3d(startPos.x, baseY + STEP_HEIGHT, startPos.z)
+					commitHop("passObstacles", null)
+				}
 				// Onto a layer from below, up there as soon as all of the box is over it: down onto it from its start, not its
 				// middle, and well onto it, not on its edge.
 				// Swerving, up onto the layer only where planned: over a railing as high the box is all over a top too.
@@ -5922,6 +5932,25 @@ abstract class ObstaclePassingMode(
 		val floor = linePoint.add(0.0, baseY - linePoint.y, 0.0)
 		return generateSequence(edge) { it + HOP_SCAN_STEP }.takeWhile { it <= edge + HOLE_TOUCHDOWN_MARGIN + 1 }
 			.any { !floor.add(dir.multiply(it)).boxHasFloor() }
+	}
+
+	/**
+	 * Whether the glide over [hop] is past what's higher than a layer a block high and all over such a layer now, one
+	 * that goes on with room up there and nothing higher on it as far as [hop] goes: bounced on from here instead, see
+	 * [isStepUp]. Not over a hole, a mob, under something, through an opening, out beside something, nor before the top
+	 * to touch down on is touched down on and passed.
+	 */
+	private fun SafeContext.downOntoLayer(hop: Hop, progress: Double, dir: Vec3d): Boolean {
+		if (onLayer || inDip || !player.isGliding || player.isOnGround) return false
+		if (hop.step || hop.down || hop.under || hop.hole || hop.open || hop.low || hop.cube || hop.swerve != null || hop.fromLayer) return false
+		if (thread?.hopStart == hop.start || progress < hop.obstacle) return false
+		if (hop.touch?.let { !hop.touched || progress <= it.range.endInclusive } == true) return false
+		val layerY = baseY + STEP_HEIGHT
+		if (hop.feetY < layerY + 0.5 || player.y < layerY) return false
+		if (topOverlap(player.pos, layerY) < GLIDE_SIZE * GLIDE_SIZE * 0.99) return false
+		val up = Vec3d(player.pos.x, layerY, player.pos.z)
+		return up.add(dir.multiply(STEP_ON)).boxHasFloor() && up.add(dir.multiply(STEP_CLEAR)).boxHasFloor() &&
+			up.obstacleDistance(dir, max(STEP_CLEAR, hop.end - progress)) == null
 	}
 
 	/** Bouncing in a dip a block below the floor you started on, see [dipLane]. */
