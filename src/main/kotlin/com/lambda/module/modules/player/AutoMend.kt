@@ -27,6 +27,7 @@ import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.module.Module
 import com.lambda.module.modules.combat.AutoArmor
 import com.lambda.module.modules.combat.AutoTotem
+import com.lambda.module.remindIfOff
 import com.lambda.module.tag.ModuleTag
 import com.lambda.task.RootTask.run
 import com.lambda.task.Task
@@ -48,14 +49,14 @@ import com.lambda.util.item.ItemStackUtils.durabilityFraction
 import com.lambda.util.item.ItemUtils
 import com.lambda.util.player.MovementUtils.update
 import com.lambda.util.player.SlotUtils.hotbarStacks
+import kotlin.math.cos
+import kotlin.math.sin
 import net.minecraft.block.AbstractPressurePlateBlock
 import net.minecraft.enchantment.Enchantments
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
-import kotlin.math.cos
-import kotlin.math.sin
 
 @Suppress("unused")
 object AutoMend : Module(
@@ -181,6 +182,7 @@ object AutoMend : Module(
                 standPos = stand
                 info("Taking from ${damaged.toShortString()}, putting into ${repaired?.toShortString()}, standing at ${stand.toShortString()}")
             } else info("No chests set, mending what you carry, standing at ${stand.toShortString()}")
+            remindIfOff("so you don't starve while mending", AutoEat to AutoEat.remindMe)
 
             mendTask = MendToolsTask(
                 damagedChest = damaged,

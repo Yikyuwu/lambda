@@ -44,6 +44,9 @@ import com.lambda.module.modules.combat.autodisconnect.AutoDisconnect
 import com.lambda.module.modules.movement.elytrafly.modes.BounceElytraFly
 import com.lambda.module.modules.movement.elytrafly.modes.GeneralElytraFly
 import com.lambda.module.modules.movement.elytrafly.modes.GrimControlElytraFly
+import com.lambda.module.modules.network.AutoReconnect
+import com.lambda.module.modules.player.AutoEat
+import com.lambda.module.remindIfOff
 import com.lambda.module.tag.ModuleTag
 import com.lambda.task.Task
 import com.lambda.threading.runGameScheduled
@@ -55,6 +58,10 @@ import com.lambda.util.extension.isElytraFlying
 import com.lambda.util.extension.prevPos
 import com.lambda.util.player.MovementUtils.addSpeed
 import com.lambda.util.player.PlayerUtils.hasFirework
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.time.Duration.Companion.seconds
 import net.minecraft.component.DataComponentTypes
 import net.minecraft.entity.Entity
 import net.minecraft.entity.EntityType
@@ -74,10 +81,6 @@ import net.minecraft.sound.SoundEvents
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
 import net.minecraft.util.math.Vec3d
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.time.Duration.Companion.seconds
 
 object ElytraFly : Module(
     name = "ElytraFly",
@@ -104,7 +107,6 @@ object ElytraFly : Module(
     private val safetyMargin by setting("Safety Margin", 0.2, 0.0..2.0, 0.01, "The time (in seconds) to shorten the firework use delay to account for ping variation", "s")
     private val mute by setting("Mute Elytra", false, "Mutes the elytra sound when gliding")
     @JvmStatic val fakeFly by setting("Fake Fly", false, "Rapidly swaps the chestplate and elytra to give the appearance the player is flying without an elytra. May also reduce durability loss")
-    private val safetyWarning by setting("Safety Warning", true, "Warns on enable when AutoArmor, AutoDisconnect or AutoTotem is off")
     private val debugLog by setting("Debug Log", false, "Writes setbacks and why the obstacle passer walks to the game log, to find out why flying stops")
     private val chooserLog by setting("Chooser Log", false, "Also logs which way past an obstacle the coming chooser would pick, costs a few ms a decision") { debugLog }
 
@@ -163,10 +165,9 @@ object ElytraFly : Module(
         onEnable {
             foodRestock.reset()
             mode.elytraFly.onEnableListeners.forEach { it() }
-            // Flying AFK, these keep you alive or log you out before you die.
-            val off = listOf(AutoArmor, AutoDisconnect, AutoTotem).filterNot { it.isEnabled }
-            if (safetyWarning && off.isNotEmpty())
-                warn("${off.joinToString { it.name }} ${if (off.size == 1) "is" else "are"} off, turn ${if (off.size == 1) "it" else "them"} on to stay safe while flying AFK")
+            // Flying AFK, these keep you alive, fed and online, or log you out before you die.
+            remindIfOff("to stay safe while flying AFK", AutoArmor to AutoArmor.remindMe, AutoDisconnect to AutoDisconnect.remindMe,
+                AutoTotem to AutoTotem.remindMe, AutoReconnect to AutoReconnect.remindMe, AutoEat to AutoEat.remindMe)
             synchronized(recentSetbacks) { recentSetbacks.clear() }
             stuckAt.clear()
             prevVelocity = Vec3d.ZERO

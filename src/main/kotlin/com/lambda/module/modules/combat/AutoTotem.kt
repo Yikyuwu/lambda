@@ -44,6 +44,7 @@ object AutoTotem : Module(
     tag = ModuleTag.COMBAT,
 	modulePriority = 100
 ) {
+	val remindMe by setting("Remind Me", true, "Reminds you when you start HighwayTools or ElytraFly and this is off")
 	private val always by setting("Always", true, "Always attempt to keep a totem in offhand")
 	private val ignoreWhenHolding by setting("Ignore When Holding", false, "Ignore swapping to offhand when already holding a totem")
 	private val minimumHealth by setting("Min Health", 10, 6..36, 1, "Set the minimum health threshold to swap", unit = " half-hearts") { !always }

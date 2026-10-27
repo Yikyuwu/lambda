@@ -19,12 +19,12 @@ package com.lambda.module.modules.world
 
 import baritone.api.pathing.goals.GoalBlock
 import com.lambda.Lambda.LOG
+import com.lambda.config.Group
 import com.lambda.config.automation.AutomationConfig.Companion.grimPacing
 import com.lambda.config.automation.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.blocks.EatConfig
 import com.lambda.config.blocks.EatConfig.Companion.isHungerFood
 import com.lambda.config.blocks.HotbarConfig
-import com.lambda.config.Group
 import com.lambda.config.editSetting
 import com.lambda.config.editTypedSettings
 import com.lambda.config.withEdits
@@ -51,7 +51,9 @@ import com.lambda.module.Module
 import com.lambda.module.modules.combat.AutoArmor
 import com.lambda.module.modules.combat.AutoTotem
 import com.lambda.module.modules.combat.autodisconnect.AutoDisconnect
+import com.lambda.module.modules.network.AutoReconnect
 import com.lambda.module.modules.player.AutoEat
+import com.lambda.module.remindIfOff
 import com.lambda.module.tag.ModuleTag
 import com.lambda.task.RootTask.run
 import com.lambda.task.Task
@@ -60,16 +62,14 @@ import com.lambda.task.tasks.BuildTask.Companion.build
 import com.lambda.task.tasks.EnderChestRestockTask
 import com.lambda.task.tasks.EnderChestRestockTask.Companion.MIN_ENDER_CHESTS
 import com.lambda.task.tasks.EnderChestRestockTask.Want
-import com.lambda.task.tasks.StationTask.Companion.waitsForPlayer
 import com.lambda.task.tasks.StationTask.Companion.stopSafely
+import com.lambda.task.tasks.StationTask.Companion.waitsForPlayer
 import com.lambda.task.tasks.TakeFromShulkerTask
 import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.BlockUtils.hasFluid
 import com.lambda.util.BlockUtils.hasSolidGround
 import com.lambda.util.BlockUtils.isPassable
 import com.lambda.util.BlockUtils.offset
-import com.lambda.util.item.ItemStackUtils.shulkerBoxContents
-import com.lambda.util.item.ItemUtils
 import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.CommunicationUtils.warn
@@ -80,12 +80,17 @@ import com.lambda.util.extension.Structure
 import com.lambda.util.extension.move
 import com.lambda.util.extension.moveY
 import com.lambda.util.extension.playerSlots
+import com.lambda.util.item.ItemStackUtils.shulkerBoxContents
+import com.lambda.util.item.ItemUtils
 import com.lambda.util.math.MathUtils.floorToInt
 import com.lambda.util.math.rotateClockwise
 import com.lambda.util.player.MovementUtils.octant
 import com.lambda.util.player.MovementUtils.sneaking
 import com.lambda.util.player.RotationUtils.lookAt
 import com.lambda.util.world.StructureUtils.generateDirectionalTube
+import java.util.WeakHashMap
+import kotlin.math.abs
+import kotlin.math.atan2
 import net.minecraft.block.Block
 import net.minecraft.block.Blocks
 import net.minecraft.entity.mob.EndermanEntity
@@ -99,9 +104,6 @@ import net.minecraft.util.math.Direction
 import net.minecraft.util.math.EightWayDirection
 import net.minecraft.util.math.Vec3d
 import net.minecraft.world.World
-import java.util.WeakHashMap
-import kotlin.math.abs
-import kotlin.math.atan2
 
 object HighwayTools : Module(
     name = "HighwayTools",
@@ -150,7 +152,6 @@ object HighwayTools : Module(
     @Group(ENDER_CHEST_GROUP) private val restockRetryDelay by setting("Restock Retry Delay", 60, 10..600, 10, "Wait after a trip to the ender chest before the next one", " s") { inventoryConfig.accessEnderChest }
     @Group(TOOL_RESTOCK_GROUP) private val toolRestock by configBlock(HighwayToolRestock(this))
     @Group(AURA_GROUP) private val aura by configBlock(HighwayAura(this))
-    private val safetyWarning by setting("Safety Warning", true, "Warns on enable when AutoArmor, AutoDisconnect or AutoTotem is off")
     private val debugLog by setting("Debug Log", false, "Writes the build's progress and what it waits on to the game log every few seconds")
 
     private var octant = EightWayDirection.NORTH
@@ -280,10 +281,9 @@ object HighwayTools : Module(
             // The tool restock is what takes the pickaxes out of the shulker, so without it the shulker isn't fetched.
             if (inventoryConfig.accessEnderChest && restockPickaxes && !toolRestock.enabled)
                 warn("Restock Tools is off, so no pickaxe shulkers get taken from the ender chest")
-            // Digging AFK, these keep you alive or log you out before you die.
-            val off = listOf(AutoArmor, AutoDisconnect, AutoTotem).filterNot { it.isEnabled }
-            if (safetyWarning && off.isNotEmpty())
-                warn("${off.joinToString { it.name }} ${if (off.size == 1) "is" else "are"} off, turn ${if (off.size == 1) "it" else "them"} on to stay safe while digging AFK")
+            // Digging AFK, these keep you alive and online, or log you out before you die.
+            remindIfOff("to stay safe while digging AFK", AutoArmor to AutoArmor.remindMe, AutoDisconnect to AutoDisconnect.remindMe,
+                AutoTotem to AutoTotem.remindMe, AutoReconnect to AutoReconnect.remindMe)
             // In the queue the inventory isn't there yet, so restocks would think everything is missing.
             waitingForServer = player.isSpectator
             // Already in the world, so the inventory is there.

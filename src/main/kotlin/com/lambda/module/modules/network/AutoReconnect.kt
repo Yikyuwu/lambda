@@ -34,6 +34,7 @@ object AutoReconnect : Module(
     tag = ModuleTag.NETWORK,
 ) {
     val delay by setting("Delay", 5.0, 0.5..60.0, 0.5, unit = "s", description = "Time in seconds before automatically reconnecting.")
+    val remindMe by setting("Remind Me", true, "Reminds you when you start HighwayTools or ElytraFly and this is off")
     val singleplayer by setting("Singleplayer", false, description = "Whether to auto-reconnect to singleplayer worlds.")
     val notAfterAutoDisconnect by setting("No Reconnect When AutoDisconnected", true, description = "Doesn't reconnect after AutoDisconnect left the server, only after kicks, restarts or lost connections. Connecting again by hand turns it back on.")
 

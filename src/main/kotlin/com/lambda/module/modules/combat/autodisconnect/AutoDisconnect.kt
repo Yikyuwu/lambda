@@ -192,6 +192,7 @@ object AutoDisconnect : Module(
     @Tab(TRIGGERS_TAB) @Group(DAMAGE_TRIGGER_GROUP) private val arrow by setting("Arrow", false, "Disconnect from the server when you take arrow damage.") { damage }
     @Tab(TRIGGERS_TAB) @Group(DAMAGE_TRIGGER_GROUP) private val trident by setting("Trident", false, "Disconnect from the server when you take trident damage.") { damage }
 
+    @Tab(GENERAL_TAB) val remindMe by setting("Remind Me", true, "Reminds you when you start HighwayTools or ElytraFly and this is off")
     @Tab(GENERAL_TAB) private val disableAutoReconnect by setting("Disable ${AutoReconnect.name}", false, "Disables ${AutoReconnect.name} when disconnecting")
     @Tab(GENERAL_TAB) @Group(PACKET_DISCONNECT_GROUP) private val invalidHotbarDisconnect by setting("Select Invalid Hotbar Slot", false, "Sends an invalid hotbar selection to force the server to kick the player")
     @Tab(GENERAL_TAB) @Group(PACKET_DISCONNECT_GROUP) private val attackSelfDisconnect by setting("Attack Self", false, "Sends an attack self packet to force the server to kick the player")

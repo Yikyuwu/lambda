@@ -39,6 +39,8 @@ object AutoEat : Module(
     description = "Eats food when you are hungry",
     tag = ModuleTag.PLAYER,
 ) {
+    val remindMe by setting("Remind Me", true, "Reminds you when you start AutoMend or ElytraFly and this is off")
+
     private var eatTask: Task<*>? = null
 
     /** Eating until done, which can take several items in a row. */

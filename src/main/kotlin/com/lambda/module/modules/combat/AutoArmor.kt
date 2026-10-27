@@ -66,6 +66,7 @@ object AutoArmor : Module(
 	description = "Automatically equips armor, and mends it with experience bottles",
 	tag = ModuleTag.COMBAT
 ) {
+	val remindMe by setting("Remind Me", true, "Reminds you when you start HighwayTools or ElytraFly and this is off")
 	var elytraPriority by setting("Elytra Priority", false, "Prioritizes elytra's over other armor pieces in the chest slot")
 	private val toggleElytraPriority by setting("Toggle Elytra Priority", Bind.EMPTY)
 		.onPress { elytraPriority = !elytraPriority }
