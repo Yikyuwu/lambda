@@ -1742,7 +1742,8 @@ abstract class ObstaclePassingMode(
 				// Out beside it held over what's low there already, dropping it now comes down on that: held on the way planned.
 				// Missing it by height, held on the way planned; into a block, landing rather.
 				!makesIt && hop.swerve != null && hop.held -> {
-					if (!hopShort.isFinite()) return brake(progress + 1, "Swerving past it, $hopMiss")
+					// Only a near miss is held on for, far below what's ahead it'd run into it.
+					if (!hopShort.isFinite() || hopShort > ANYWAY_SHORT) return brake(progress + 1, "Swerving past it, $hopMiss")
 					if (!hop.waiting) ElytraFly.debug { "Swerving past it, not quite making it any more ($hopMiss), holding on the way out and back anyway" }
 					hop.waiting = true
 					dodgeYaw = hopYaw(closestLinePoint, hop, snappedDir, progress)
@@ -3338,11 +3339,15 @@ abstract class ObstaclePassingMode(
 		// Else farther out the same side, steering there takes it past the block sooner. Why the first missed is told.
 		val step = laneStep(dir) / 2 * sign(swerve.offset)
 		val offsets = listOf(swerve.offset, swerve.offset + step, swerve.offset + 2 * step).filter { abs(it) <= passerConfig.maxDodge + 1e-6 }
-		val again = offsets.firstNotNullOfOrNull { offset ->
-			(outs + listOf(progress).filter { swerve.outAt > progress }).firstNotNullOfOrNull { outAt ->
+		// The first one free that the glide gets over from where you are, else the first one free: e.g. veered off the way
+		// planned, over something higher right ahead it can't climb to in time, another lane does.
+		var free: Hop? = null
+		val again = offsets.asSequence().flatMap { offset -> (outs + listOf(progress).filter { swerve.outAt > progress }).asSequence().map { offset to it } }
+			.mapNotNull { (offset, outAt) ->
 				swervePlan(Swerve(offset, outAt, swerve.backAt, swerve.path, swerve.blockAt), dir, linePoint.y, SWERVE_HELD_MARGIN) { if (why.isEmpty() || it == SWERVE_FREE) why = it }
+					?.let { hop.goneOnAs(it) }
 			}
-		}
+			.firstOrNull { plan -> if (free == null) free = plan; canGetOver(plan, progress) } ?: free
 		when {
 			again != null -> commitHop("reswerve", hop.goneOnAs(again))
 			// Clear of what's low from here on, the glide ends where it was planned to.
