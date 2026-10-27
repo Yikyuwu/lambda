@@ -56,9 +56,8 @@ class HighwayToolRestock(override val c: HighwayTools) : ConfigBlock, Automated 
     /** Whether [stack] is a shulker with a fresh tool to restock from. */
     fun isToolShulker(stack: ItemStack) = freshTools(stack) > 0
 
-    /** Whether [stack] is a shulker of restock tools with no fresh one left, put back in the ender chest on a trip. */
-    fun isUsedToolShulker(stack: ItemStack) =
-        stack.item in ItemUtils.shulkerBoxes && stack.shulkerBoxContents.let { tools -> tools.any { it.isTool } && tools.none { it.isFresh } }
+    /** Whether [stack] is a worn restock tool. */
+    fun isWornTool(stack: ItemStack) = stack.isTool && stack.isWorn
 
     /** How many fresh tools to restock from the shulker [stack] holds. */
     fun freshTools(stack: ItemStack) =

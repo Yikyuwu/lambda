@@ -481,6 +481,13 @@ object HighwayTools : Module(
         disable()
     }
 
+    /**
+     * Whether [stack] is a shulker with nothing left to use, only worn tools or nothing, put back in the ender chest on a
+     * trip. Any food, experience bottles, fresh tools or other items left in it and it's kept.
+     */
+    private fun isUsedUpShulker(stack: ItemStack) =
+        stack.item in ItemUtils.shulkerBoxes && stack.shulkerBoxContents.all { it.isEmpty || toolRestock.isWornTool(it) }
+
     private fun SafeContext.carriesFoodShulker() = player.inventory.mainStacks.any { it.item in ItemUtils.shulkerBoxes && foodIn(it) > 0 }
 
     /** How much food [stack] is, or a shulker holds. */
@@ -530,7 +537,7 @@ object HighwayTools : Module(
             // The aura goes first, the trip carries on once the mob is dead.
             holdWhile = { isFighting },
             beforeBreaking = { with(toolRestock) { restockNow() } },
-            putBack = { restockPickaxes && toolRestock.enabled && toolRestock.isUsedToolShulker(it) },
+            putBack = ::isUsedUpShulker,
         ).onCompletion {
             endEnderChestTrip()
             restockRetryTicks = restockRetryDelay * 20
