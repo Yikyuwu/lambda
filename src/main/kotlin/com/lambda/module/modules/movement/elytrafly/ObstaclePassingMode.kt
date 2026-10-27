@@ -2992,6 +2992,51 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * The glide [over] what's [distance] ahead of [from] on its lane, judged with what follows it from where it ends like
+	 * the chooser judges its ways, see [continuation], and flown on to that once past it, see [flyThen]. Ending low right
+	 * before something it can't get over, touch down on or dodge from there is no way past, e.g. a block on the floor with
+	 * a floating one 6 on, reached at 1.19 a tick at y 120.16 4.8 before it: one glide over both instead, as high as the
+	 * taller one needs, else null and why in [hopRejection], the lane looks on while it can still brake.
+	 */
+	private fun SafeContext.withWhatFollows(over: Hop, from: Vec3d, dir: Vec3d, distance: Double, lean: Int, block: String): Hop? {
+		val progress = progress(player.pos)
+		val speed = player.velocity.horizontalLength()
+		val forward = dir.normalize()
+		var miss = ""
+		val found = sandboxed {
+			withHopMemo {
+				fun judged(hop: Hop) = blockHopRun(hop, progress, speed, strict = false)?.let { it to continuation(hop.lane, dir, it) }
+				// Not made from here as flown: up to the glide's own checks on the way, as before.
+				val (end, then) = judged(over) ?: return@withHopMemo over to null
+				if (then != null) return@withHopMemo over to then
+				// What [continuation] found nothing past, as far as it looks.
+				val point = startPos.add(forward.multiply(end.at)).add(over.lane)
+				val reach = end.speed * (fallTicks(end.y, end.climb) + LANDING_TICKS) + BRAKE_MARGIN + DODGE_STEER_AHEAD
+				val next = point.obstacleHit(forward, reach, speed = end.speed, mobs = false)
+				miss = "ends at y %.2f at %.2f a tick, nothing gets past ${next?.what ?: "what's after it"} from there".format(end.y, end.speed)
+				next ?: return@withHopMemo null
+				val both = planHop(from, dir, distance, lean = lean, through = end.at + next.distance - progress(from) + HOP_SCAN_STEP)
+					?.takeUnless { it.under }?.with(lane = over.lane)
+				if (both == null) {
+					miss += ", nor over both ($hopRejection)"
+					return@withHopMemo null
+				}
+				val bothThen = judged(both)?.second
+				if (bothThen == null) miss += ", nor over both and on ($hopMiss)"
+				bothThen?.let { both to it }
+			}
+		}
+		if (found == null) {
+			hopRejection = miss
+			ElytraFly.debug { "Low $block %.1f ahead on the lane, not gliding over it, it $miss".format(distance) }
+			return null
+		}
+		val (hop, then) = found
+		hop.then = then?.takeIf { it.hop != null || it.lane != null }
+		return hop
+	}
+
+	/**
 	 * Commits the [way] past the block at [at] along the line Chooser Decides picked, by [owner]: dodging, or the glide
 	 * over or under it, touching down, the stepping stone or through the opening, over to its lane. Remembered to look at
 	 * again on the way, see [relookBlock].
@@ -3521,7 +3566,8 @@ abstract class ObstaclePassingMode(
 						// In a hole the glide over the hole goes over it too, see [glideOverHole].
 						!carpetsOnly && !onLine && distance >= MIN_DODGE_DISTANCE &&
 							!holeBefore(lanePoint, dir, progress, distance) &&
-							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }?.let { glideOver(it.with(lane = lane)) } != null -> {}
+							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }
+								?.let { withWhatFollows(it.with(lane = lane), from, dir, distance, tilt, block) }?.let { glideOver(it) } != null -> {}
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
 						!carpetsOnly && rescueBeforeBrake(here, linePoint, dir, distance, progress + distance, block) -> return true
@@ -5146,11 +5192,12 @@ abstract class ObstaclePassingMode(
 	/**
 	 * How to glide over the obstacle [distance] ahead of [linePoint], as low as the gliding box gets over it all and the
 	 * ones right behind it, with room above under [maxFlightY]. Null when it's too high or too long, or you can't get up
-	 * there in time. With [carpets] over the carpets ahead.
+	 * there in time. With [carpets] over the carpets ahead. Over all that's within [through] of [linePoint] too, however
+	 * far apart, e.g. something taller a bit past a low block, see [withWhatFollows].
 	 */
 	private fun SafeContext.planHop(
 		linePoint: Vec3d, dir: Vec3d, distance: Double, step: Boolean = false, length: Double = STEP_ON, carpets: Boolean = false, lean: Int = 0,
-		avoid: List<Box> = emptyList(), anyway: Boolean = false, swings: Boolean = true, above: Double? = null,
+		avoid: List<Box> = emptyList(), anyway: Boolean = false, swings: Boolean = true, above: Double? = null, through: Double = 0.0,
 	): Hop? {
 		// Blocks, and the [avoid] boxes, e.g. magma cubes the world's collisions don't count.
 		fun free(box: Box) = spaceEmpty(box) && avoid.none { it.intersects(box) }
@@ -5180,7 +5227,7 @@ abstract class ObstaclePassingMode(
 		val underLength = max(MAX_HOLE_LENGTH, UNDER_HOLD_BLOCKS_PER_SPEED * (player.velocity.horizontalLength() - UNDER_HOLD_END_SPEED) + maxGap)
 		// Onto a layer to bounce on, only up to a bit onto it.
 		if (step) end = distance + length
-		else while (gap < maxGap) {
+		else while (gap < maxGap || along < through) {
 			along += HOP_SCAN_STEP
 			val maxLength = if (carpets) MAX_CARPET_HOP_LENGTH else if (onFloor) MAX_HOLE_LENGTH else underLength
 			if (along > distance + maxLength) return noHop("longer than ${maxLength.toInt()}")
