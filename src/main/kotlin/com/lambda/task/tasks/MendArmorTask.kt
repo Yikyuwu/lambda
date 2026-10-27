@@ -185,10 +185,10 @@ class MendArmorTask @Ta5kBuilder constructor(
         open(pos, next, extraTicks = TICKS_PER_STACK * player.hotbarAndInventorySlots.size)
     }
 
-    /** Takes one stack of bottles, throwing away junk to make room for it. */
+    /** Takes one stack of bottles, the smallest so leftovers get used up first, throwing away junk to make room for it. */
     private fun SafeContext.take(handler: ScreenHandler): Boolean {
         if (carriedCount(::isBottle) > 0) return false
-        val bottle = handler.containerSlots.firstOrNull { isBottle(it.stack) }
+        val bottle = handler.containerSlots.filter { isBottle(it.stack) }.minByOrNull { it.stack.count }
         if (bottle == null) {
             shulkerEmpty = true
             return false
