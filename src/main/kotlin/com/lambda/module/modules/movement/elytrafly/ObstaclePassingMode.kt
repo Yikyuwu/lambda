@@ -470,6 +470,10 @@ abstract class ObstaclePassingMode(
 		private const val TOUCH_APPROACH = 8.0
 		/** How far past a hole's end the lane to touch down on in it has to be free, e.g. past a pillar there. */
 		private const val TOUCH_PAST = 3.0
+		/** The slowest steering on past a top is simulated at, see [pastTopHit], slower it hardly gets anywhere along the line. */
+		private const val PAST_TOP_MIN_SPEED = 0.3
+		/** How far above the height glided at the box is looked at past a top, see [pastTopHit]: down on one it's at its height. */
+		private const val PAST_TOP_LIFT = 0.01
 		/** The speed steering over to the lane of a top in a hole is simulated at, at least, see [touchLane]. */
 		private const val TOUCH_STEER_SPEED = 1.6
 		/** How many ways to touch down on a top in a hole are simulated at most, best first, see [touchLane]. */
@@ -1678,6 +1682,19 @@ abstract class ObstaclePassingMode(
 					ElytraFly.debug { "In the way %.1f ahead before the obstacle at this speed (${inTheWay.what}), not gliding over it".format(inTheWay.distance + skip) }
 					dropThread()
 					commitHop("passObstacles", null)
+				}
+				// Bounced off the top in the hole short of the lane it was to be on past it, e.g. still steering over to it
+				// gliding: from where it really is, steered on over to that lane, the box runs into what's after the top, e.g. a
+				// column the lane only just gets past. Planned again from here, the glide over the rest of the hole with what's
+				// in it, not flown on blind into it. Once up off the top, the bounce off it is left as it is.
+				hop.hole && hop.touched && !player.isOnGround && (passTicks % RELOOK_TICKS == 0 || flightTicks - hop.touchedAt <= 2) &&
+					pastTopHit(hop, closestLinePoint, snappedDir, progress)?.also { hit ->
+						ElytraFly.debug { "Off the top %+.2f across, steered on over to the lane %+.2f the box runs into what's %.1f ahead, planning again from here"
+							.format(playerPos.subtract(closestLinePoint).dotProduct(across(snappedDir)), hop.lane.dotProduct(across(snappedDir)), hit) }
+					} != null -> {
+					dropThread()
+					commitHop("passObstacles", null)
+					if (dodge != null && dodge == hop.lane) commitNoLane("passObstacles")
 				}
 				// Glided over something higher, e.g. off a top two blocks high touched down on, now all over a layer a block
 				// high that goes on with nothing higher on it to where the glide ends: down onto it to bounce on. Held on over
@@ -5604,8 +5621,11 @@ abstract class ObstaclePassingMode(
 			if (plan.touch.switchAt > Double.NEGATIVE_INFINITY) return false
 			val toTop = steerOffsets(off, plan.lane, speed, plan.touch.middle - progress)
 			val there = point(plan.touch.middle, toTop.last().second)
+			// And on past it from there, still short of the lane, to past the hole: what the lane only just gets past, e.g. a
+			// column after the top, is in the way of where it really is, the lane's own look at it doesn't see that.
+			val onPast = steerOffsets(off, plan.lane, speed, hop.end + TOUCH_PAST - progress)
 			return middleOver(there, plan.touch.y) &&
-				pathClear(progress, toTop, plan.touch.middle, held)
+				pathClear(progress, onPast, hop.end + TOUCH_PAST, held)
 		}
 		val free = plans.size
 		plans.removeAll { plan -> !reachable(plan).also { if (!it) tried += "${plan.text} (${plan.covered}/25) can't be steered over to in time" } }
@@ -5827,6 +5847,35 @@ abstract class ObstaclePassingMode(
 		ElytraFly.debug { "Gliding over it, $what %.1f ahead, over to ${lane.target.describe(dir)}${lane.leanText()} meanwhile".format(distance) }
 		commitLane("laneFromGlide", lane, progress + distance)
 		return hop.with(lane = lane.target).also { commitHop("laneFromGlide", it) }
+	}
+
+	/**
+	 * Off the top touched down on in [hop]'s hole, how far ahead the box steered on from where it really is over to the
+	 * hop's lane runs into something before past the hole, null when it doesn't: planned short of the lane at the top,
+	 * steering across gliding is slow. Only the box itself at the height glided at, no swing nor margin, the lane's plan
+	 * already looked at those: what it'd really bump into.
+	 */
+	private fun SafeContext.pastTopHit(hop: Hop, linePoint: Vec3d, dir: Vec3d, progress: Double): Double? {
+		val until = hop.end + TOUCH_PAST - progress
+		if (until <= 0.0) return null
+		val across = across(dir)
+		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val off = player.pos.subtract(linePoint).dotProduct(across)
+		val speed = max(player.velocity.horizontalLength(), PAST_TOP_MIN_SPEED)
+		val path = steerOffsets(off, hop.lane.dotProduct(across), speed, until)
+		// Standing on the top it's at its height, the top itself isn't in the way.
+		val bottom = min(player.y, hop.targetY) + PAST_TOP_LIFT
+		val top = max(player.y, hop.targetY) + GLIDE_SIZE
+		fun free(along: Double, offset: Double) = linePoint.add(forward.multiply(along)).add(across.multiply(offset)).let {
+			spaceEmpty(Box(it.x - GLIDE_SIZE / 2, bottom, it.z - GLIDE_SIZE / 2, it.x + GLIDE_SIZE / 2, top, it.z + GLIDE_SIZE / 2), hazards = false)
+		}
+		// Half a tick's way apart too, a tick's move is longer than the box.
+		for (i in 1..path.lastIndex) {
+			val (along, offset) = path[i]
+			val (lastAlong, lastOffset) = path[i - 1]
+			if (!free((along + lastAlong) / 2, (offset + lastOffset) / 2) || !free(along, offset)) return along
+		}
+		return null
 	}
 
 	/** The last lane [laneFromGlide] turned down, for logging it once. */
