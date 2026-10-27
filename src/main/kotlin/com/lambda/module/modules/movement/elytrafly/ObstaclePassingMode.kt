@@ -5084,9 +5084,14 @@ abstract class ObstaclePassingMode(
 							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }
 								?.let { withWhatFollows(it.with(lane = lane), from, dir, distance, tilt, "Low $block %.1f ahead on the lane".format(distance)) }
 								?.let { glideOver(it) } != null -> {}
+						// The chooser's ways from as far as a lane is still steered over to, not only once braking: e.g. dodged into a
+						// field of floating blocks, threading an opening or a stepping stone onto a top needs its lead, at the brake
+						// it's too close for them (SW through the Redstone parkour field it landed 15 before what a thread 20 before
+						// got past). Bouncing, the ticks on the floor aren't looked from, the ones in the air in between are.
+						!carpetsOnly && distance <= brakeDistance() + DODGE_STEER_AHEAD &&
+							rescueBeforeBrake(here, linePoint, dir, distance, progress + distance, block) -> return true
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
-						!carpetsOnly && rescueBeforeBrake(here, linePoint, dir, distance, progress + distance, block) -> return true
 						else -> return brake(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane ($laneMiss)".format(distance), dodgeCarpets, ahead = true)
 					}
 				}
