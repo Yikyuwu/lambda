@@ -956,7 +956,9 @@ object HighwayTools : Module(
             ).associateWith { target(ceiling, ceilingMaterial) }
         }
 
-        val wallElevation = if (pavement != Material.None) rimHeight else 0 + if (pavement != Material.None) 1 else 0
+        // From the rim's height up, right beside it, the way it's always been built. Written as `rimHeight else 0 + 1` it
+        // read as if a block more was meant, which would leave a gap beside the rim all along the way.
+        val wallElevation = if (pavement != Material.None) rimHeight else 0
         if (rightWall != Material.None) {
             structure += wall(orthogonal, center, 1, wallElevation).associateWith { target(rightWall, wallMaterial) }
         }
