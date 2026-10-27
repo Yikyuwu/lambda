@@ -157,6 +157,8 @@ abstract class ObstaclePassingMode(
 		private const val SHED_CLEAR_TICKS = 10
 		/** Rising off the floor less than this high, it's held plainly instead of flapping, see [shedPitch]. */
 		private const val SHED_RISE = 0.75
+		/** How close two obstacles along the line are the same one landed for to take off again slower, see [restartedFor]. */
+		private const val RESTART_SAME = 3.0
 		/** How far before an opening it has to land at least to take off again and come in slower, see [restartFor]. */
 		private const val RESTART_ROOM = 15.0
 		/** How long the glide over a hole [planSpeed] looks at is kept for it, the speed needed hardly changes meanwhile. */
@@ -914,6 +916,8 @@ abstract class ObstaclePassingMode(
 		set(value) { hopMissText = lazyOf(value) }
 	/** Where the opening is that it lands before only to take off again slower, see [threadHold]. */
 	private var restartFor: Double? = null
+	/** The obstacle it last landed for to take off again slower to fit a lane, not again for it, see [startDodge]. */
+	private var restartedFor: Double? = null
 	/** Why the last [dipLane] doesn't bounce through a hole as a dip, for the debug log. */
 	private var dipMiss = ""
 	/** Why the last [withTouch] doesn't touch down on a top, for the debug log. */
@@ -1317,6 +1321,7 @@ abstract class ObstaclePassingMode(
 	private fun dropPlan(owner: String) {
 		passingToPos = null
 		pausedWalk = false
+		restartedFor = null
 		commitNoLane(owner)
 		commitBrake(owner, null)
 		commitHop(owner, null)
@@ -1400,6 +1405,7 @@ abstract class ObstaclePassingMode(
 		// Steered anew each tick below, a yaw left over would hold you on an old heading.
 		dodgeYaw = null
 		if (slowFor?.let { progress(player.pos) > it } == true || !player.isGliding) commitSlowFor("passObstacles", null)
+		if (restartedFor?.let { progress(player.pos) > it } == true) restartedFor = null
 		// Past the hole with the top to touch down on, its side isn't kept for anything ahead any more.
 		if (touchSide?.let { progress(player.pos) > it.second } == true) commitTouchSide(null)
 		// Past it, or on a lane or landing for it.
@@ -1800,9 +1806,18 @@ abstract class ObstaclePassingMode(
 					commitSlowFor("startDodge", at)
 					return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane at this speed ($noLane), slowing down to %.2f to fit one".format(distance, FIT_SPEED))
 				}
-				return if (distance > brakeDistance()) noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane to dodge to yet ($noLane), no opening in it ($openingMiss)".format(distance))
-				else if (rescueBeforeBrake(from, linePoint, dir, distance, at, block)) true
-				else brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), %.2f off the line, no free lane to dodge to ($noLane), no opening in it ($openingMiss)".format(distance, from.distanceTo(linePoint)), ahead = true)
+				if (distance > brakeDistance()) return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane to dodge to yet ($noLane), no opening in it ($openingMiss)".format(distance))
+				if (rescueBeforeBrake(from, linePoint, dir, distance, at, block)) return true
+				// Too fast to fit a lane, too late to slow down flying: landing to take off again slower and dodge then, like
+				// for an opening, not walking. Once for it, it may not fit slower either.
+				val restart = restartedFor?.let { abs(it - at) < RESTART_SAME } != true && distance > landingDistance() + RESTART_ROOM &&
+					player.velocity.horizontalLength() > FIT_SPEED && freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null
+				if (restart) {
+					restartFor = at
+					restartedFor = at
+					return brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane at this speed ($noLane), landing to take off again slower to fit one".format(distance), ahead = true)
+				}
+				return brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), %.2f off the line, no free lane to dodge to ($noLane), no opening in it ($openingMiss)".format(distance, from.distanceTo(linePoint)), ahead = true)
 			}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
 		return commitLane("startDodge", lane, at)

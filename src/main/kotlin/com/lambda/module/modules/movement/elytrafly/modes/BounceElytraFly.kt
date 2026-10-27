@@ -500,10 +500,13 @@ class BounceElytraFly(
 	override fun SafeContext.bounceKey(): Any? =
 		listOf(ceilingY(), stepLanding, pacer.pace, pacer.throttle, slowingToFit, isDodging, smartPitch, pitch)
 
-	/** Over an obstacle in the nether up to [MAX_NETHER_HOP_Y], over two blocks too. */
+	/**
+	 * Over an obstacle up to [MAX_HOP_RISE] above the flight line, over two blocks too, in the nether below
+	 * [MAX_NETHER_HOP_Y]. A roof elsewhere is up to the glide's own checks of its way.
+	 */
 	override fun SafeContext.maxHopY() =
 		if (world.registryKey == World.NETHER) max(maxFlightY(), min(MAX_NETHER_HOP_Y, startPos.y + MAX_HOP_RISE))
-		else maxFlightY()
+		else max(maxFlightY(), startPos.y + MAX_HOP_RISE)
 
 	override fun SafeContext.maxFlightY() =
 		if (world.registryKey == World.NETHER) min(startPos.y + MAX_COAST_RISE, min(MAX_NETHER_LAYER_FLIGHT_Y, MAX_NETHER_FLIGHT_Y + layerHeight))
