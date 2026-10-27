@@ -35,13 +35,23 @@ object AutoReconnect : Module(
 ) {
     val delay by setting("Delay", 5.0, 0.5..60.0, 0.5, unit = "s", description = "Time in seconds before automatically reconnecting.")
     val singleplayer by setting("Singleplayer", false, description = "Whether to auto-reconnect to singleplayer worlds.")
+    val notAfterAutoDisconnect by setting("No Reconnect When AutoDisconnected", true, description = "Doesn't reconnect after AutoDisconnect left the server, only after kicks, restarts or lost connections. Connecting again by hand turns it back on.")
 
     @JvmStatic
     var lastReconnectTarget: ReconnectTarget? = null
+        set(value) {
+            field = value
+            // Connecting again by hand, e.g. after AutoDisconnect, reconnects automatically again from then on.
+            leftOnPurpose = false
+        }
+
+    /** Disconnected on purpose, e.g. by AutoDisconnect, so not reconnected automatically until you connect again. */
+    @JvmStatic
+    var leftOnPurpose = false
 
     @JvmStatic
     fun canAutoReconnect(): Boolean {
-        if (!isEnabled) return false
+        if (!isEnabled || leftOnPurpose && notAfterAutoDisconnect) return false
         val target = lastReconnectTarget ?: return false
         return when (target) {
             is MultiplayerReconnectTarget -> true
