@@ -113,38 +113,42 @@ class FlightPacer {
      * [bounce] flattened towards [level] while [Pace.Throttled]. Looking down less you glide longer and bounce less
      * often, and each bounce, a sprint jump, pushes you on.
      */
-    fun throttled(bounce: Double, level: Double) = if (pace == Pace.Throttled) level + (bounce - level) * throttle else bounce
+    fun throttled(bounce: Double, level: Double) = throttled(pace, throttle, bounce, level)
 
     private fun SafeContext.hasLowRoof(floorY: Double): Boolean {
         val floor = BlockPos.ofFloored(player.x, floorY, player.z)
         return (1..LOW_ROOF_HEIGHT).any { !world.getBlockState(floor.up(it)).getCollisionShape(world, floor.up(it)).isEmpty }
     }
 
-    private companion object {
-        const val CHECK_STEP = 4
+    companion object {
+        /** [bounce] eased toward [level] at [pace] by [throttle], see [FlightPacer.throttled], from values taken, e.g. for a route search apart. */
+        fun throttled(pace: Pace, throttle: Double, bounce: Double, level: Double) =
+            if (pace == Pace.Throttled) level + (bounce - level) * throttle else bounce
+
+        private const val CHECK_STEP = 4
         /** Flight time the loaded chunks ahead should last while lagging, which sets the safe speed. */
-        const val SAFE_TICKS = 60
+        private const val SAFE_TICKS = 60
         /** Flight time loaded ahead below which it lands, about how long landing and stopping takes. */
-        const val STOP_TICKS = 30
-        const val MIN_STOP_DISTANCE = 12.0
+        private const val STOP_TICKS = 30
+        private const val MIN_STOP_DISTANCE = 12.0
         /** How much more has to be loaded to fly on after waiting. */
-        const val RESUME_MARGIN = 16.0
+        private const val RESUME_MARGIN = 16.0
         /** Most ticks to wait for the server to end the glide after landing from a wait. */
-        const val MAX_LANDED_TICKS = 10
+        private const val MAX_LANDED_TICKS = 10
         /** How much less than usually loaded ahead counts as lagging, and how much less still does once it does. */
-        const val LAG_MARGIN = 16.0
-        const val LAG_END_MARGIN = 8.0
+        private const val LAG_MARGIN = 16.0
+        private const val LAG_END_MARGIN = 8.0
         /** How long the chunks have to keep up before it flies on, each switch turns it around and risks a setback. */
-        const val LAG_HOLD_TICKS = 40
+        private const val LAG_HOLD_TICKS = 40
         /** How fast the usual distance is forgotten, half a block a second, so a turn doesn't count as lag for long. */
-        const val USUAL_LOADED_DECAY = 0.025
-        const val LOW_ROOF_HEIGHT = 4
+        private const val USUAL_LOADED_DECAY = 0.025
+        private const val LOW_ROOF_HEIGHT = 4
         /** Slowest it slows down to, below that a glide almost stalls. */
-        const val MIN_SPEED = 0.5
+        private const val MIN_SPEED = 0.5
         /** Slowing down until this share of the safe speed. */
-        const val SLOW_UNTIL = 0.9
+        private const val SLOW_UNTIL = 0.9
         /** Coasting from this share of the safe speed, and flying on again below the other. */
-        const val COAST_ABOVE = 0.8
-        const val FLY_BELOW = 0.7
+        private const val COAST_ABOVE = 0.8
+        private const val FLY_BELOW = 0.7
     }
 }
