@@ -1750,15 +1750,24 @@ abstract class ObstaclePassingMode(
 			return true
 		}
 		if (!skipHopAt.near(at)) planHop(linePoint, dir, distance)?.let { planned ->
-			val over = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: withTouch(planned, linePoint, dir)
-			if (dodgePastNext(from, linePoint, dir, distance, block, over)) return true
-			ElytraFly.debug {
-				val how = over.touch?.let { "touching down on it at y %.2f".format(it.y) }
-					?: "gliding ${if (over.under) "under" else "over"} it at y %.2f${if (over.under || touchMiss.isEmpty()) "" else " ($touchMiss)"}".format(over.targetY)
-				"Obstacle %.1f ahead ($block), $how${if (over.hole) " and the hole after it" else ""}, %.1f long".format(distance, over.end - over.start)
+			val planOver = if (planned.under) planned else withHoleAfter(planned, linePoint, dir) ?: withTouch(planned, linePoint, dir)
+			if (dodgePastNext(from, linePoint, dir, distance, block, planOver)) return true
+			// With what follows it, else the plain glide instead of touching down, else none of it: nothing gets past what's
+			// after it from where it ends, e.g. bounced off a block on the floor up into a floating one 8 on. A lane, an
+			// opening or braking while there's still room to, see below.
+			val what = "Obstacle %.1f ahead ($block)".format(distance)
+			val over = withWhatFollows(planOver, linePoint, dir, distance, 0, what)
+				?: planOver.touch?.let { withWhatFollows(planned, linePoint, dir, distance, 0, what) }
+			if (over != null) {
+				ElytraFly.debug {
+					val how = over.touch?.let { "touching down on it at y %.2f".format(it.y) }
+						?: "gliding ${if (over.under) "under" else "over"} it at y %.2f${if (over.under || touchMiss.isEmpty()) "" else " ($touchMiss)"}".format(over.targetY)
+					val then = over.then?.let { ", then ${it.text}" } ?: ""
+					"$what, $how${if (over.hole) " and the hole after it" else ""}, %.1f long$then".format(over.end - over.start)
+				}
+				commitHop("startDodge", over)
+				return true
 			}
-			commitHop("startDodge", over)
-			return true
 		}
 		// Too close to steer over to a lane: a top right on the way to bounce on may still be, see [rescueBeforeBrake].
 		if (distance < MIN_DODGE_DISTANCE)
@@ -3112,9 +3121,23 @@ abstract class ObstaclePassingMode(
 	 */
 	private class Continuation(val exit: Double, val hop: Hop?, val lane: Lane?, val at: Double, val text: String)
 
-	/** What [continuation] found from where, while the chooser looks, see [withHopMemo]. */
-	private data class ContinuationKey(val lane: Vec3d, val at: Long, val y: Long, val climb: Long, val speed: Long, val floor: Double)
+	/** What [continuation] found from where, while the chooser looks, see [withHopMemo], with tops of [anyHeightTops] or not. */
+	private data class ContinuationKey(val lane: Vec3d, val at: Long, val y: Long, val climb: Long, val speed: Long, val floor: Double, val anyHeight: Boolean)
 	private var continuationMemo: HashMap<ContinuationKey, Continuation?>? = null
+	/**
+	 * What [continuation] found this tick, the world and where you are the same: e.g. the chooser judging the deciders'
+	 * plan and then [withWhatFollows] judging it again before it's committed find the same, see [withHopMemo].
+	 */
+	private val continuationsThisTick = HashMap<ContinuationKey, Continuation?>()
+	private var continuationsTick = -1
+
+	private fun tickContinuations(): HashMap<ContinuationKey, Continuation?> {
+		if (continuationsTick != passTicks) {
+			continuationsThisTick.clear()
+			continuationsTick = passTicks
+		}
+		return continuationsThisTick
+	}
 
 	/**
 	 * What follows a way past on [lane] from where it ends, [end]: the first thing on that lane within braking and
@@ -3126,7 +3149,7 @@ abstract class ObstaclePassingMode(
 	 */
 	private fun SafeContext.continuation(lane: Vec3d, dir: Vec3d, end: HopEnd): Continuation? {
 		val key = ContinuationKey(lane, (end.at * 10).roundToLong(), (end.y * 100).roundToLong(), (end.climb * 100).roundToLong(),
-			(end.speed * 100).roundToLong(), startPos.y)
+			(end.speed * 100).roundToLong(), startPos.y, anyHeightTops)
 		continuationMemo?.let { memo -> if (memo.containsKey(key)) return memo[key] }
 		val forward = dir.normalize()
 		val point = startPos.add(forward.multiply(end.at)).add(lane)
@@ -3169,20 +3192,33 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * The glide [over] what's [distance] ahead of [from] on its lane, judged with what follows it from where it ends like
-	 * the chooser judges its ways, see [continuation], and flown on to that once past it, see [flyThen]. Ending low right
-	 * before something it can't get over, touch down on or dodge from there is no way past, e.g. a block on the floor with
-	 * a floating one 6 on, reached at 1.19 a tick at y 120.16 4.8 before it: one glide over both instead, as high as the
-	 * taller one needs, else null and why in [hopRejection], the lane looks on while it can still brake.
+	 * Where [hop] ends, [end], as what follows is judged from: ended on the top it touches down on, coming down onto it,
+	 * it's bounced off it the next tick like off the floor, see [simulateHop]. Judged from there falling, it'd fall off
+	 * the top, e.g. a pillar touched down on and then a wall a block higher 10 on judged no way past, it gets over.
 	 */
-	private fun SafeContext.withWhatFollows(over: Hop, from: Vec3d, dir: Vec3d, distance: Double, lean: Int, block: String): Hop? {
+	private fun bouncedOff(hop: Hop, end: HopEnd): HopEnd {
+		val top = hop.touch ?: return end
+		if (abs(end.y - top.y) > 1e-3 || end.climb > 1e-6) return end
+		return HopEnd(end.speed + bounceGain(), end.at, end.y, JUMP_VELOCITY)
+	}
+
+	/**
+	 * The way [over] what's [distance] ahead of [from] on its lane, the deciders': gliding over or under it, touching down
+	 * on it, judged with what follows it from where it ends like the chooser judges its ways, see [continuation], and
+	 * flown on to that once past it, see [flyThen]. Ending low right before something it can't get over, touch down on or
+	 * dodge from there is no way past, e.g. a block on the floor with a floating one 6 on, reached at 1.19 a tick at y
+	 * 120.16 4.8 before it: one glide over both instead, as high as the taller one needs, else null and why in
+	 * [hopRejection], logged as about [what], the deciders look on while they can still brake. The continuations found
+	 * this tick are reused, e.g. the chooser's for the same plan, see [tickContinuations].
+	 */
+	private fun SafeContext.withWhatFollows(over: Hop, from: Vec3d, dir: Vec3d, distance: Double, lean: Int, what: String): Hop? {
 		val progress = progress(player.pos)
 		val speed = player.velocity.horizontalLength()
 		val forward = dir.normalize()
 		var miss = ""
 		val found = sandboxed {
 			withHopMemo {
-				fun judged(hop: Hop) = blockHopRun(hop, progress, speed, strict = false)?.let { it to continuation(hop.lane, dir, it) }
+				fun judged(hop: Hop) = blockHopRun(hop, progress, speed, strict = false)?.let { bouncedOff(hop, it) }?.let { it to continuation(hop.lane, dir, it) }
 				// Not made from here as flown: up to the glide's own checks on the way, as before.
 				val (end, then) = judged(over) ?: return@withHopMemo over to null
 				if (then != null) return@withHopMemo over to then
@@ -3198,6 +3234,17 @@ abstract class ObstaclePassingMode(
 					miss += ", nor over both ($hopRejection)"
 					return@withHopMemo null
 				}
+				// Touching down on it, bounced off up over what's after it, like the chooser's stepping stone: that getting past,
+				// touched down on as planned, what's after it planned again up there, e.g. a pillar with a wall a block higher
+				// 10 on, bounced off at 1.85 on its way up and over the wall at 1.70, the stone held at the wall's height 1.40.
+				val stone = over.touch?.let { top ->
+					planHop(from, dir, end.at + next.distance - progress(from), lean = lean, anyway = true)?.takeUnless { it.under }?.let { after ->
+						Hop(min(top.range.start - HOP_SCAN_STEP, after.start), after.end, from.y + passerConfig.minObstacleHeight, max(after.topY, over.topY),
+							min(top.range.start, after.obstacle), false, lane = over.lane, aim = after.targetY,
+							raised = listOf(over.start..over.end to over.feetY, after.start..after.end to after.feetY) + after.raised, touch = top)
+					}
+				}
+				if (stone != null && judged(stone)?.second != null) return@withHopMemo over to null
 				val bothThen = judged(both)?.second
 				if (bothThen == null) miss += ", nor over both and on ($hopMiss)"
 				bothThen?.let { both to it }
@@ -3205,7 +3252,7 @@ abstract class ObstaclePassingMode(
 		}
 		if (found == null) {
 			hopRejection = miss
-			ElytraFly.debug { "Low $block %.1f ahead on the lane, not gliding over it, it $miss".format(distance) }
+			ElytraFly.debug { "$what, not ${over.touch?.let { "touching down on it" } ?: "gliding ${if (over.under) "under" else "over"} it"}, it $miss" }
 			return null
 		}
 		val (hop, then) = found
@@ -3744,7 +3791,8 @@ abstract class ObstaclePassingMode(
 						!carpetsOnly && !onLine && distance >= MIN_DODGE_DISTANCE &&
 							!holeBefore(lanePoint, dir, progress, distance) &&
 							planHop(from, dir, distance, lean = tilt)?.takeUnless { it.under }
-								?.let { withWhatFollows(it.with(lane = lane), from, dir, distance, tilt, block) }?.let { glideOver(it) } != null -> {}
+								?.let { withWhatFollows(it.with(lane = lane), from, dir, distance, tilt, "Low $block %.1f ahead on the lane".format(distance)) }
+								?.let { glideOver(it) } != null -> {}
 						// Keeping to the lane meanwhile, e.g. the line frees up once past the obstacle beside it.
 						distance > brakeDistance() -> noLaneYet(progress + distance, "Obstacle %.1f ahead on the lane ($block), ${if (carpetsOnly) "not gliding over it ($hopRejection), " else ""}no other free lane yet ($laneMiss)".format(distance))
 						!carpetsOnly && rescueBeforeBrake(here, linePoint, dir, distance, progress + distance, block) -> return true
@@ -5742,7 +5790,7 @@ abstract class ObstaclePassingMode(
 		val outer = hopRunMemo
 		if (outer == null) {
 			hopRunMemo = HashMap()
-			continuationMemo = HashMap()
+			continuationMemo = tickContinuations()
 		}
 		try {
 			return block()
