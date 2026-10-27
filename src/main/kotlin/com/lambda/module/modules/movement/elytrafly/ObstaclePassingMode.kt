@@ -1056,6 +1056,7 @@ abstract class ObstaclePassingMode(
 		var key = ""
 		var wait = 0
 		fun allows(key: String): Boolean {
+			if (!onGameThread) return true
 			if (key == this.key && --wait > 0) return false
 			this.key = key
 			wait = ticks
@@ -2338,8 +2339,8 @@ abstract class ObstaclePassingMode(
 		val next = start.obstacleHit(dir, look) ?: return false
 		// No way past it found a moment ago and still far, looked at again every [RELOOK_TICKS] only, see [lookedLately].
 		val at = progress(start) + next.distance
-		noPastOnLayerYet.values.removeIf { passTicks - it >= LAYER_RELOOK_TICKS }
-		if (distance + next.distance > brakeDistance() + DODGE_STEER_AHEAD && (-1..1).any { at.roundToLong() + it in noPastOnLayerYet }) return false
+		if (onGameThread) noPastOnLayerYet.values.removeIf { passTicks - it >= LAYER_RELOOK_TICKS }
+		if (onGameThread && distance + next.distance > brakeDistance() + DODGE_STEER_AHEAD && (-1..1).any { at.roundToLong() + it in noPastOnLayerYet }) return false
 		if (!tooHighToGlideOver(start, dir, next.distance)) return false
 		// Steering over from where you are, at its height on the way there: the layer starts within reach of a glide.
 		val lane = freeLane(from.add(up), linePoint.add(up), dir, distance + next.distance, Vec3d.ZERO) ?: run {
@@ -2349,7 +2350,7 @@ abstract class ObstaclePassingMode(
 				freeLane(from.add(up), linePoint.add(up), dir, distance + next.distance, Vec3d.ZERO, speed = FIT_SPEED) != null
 			if (slower) commitSlowFor("dodgePastOnLayer", at)
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, no free lane past it from here ($noLane)${if (slower) ", slowing down to %.2f to fit one".format(FIT_SPEED) else ""}".format(distance, next.distance) }
-			noPastOnLayerYet[at.roundToLong()] = passTicks
+			if (onGameThread) noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
 		// Up onto the layer on that lane too, the way up is planned again there, see [steerDodge].
@@ -2357,7 +2358,7 @@ abstract class ObstaclePassingMode(
 		val upAt = lanePoint.obstacleDistance(dir, distance + STEP_CLEAR)?.takeIf { isStepUp(lanePoint, dir, it) }
 		if (upAt == null || planHop(lanePoint, dir, upAt, true) == null) {
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, not up onto it on the lane past it ${lane.target.describe(dir)}".format(distance, next.distance) }
-			noPastOnLayerYet[at.roundToLong()] = passTicks
+			if (onGameThread) noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
 		// [freeLane] looked up there only: down here the way over to the lane and along it up to where the glide up onto the
@@ -2369,7 +2370,7 @@ abstract class ObstaclePassingMode(
 			distance + next.distance - speed * LEAN_TICKS, upAt, holdSpeed = true)
 		steerPathHit(linePoint, dir, path, upAt - 1 - speed)?.let { hit ->
 			ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, not over to the lane past it ${lane.target.describe(dir)} down here: $hit".format(distance, next.distance) }
-			noPastOnLayerYet[at.roundToLong()] = passTicks
+			if (onGameThread) noPastOnLayerYet[at.roundToLong()] = passTicks
 			return false
 		}
 		ElytraFly.debug { "Obstacle %.1f ahead ($block), a layer to bounce on, ${next.what} %.1f past its start can't be glided over, dodging past it ${lane.target.describe(dir)}${lane.leanText()}".format(distance, next.distance) }
@@ -3167,7 +3168,9 @@ abstract class ObstaclePassingMode(
 	}
 
 	/** What the plan is, a new plan or none any more cancels the job going on, see [routeThreaded]. */
-	private fun routePlanKey() = listOf(hop, dodge, dodgeOffset, thread, brakeAt, dipAt)
+	// By what it plans, not which objects: the deciders commit a new one alike often, that's the same plan to search past.
+	private fun routePlanKey() = listOf(hop?.let { listOf(it.start, it.end, it.lane, it.targetY, it.touch?.middle, it.touch?.y, it.swerve?.offset) },
+		dodge, dodgeOffset, thread?.let { it.wallAt to it.centre }, brakeAt, dipAt)
 
 	/**
 	 * Like [routeShadow], the route searched on the route thread instead, see [RoutePlanner]: every
@@ -3184,14 +3187,16 @@ abstract class ObstaclePassingMode(
 		}
 		val dir = getSnappedDir()
 		val plan = routePlanKey()
+		// What's finished already first, it's dropped only if it's no longer for where you are, see [takeRoute].
+		routePub.getAndSet(null)?.let { takeRoute(it) }
 		routeJob?.let { job ->
 			if (job.dir != dir || job.line != startPos || job.plan != plan) {
 				routePlanner.cancel()
 				routeJob = null
 			}
 		}
-		routePub.getAndSet(null)?.let { takeRoute(it) }
-		if (passTicks % CHOOSER_RELOOK_TICKS != 0) return
+		// Still searching, it's let finish rather than started over each relook.
+		if (passTicks % CHOOSER_RELOOK_TICKS != 0 || routeJob != null && routePlanner.busy) return
 		val progress = progress(flyer.pos)
 		if (hop.let { it != null && progress >= it.start }) return
 		if (passerConfig.routeSnapshotCheck) flightKept { checkRouteSnapshot(dir, progress) }
@@ -4007,6 +4012,7 @@ abstract class ObstaclePassingMode(
 	 * same lane, speed band and floor. Simulating every way again then finds none again, at a few ms each relook.
 	 */
 	private fun SafeContext.chooserMissed(kind: String, at: Double, lane: Double): Boolean {
+		if (!onGameThread) return false
 		chooserMisses.removeIf { passTicks >= it.until || passTicks < it.until - CHOOSER_NONE_TICKS }
 		val band = speedBand()
 		return chooserMisses.any { it.kind == kind && abs(it.at - at) < 1.5 && abs(it.lane - lane) < 0.01 && it.band == band && it.floorY == startPos.y }
@@ -4017,6 +4023,7 @@ abstract class ObstaclePassingMode(
 	 * [CHOOSER_NONE_TICKS], else [CHOOSER_MISS_TICKS], close by within [RELOOK_TICKS] only, where it matters most.
 	 */
 	private fun SafeContext.rememberChooserMiss(kind: String, at: Double, lane: Double, ways: Int, distance: Double) {
+		if (!onGameThread) return
 		val ticks = when {
 			distance <= brakeDistance() + DODGE_STEER_AHEAD -> RELOOK_TICKS
 			ways == 0 -> CHOOSER_NONE_TICKS
@@ -7130,7 +7137,7 @@ abstract class ObstaclePassingMode(
 		// [flyer] view the game thread may drop meanwhile.
 		diveTop?.let { (y, since) ->
 			if (player.isGliding && flightTicks - since in 0..TOUCH_DIVE_HOLD_TICKS) return y
-			if (MinecraftClient.getInstance().isOnThread) diveTop = null
+			if (onGameThread) diveTop = null
 		}
 		val hop = hop ?: return null
 		val touch = hop.touch ?: return null
@@ -8910,6 +8917,7 @@ abstract class ObstaclePassingMode(
 
 	/** Logs once that the obstacle at [at] along the line has no free lane past it yet, looked at again next tick. Always false. */
 	private fun noLaneYet(at: Double, reason: String): Boolean {
+		if (!onGameThread) return false
 		if (noLaneAt?.let { abs(it - at) < 1.5 } != true) ElytraFly.debug { reason }
 		noLaneAt = at
 		noLaneDodge = dodge
@@ -8924,6 +8932,7 @@ abstract class ObstaclePassingMode(
 	 * each tick.
 	 */
 	private fun SafeContext.lookedLately(at: Double, distance: Double): Boolean {
+		if (!onGameThread) return false
 		noWayYet.values.removeIf { passTicks - it >= RELOOK_TICKS }
 		return distance > brakeDistance() + DODGE_STEER_AHEAD && (-1..1).any { at.roundToLong() + it in noWayYet }
 	}
@@ -9896,6 +9905,13 @@ interface PasserValues {
 	/** These as they are now. */
 	fun taken() = Taken(minObstacleHeight, headHitters, obstacleLookAhead, maxDodge, dodgeLookAhead, directionStep)
 }
+
+/**
+ * Whether this is the game thread, not the route thread: what the flight remembers between ticks outside [PlanCtx], e.g.
+ * the spots with no way yet, is the game thread's alone, the route thread neither reads nor writes it and looks at
+ * everything each time, see [ObstaclePassingMode.searchOnThread].
+ */
+private val onGameThread get() = MinecraftClient.getInstance().isOnThread
 
 class PasserSettings(override val c: Config) : ConfigBlock, PasserValues {
 	val passObstacles by c.setting("Pass Obstacles", true, "Automatically paths around obstacles using baritone")
