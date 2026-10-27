@@ -2079,9 +2079,11 @@ abstract class ObstaclePassingMode(
 				val notOver = hopRejection
 				val noLane = laneMiss
 				if (throughOpening(from, linePoint, dir, distance, block)) return true
-				// One fits slower, it slows down first.
+				// One fits slower, it slows down first. Also a swerve out beside it and back: steering over takes the longer
+				// along the way the faster, fast it can't get out there before it.
 				if (distance > brakeDistance() + DODGE_STEER_AHEAD && player.velocity.horizontalLength() > FIT_SPEED &&
-					freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null) {
+					(freeLane(from, linePoint, dir, distance, Vec3d.ZERO, speed = FIT_SPEED) != null ||
+						sandboxed { swerveWays(linePoint, dir, distance, from.subtract(linePoint).dotProduct(across(dir)), FIT_SPEED) }.isNotEmpty())) {
 					commitSlowFor("startDodge", at)
 					return noLaneYet(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), no free lane at this speed ($noLane), slowing down to %.2f to fit one".format(distance, FIT_SPEED))
 				}
@@ -3415,9 +3417,10 @@ abstract class ObstaclePassingMode(
 	 * lane [SWERVE_LEAD] before the block, back [SWERVE_PAST] after it, see [swervePlan]. The closest such lane to either
 	 * side, none on a side with none.
 	 */
-	private fun SafeContext.swerveWays(linePoint: Vec3d, dir: Vec3d, distance: Double, off: Double): List<HoleWay> {
+	private fun SafeContext.swerveWays(
+		linePoint: Vec3d, dir: Vec3d, distance: Double, off: Double, speed: Double = player.velocity.horizontalLength(),
+	): List<HoleWay> {
 		val progress = progress(player.pos)
-		val speed = player.velocity.horizontalLength()
 		val floorY = linePoint.y
 		val at = progress + distance
 		// How far the block goes on along the line, as high as bouncing goes.
@@ -3440,7 +3443,7 @@ abstract class ObstaclePassingMode(
 				// How far steering over to it takes, from the line straight on.
 				val reach = steerOffsets(0.0, offset, speed, SWERVE_MAX_REACH).firstOrNull { abs(it.second - offset) < LANE_REACHED }?.first
 				if (reach == null) null.also { miss("not over there within %.0f".format(SWERVE_MAX_REACH)) }
-				else swervePlan(Swerve(offset, max(progress, at - SWERVE_LEAD - reach), blockEnd + SWERVE_PAST, emptyList(), at), dir, floorY, miss = ::miss)?.let { hop ->
+				else swervePlan(Swerve(offset, max(progress, at - SWERVE_LEAD - reach), blockEnd + SWERVE_PAST, emptyList(), at), dir, floorY, speed = speed, miss = ::miss)?.let { hop ->
 					HoleWay("swerve", hop, null, "out to %+.2f and back, held at y %.2f from %.1f to %.1f ahead".format(offset, hop.targetY, hop.start - progress, hop.end - progress))
 				}
 			}
@@ -3453,11 +3456,13 @@ abstract class ObstaclePassingMode(
 	 * yours: free bouncing where it's over the floor at [floorY], else held as low as it's free over what's under it,
 	 * below [maxHopY], from where that starts to where it ends.
 	 */
-	private fun SafeContext.swervePlan(swerve: Swerve, dir: Vec3d, floorY: Double, side: Double = SWERVE_SIDE_MARGIN, miss: (String) -> Unit): Hop? {
+	private fun SafeContext.swervePlan(
+		swerve: Swerve, dir: Vec3d, floorY: Double, side: Double = SWERVE_SIDE_MARGIN, speed: Double = player.velocity.horizontalLength(),
+		miss: (String) -> Unit,
+	): Hop? {
 		val across = across(dir)
 		val forward = Vec3d(dir.x, 0.0, dir.z).normalize()
 		val progress = progress(player.pos)
-		val speed = player.velocity.horizontalLength()
 		val ceiling = maxHopY()
 		// Steered like the flight, see [steerYaw], until back on the line past it.
 		var o = player.pos.subtract(startPos).dotProduct(across)
