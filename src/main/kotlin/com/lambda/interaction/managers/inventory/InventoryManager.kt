@@ -247,7 +247,8 @@ object InventoryManager : Manager<InventoryRequest>(
 			} ?: false
 
 			val alteredSlots = if (packet.syncId == 0) alteredPlayerSlots else alteredSlots
-			val matches = alteredSlots.confirms(packet.slot, itemStack)
+			// Only for a packet that applies, confirming consumes the remembered change.
+			val matches by lazy { alteredSlots.confirms(packet.slot, itemStack) }
 
 			if (packet.syncId == 0) {
 				if (PlayerScreenHandler.isInHotbar(packet.slot) && !itemStack.isEmpty) {
