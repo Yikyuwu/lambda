@@ -197,6 +197,12 @@ abstract class ObstaclePassingMode(
 		private const val MAX_LANDING_TICKS = 40
 		/** How close to a lane the swing over to it counts as on it. */
 		private const val LANE_REACHED = 0.3
+		/**
+		 * A dodge lane with something on it within this past what's dodged has the other side looked at too, taken when
+		 * that's free this much farther, see [startDodge].
+		 */
+		private const val LANE_FREE_AFTER = 24.0
+		private const val LANE_FREE_BETTER = 6.0
 		/** Swerving past a block, on the lane this far before it and steered back this far after it, see [Swerve]. */
 		private const val SWERVE_LEAD = 1.0
 		private const val SWERVE_PAST = 1.0
@@ -1960,9 +1966,25 @@ abstract class ObstaclePassingMode(
 				}
 				return brake(at, "Obstacle %.1f ahead ($block), not gliding over it ($notOver), %.2f off the line, no free lane to dodge to ($noLane), no opening in it ($openingMiss)".format(distance, from.distanceTo(linePoint)), ahead = true)
 			}
-		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${lane.target.describe(dir)}${lane.leanText()}".format(distance) }
-		return commitLane("startDodge", lane, at)
+		// Something soon after it on that lane, e.g. a block a few blocks on: the closest free one on the other side
+		// instead when that stays free farther, no switching lanes or coming down early beside it then.
+		val other = if (toward != null) null else {
+			val soon = freeAfter(linePoint, dir, lane, distance + past)
+			if (soon > LANE_FREE_AFTER) null else {
+				val side = across(dir).multiply(-sign(lane.offset) * laneStep(dir))
+				freeLane(from, linePoint, dir, distance, Vec3d.ZERO, past = past, toward = side)
+					?.takeIf { sign(it.offset) != sign(lane.offset) && freeAfter(linePoint, dir, it, distance + past) > soon + LANE_FREE_BETTER }
+			}
+		}
+		val picked = other ?: lane
+		ElytraFly.debug { "Obstacle %.1f ahead ($block), not gliding over it ($hopRejection), dodging ${picked.target.describe(dir)}${picked.leanText()}${if (other != null) ", the other side, free farther past it" else ""}".format(distance) }
+		return commitLane("startDodge", picked, at)
 	}
+
+	/** How far past [from] ahead of [linePoint] along [lane] it's free, as far as dodges look. */
+	private fun SafeContext.freeAfter(linePoint: Vec3d, dir: Vec3d, lane: Lane, from: Double): Double =
+		linePoint.add(across(dir).multiply(lane.offset)).add(dir.multiply(from))
+			.obstacleHit(dir, passerConfig.dodgeLookAhead.toDouble())?.distance ?: Double.POSITIVE_INFINITY
 
 	/**
 	 * Over the magma cube [distance] ahead, glided over on the line at full speed like a block two high, see [cubeBoxes].
