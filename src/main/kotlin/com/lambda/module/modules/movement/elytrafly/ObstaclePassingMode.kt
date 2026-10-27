@@ -549,12 +549,6 @@ abstract class ObstaclePassingMode(
 		private const val SWING_FIT_ABOVE = 0.4
 		/** Slower than this no tick fits, it's in the way, not beside it, see [swingFit]. */
 		private const val SWING_FIT_MIN = 0.5
-		/**
-		 * How far ahead [swingCap] looks, in ticks at your speed and blocks more: the next two bounces' jumps. What's
-		 * beside the way farther on is passed like any other obstacle, slowed down for when it's a tunnel still.
-		 */
-		private const val SWING_FIT_LOOK_TICKS = 24.0
-		private const val SWING_FIT_LOOK_MARGIN = 3.0
 		/** How often [swingFit] is looked at again, in ticks. */
 		private const val SWING_FIT_TICKS = 2
 		/** How much faster than now a lane is picked for, bouncing over to it speeds you up, diagonally by a block a tick or so. */
@@ -3688,8 +3682,8 @@ abstract class ObstaclePassingMode(
 		if (flightTicks - swingFitTick >= SWING_FIT_TICKS) {
 			swingFitTick = flightTicks
 			val off = player.pos.subtract(linePoint).dotProduct(across(dir))
-			val look = min(passerConfig.dodgeLookAhead.toDouble(), player.velocity.horizontalLength() * SWING_FIT_LOOK_TICKS + SWING_FIT_LOOK_MARGIN)
-			swingFitSpeed = swingFit(linePoint, dir, if (dodge != null) dodgeOffset else 0.0, off, look)
+			// As far as it looks for obstacles, for time to slow down before a tunnel narrows.
+			swingFitSpeed = swingFit(linePoint, dir, if (dodge != null) dodgeOffset else 0.0, off, passerConfig.dodgeLookAhead.toDouble())
 		}
 		val speed = player.velocity.horizontalLength()
 		val capped = swingFitSpeed >= SWING_FIT_MIN && speed + BOUNCE_SPEED_GAIN > swingFitSpeed
