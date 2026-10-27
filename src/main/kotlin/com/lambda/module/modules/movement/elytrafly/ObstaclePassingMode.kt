@@ -221,6 +221,9 @@ abstract class ObstaclePassingMode(
 		private const val MAX_LANDING_TICKS = 40
 		/** How close to a lane the swing over to it counts as on it. */
 		private const val LANE_REACHED = 0.3
+		/** What's planned past a glide is looked at again from where you are only this fast, and dropped after this many misses. */
+		private const val THEN_RECHECK_SPEED = 0.6
+		private const val THEN_RECHECK_MISSES = 2
 		/**
 		 * A dodge lane with something on it within this past what's dodged has the other side looked at too, taken when
 		 * that's free this much farther, see [startDodge].
@@ -841,6 +844,8 @@ abstract class ObstaclePassingMode(
 			it.chosen = chosen
 			it.then = then
 		}
+		/** How many looks in a row found nothing past it from where the glide really ends, see [thenStillFollows]. */
+		var thenMisses = 0
 		/** Not making it yet, logged once. */
 		var waiting = false
 		/** Holding the height for it, not letting go again as the speed drops a little. */
@@ -1974,8 +1979,11 @@ abstract class ObstaclePassingMode(
 				}
 				// What it was judged with past it looked at again from where it really is, while it can still brake for what's
 				// after it: nothing getting past that from where the glide really ends, planned again, see [thenStillFollows].
+				// Not while still speeding up, e.g. right after taking off: judged from there it's far too slow. Twice in a row,
+				// a look a little off doesn't drop a way that's fine.
 				hop.then != null && !hop.held && passTicks % RELOOK_TICKS == 0 && hop.start - progress > brakeDistance() &&
-					!thenStillFollows(hop, snappedDir, progress) -> {
+					player.velocity.horizontalLength() >= THEN_RECHECK_SPEED &&
+					(if (thenStillFollows(hop, snappedDir, progress)) { hop.thenMisses = 0; false } else ++hop.thenMisses >= THEN_RECHECK_MISSES) -> {
 					ElytraFly.debug { "Past the obstacle at %.1f nothing gets past what's after it any more from where the glide ends, looking again".format(hop.start - progress) }
 					dropThread()
 					commitHop("passObstacles", null)
