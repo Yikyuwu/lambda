@@ -18,6 +18,7 @@
 package com.lambda.module.modules.movement.elytrafly
 
 import baritone.api.pathing.goals.GoalBlock
+import com.lambda.Lambda.mc
 import com.lambda.config.Config
 import com.lambda.config.ConfigBlock
 import com.lambda.context.SafeContext
@@ -26,6 +27,8 @@ import com.lambda.event.events.TickEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
+import com.lambda.graphics.mc.RenderBuilder
+import com.lambda.graphics.mc.renderer.ImmediateRenderer.Companion.immediateRenderer
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
 import com.lambda.interaction.managers.rotating.RotationManager
@@ -41,6 +44,7 @@ import com.lambda.util.math.dist
 import com.lambda.util.math.distSq
 import com.lambda.util.math.flooredBlockPos
 import com.lambda.util.math.isLoaded
+import com.lambda.util.math.setAlpha
 import com.lambda.util.world.raycast.InteractionMask
 import com.lambda.util.world.raycast.RayCastUtils.blockResult
 import com.lambda.util.world.raycast.RayCastUtils.rayCast
@@ -71,6 +75,7 @@ import net.minecraft.util.shape.VoxelShapes
 import net.minecraft.world.BlockView
 import net.minecraft.world.RaycastContext
 import net.minecraft.world.World
+import java.awt.Color
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -100,6 +105,13 @@ private fun pathOffset(path: List<Pair<Double, Double>>, along: Double): Double 
 	}
 	return path.last().second
 }
+
+/** How often the path shown is put together again, see [PasserSettings.showPath]: the glide is simulated anew each time. */
+private const val PATH_VIEW_TICKS = 4
+/** How far behind you along the flight line it's drawn, see [PasserSettings.showPath]. */
+private const val PATH_LINE_BEHIND = 8.0
+/** The width of the lines of the path shown, as wide on screen at any distance. */
+private const val PATH_LINE_WIDTH = -0.001f
 
 abstract class ObstaclePassingMode(
 	override val c: Config,
@@ -1352,9 +1364,27 @@ abstract class ObstaclePassingMode(
 		onDisable {
 			if (passerConfig.passObstacles) BaritoneHandler.cancel()
 			dropPlan("disable")
+			pathView = null
 		}
 		// Left the world, e.g. disconnected and waiting in the queue: the shape caches hold on to it through you.
-		listenUnsafe<WorldEvent.Leave> { dropShapes() }
+		listenUnsafe<WorldEvent.Leave> {
+			dropShapes()
+			pathView = null
+		}
+		// After the plan, only looked at: the path shown, see [buildPathView].
+		listen<TickEvent.Pre>({ Int.MIN_VALUE }) {
+			if (!passerConfig.passObstacles || !passerConfig.showPath || !player.isGliding) {
+				pathView = null
+				return@listen
+			}
+			val shown = pathView
+			if (shown != null && shown.hop === hop && flightTicks - shown.at < PATH_VIEW_TICKS) return@listen
+			pathView = buildPathView()
+		}
+		immediateRenderer("ElytraFly Path") {
+			if (!passerConfig.showPath || mc.world == null) return@immediateRenderer
+			pathView?.let { drawPath(it) }
+		}
 		listen<TickEvent.Pre>({ CLOCK_PRIORITY }) {
 			flightTicks++
 			if (System.identityHashCode(player) != planPlayer || System.identityHashCode(world) != planWorld) newWorld()
@@ -1430,6 +1460,79 @@ abstract class ObstaclePassingMode(
 		swingCapped = false
 		swingFitSpeed = Double.POSITIVE_INFINITY
 		dropShapes()
+	}
+
+	/**
+	 * The path shown, see [PasserSettings.showPath], put together on the game thread at [at] for [hop] and drawn as it is
+	 * on the render thread: nothing in it changes once made. Points in the world, the feet's height for the glide.
+	 */
+	private class PathView(
+		val at: Int, val hop: Hop?, val line: List<Vec3d>, val glide: List<Vec3d>, val swerve: List<Vec3d>, val steer: List<Vec3d>,
+		val lane: List<Vec3d>, val touch: Box?, val opening: Box?,
+	)
+
+	/** Read by the render thread, swapped whole by the game thread, see [PathView]. */
+	@Volatile private var pathView: PathView? = null
+
+	/**
+	 * The path shown from where you are now: the glide over [hop] simulated again like [canGetOver] does when not held
+	 * yet, its swerve and top to touch down on, the steering over to the dodge lane and along it until [dodgeEnd], the
+	 * opening of [thread], and the flight line. Only looked at: the simulation runs [sandboxed], what it writes (the miss
+	 * texts, the exit speed and the like) is put back, and with no [hopRunMemo] it's remembered nowhere.
+	 */
+	private fun SafeContext.buildPathView(): PathView {
+		val dir = getSnappedDir()
+		val across = across(dir)
+		val progress = progress(player.pos)
+		fun point(along: Double, off: Vec3d, y: Double) = startPos.add(dir.multiply(along)).add(off).let { Vec3d(it.x, y, it.z) }
+		val line = listOf(point(progress - PATH_LINE_BEHIND, Vec3d.ZERO, startPos.y), point(progress + passerConfig.dodgeLookAhead, Vec3d.ZERO, startPos.y))
+		val hop = hop
+		val glide = if (hop == null || hopRunMemo != null || chainStart != null) emptyList() else {
+			val trace = mutableListOf(progress to player.y)
+			sandboxed {
+				glideTrace = trace
+				try {
+					canHop(hop, progress)
+				} finally {
+					glideTrace = null
+				}
+			}
+			trace.map { (along, y) -> point(along, hop.laneAt(along, across), y) }
+		}
+		val swerve = hop?.swerve?.path.orEmpty().map { (along, off) -> point(along, across.multiply(off), startPos.y) }
+		val touch = hop?.touch?.let { touch ->
+			val from = touchSpot(touch, dir, touch.range.start)
+			val to = touchSpot(touch, dir, touch.range.endInclusive)
+			Box(from.x, touch.y, from.z, to.x, touch.y + 0.05, to.z).expand(GLIDE_SIZE / 2, 0.0, GLIDE_SIZE / 2)
+		}
+		val dodge = dodge
+		val lineOff = player.pos.subtract(startPos).dotProduct(across)
+		val steer = if (dodge == null) emptyList() else {
+			val reach = max(dodgeEnd - progress, 1.0)
+			steerPath(lineOff, dir, dodge.dotProduct(across), dodgeLean, 0.0, reach)
+				.map { point(progress + it.along, across.multiply(it.offset), startPos.y) }
+		}
+		val lane = if (dodge == null || dodge == Vec3d.ZERO || dodgeEnd <= progress) emptyList()
+			else listOf(point(progress, dodge, startPos.y), point(dodgeEnd, dodge, startPos.y))
+		val opening = thread?.let { thread ->
+			val side = across(thread.dir)
+			val at = thread.origin.add(thread.dir.multiply(thread.wallAt)).add(side.multiply(thread.centre))
+			val half = side.multiply(thread.width / 2)
+			Box(at.x - half.x, thread.minY, at.z - half.z, at.x + half.x, thread.maxY, at.z + half.z).expand(0.05, 0.0, 0.05)
+		}
+		return PathView(flightTicks, hop, line, glide, swerve, steer, lane, touch, opening)
+	}
+
+	/** Draws [view], see [PathView]: each kind in its colour, the flight line faintly. */
+	private fun RenderBuilder.drawPath(view: PathView) {
+		val config = passerConfig
+		polyline(view.line, config.lineColor, PATH_LINE_WIDTH)
+		polyline(view.steer, config.laneColor, PATH_LINE_WIDTH)
+		polyline(view.lane, config.laneColor, PATH_LINE_WIDTH)
+		polyline(view.swerve, config.glideColor.setAlpha(0.5), PATH_LINE_WIDTH)
+		polyline(view.glide, config.glideColor, PATH_LINE_WIDTH)
+		view.touch?.let { box(it) { colors(config.touchColor.setAlpha(0.2), config.touchColor) } }
+		view.opening?.let { box(it) { colors(config.openingColor.setAlpha(0.15), config.openingColor) } }
 	}
 
 	/** Set back, what it was at isn't tried again, and with [PasserSettings.walkWhenFlagged] it lands to walk on. */
@@ -6649,6 +6752,12 @@ abstract class ObstaclePassingMode(
 	 */
 	private var hopRunMemo: HashMap<HopRunKey, HopRun>? = null
 
+	/**
+	 * Where each tick of the glide [simulateHop] simulates is, along the line and the feet's height, while [buildPathView]
+	 * records one for [PasserSettings.showPath]. Null else, the planner's own simulations record nothing.
+	 */
+	private var glideTrace: MutableList<Pair<Double, Double>>? = null
+
 	/** Runs [block] with [canHop] remembering what it simulated, see [hopRunMemo]. */
 	private inline fun <T> withHopMemo(block: () -> T): T {
 		val outer = hopRunMemo
@@ -6787,6 +6896,7 @@ abstract class ObstaclePassingMode(
 				onTopNow = true
 			} else y += climb
 			along += speed
+			glideTrace?.add(along to y)
 			// Bouncing on before it, down in a gap in the layer bounced on, into the side of the next of its blocks.
 			if (fromAlong < hop.start && intoLayerSide(fall, dir, hop.laneAt(along, across), fromAlong, fromY, along, y)) {
 				val ahead = fromAlong - progress
@@ -8437,4 +8547,10 @@ class PasserSettings(override val c: Config) : ConfigBlock {
 	val dodgeLookAhead by c.setting("Dodge Look-Ahead", 64, 10..96, 1, "How far ahead to look for obstacles while gliding, for time to steer past them", " blocks") { passObstacles && dodge }
 	val chooserDecides by c.setting("Chooser Decides", false, "At holes, layer ends and blocks picks the way past with the fastest exit of those simulated to make it from every start: a dodge, a glide over or under, a touch-down on a top of any height, a stepping stone, an opening, a side-step") { passObstacles }
 	val directionStep by c.setting("Direction Step", 45.0, 0.0..180.0, 0.1, "The step size to use when locking the flight direction") { passObstacles }
+	val showPath by c.setting("Show Path", false, "Draws the planned path in the world: the glide over what's ahead, the dodge lane, the top to touch down on, the opening threaded through and the flight line. Only drawn, the flight is the same") { passObstacles }
+	val glideColor by c.setting("Glide Color", Color(0, 220, 255, 255), "The glide simulated over what's ahead, and a swerve's way out and back") { passObstacles && showPath }
+	val laneColor by c.setting("Lane Color", Color(255, 200, 0, 255), "The steering over to the dodge lane and the lane until past what's dodged") { passObstacles && showPath }
+	val touchColor by c.setting("Touch Color", Color(60, 255, 60, 255), "The top touched down on") { passObstacles && showPath }
+	val openingColor by c.setting("Opening Color", Color(255, 60, 255, 255), "The opening threaded through") { passObstacles && showPath }
+	val lineColor by c.setting("Line Color", Color(255, 255, 255, 70), "The flight line") { passObstacles && showPath }
 }
