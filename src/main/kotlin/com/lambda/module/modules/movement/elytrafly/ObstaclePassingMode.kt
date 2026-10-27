@@ -541,6 +541,16 @@ abstract class ObstaclePassingMode(
 		private const val SOLID_ENTITY_RANGE = 128.0
 		/** Faster than now a bit, for speeding up on the way. */
 		private const val SWEEP_SPEED_MARGIN = 0.1
+		/** Faster than now a bit not sprinting, for what a tick's glide adds, see [swingClears]. Sprinting, a bounce adds [BOUNCE_SPEED_GAIN]. */
+		private const val SWING_SPEED_MARGIN = 0.02
+		/** How far to either side of the lane the box may be off it and still clear what's beside the way, see [swingFit]. */
+		private const val SWING_FIT_MARGIN = 0.03
+		/** How much faster than the next sprint jump takes you [swingFit] looks, faster still counts as fitting any speed. */
+		private const val SWING_FIT_ABOVE = 0.4
+		/** Slower than this no tick fits, it's in the way, not beside it, see [swingFit]. */
+		private const val SWING_FIT_MIN = 0.5
+		/** How often [swingFit] is looked at again, in ticks. */
+		private const val SWING_FIT_TICKS = 2
 		/** How much faster than now a lane is picked for, bouncing over to it speeds you up, diagonally by a block a tick or so. */
 		private const val LANE_SPEED_MARGIN = 0.5
 		/** How far across the highway to look for its walls, to fly down its middle. */
@@ -919,6 +929,11 @@ abstract class ObstaclePassingMode(
 	private var fitDodge = false
 	/** On it at [FIT_SPEED] already, flying level so it doesn't get faster, slower it bounces on. */
 	private var atFitSpeed = false
+	/** The fastest the box fits between what's beside the way ahead, see [swingFit], and when that was looked at. */
+	private var swingFitSpeed = Double.POSITIVE_INFINITY
+	private var swingFitTick = Int.MIN_VALUE / 2
+	/** Bouncing on without the sprint, its jump would push you faster than the box fits between what's beside the way, see [swingCap]. */
+	private var swingCapped = false
 	/** Over a hole, steering over to floor beside it to land there, see [landBeside]. */
 	private var landing = false
 	/** Why [throughOpening] found no opening, for the log. */
@@ -1208,6 +1223,8 @@ abstract class ObstaclePassingMode(
 		commitBrake(owner, null)
 		commitHop(owner, null)
 		stepLanding = false
+		swingCapped = false
+		swingFitSpeed = Double.POSITIVE_INFINITY
 		dropShapes()
 	}
 
@@ -1376,6 +1393,7 @@ abstract class ObstaclePassingMode(
 		}
 
 		if (passerConfig.dodge && player.isGliding && !onLayer) planSpeed(closestLinePoint, snappedDir) else forgetSpeedNeed()
+		swingCap(closestLinePoint, snappedDir)
 
 		// Over the floor beside the hole now, down onto it.
 		// Gliding over it after all, e.g. once off the layer a tick later, it's not landed beside.
@@ -3648,6 +3666,37 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
+	 * Diagonally a tick's move swings the box out across the way the farther the faster, e.g. into the stair-step
+	 * corners of a narrow diagonal tunnel's walls: bouncing on without the sprint while its jump would push you faster
+	 * than the box fits between what's beside the lane ahead, see [swingFit]. Not sprinting a bounce leaves the speed as
+	 * it is and bouncing slows down on its own. Not when nothing fits even slow, that's an obstacle in the way.
+	 */
+	private fun SafeContext.swingCap(linePoint: Vec3d, dir: Vec3d) {
+		if (!passerConfig.dodge || !player.isGliding) {
+			swingFitSpeed = Double.POSITIVE_INFINITY
+			swingCapped = false
+			return
+		}
+		if (flightTicks - swingFitTick >= SWING_FIT_TICKS) {
+			swingFitTick = flightTicks
+			val across = across(dir)
+			val lane = when {
+				dodge != null -> dodgeOffset
+				else -> hop?.lane?.dotProduct(across) ?: 0.0
+			}
+			val off = player.pos.subtract(linePoint).dotProduct(across)
+			swingFitSpeed = swingFit(linePoint, dir, lane, off, passerConfig.dodgeLookAhead.toDouble())
+		}
+		val speed = player.velocity.horizontalLength()
+		val capped = swingFitSpeed >= SWING_FIT_MIN && speed + BOUNCE_SPEED_GAIN > swingFitSpeed
+		if (capped != swingCapped) ElytraFly.debug {
+			if (capped) "Bouncing on without the sprint, the box fits between what's beside the way ahead up to %.2f a tick, at %.2f".format(swingFitSpeed, speed)
+			else "Sprinting again, %s".format(if (swingFitSpeed.isFinite()) "the box fits up to %.2f a tick, at %.2f".format(swingFitSpeed, speed) else "nothing close beside the way")
+		}
+		swingCapped = capped
+	}
+
+	/**
 	 * How fast to be for what's ahead: too slow to glide over the next hole on the lane you're dodging to, else on the
 	 * line, like [glideOverHole] would, it bounces on to speed up instead of flying level, also swinging over to a lane
 	 * while what's dodged is still far, so it gets over the hole after it instead of landing before it. Looked at with
@@ -4172,74 +4221,7 @@ abstract class ObstaclePassingMode(
 	): Passage? {
 		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
 		val across = across(dir)
-		val half = GLIDE_SIZE / 2
-		val moveX = d.x * speed
-		val moveZ = d.z * speed
-		// Where the way starts and ends right on the line.
-		val ax = origin.x + d.x * from
-		val az = origin.z + d.z * from
-		val bx = origin.x + d.x * to
-		val bz = origin.z + d.z * to
-		// The separating axes x, z and across the way, and how far a step across moves along each.
-		val nx = doubleArrayOf(1.0, 0.0, across.x)
-		val nz = doubleArrayOf(0.0, 1.0, across.z)
-		val k = DoubleArray(3) { across.x * nx[it] + across.z * nz[it] }
-		// The spots across each box is in the way of, the first move along x or along z.
-		fun blocked(xFirst: Boolean): List<Pair<Double, Double>> {
-			val out = ArrayList<Pair<Double, Double>>()
-			var shiftX = 0.0
-			var shiftZ = 0.0
-			for (leg in 0..1) {
-				val alongX = (leg == 0) == xFirst
-				val legX = if (alongX) moveX else 0.0
-				val legZ = if (alongX) 0.0 else moveZ
-				val px = doubleArrayOf(ax + shiftX, bx + shiftX, ax + shiftX + legX, bx + shiftX + legX)
-				val pz = doubleArrayOf(az + shiftZ, bz + shiftZ, az + shiftZ + legZ, bz + shiftZ + legZ)
-				shiftX += legX
-				shiftZ += legZ
-				// The leg's parallelogram on each axis, once for all the boxes.
-				val pMin = DoubleArray(3)
-				val pMax = DoubleArray(3)
-				for (axis in 0..2) {
-					var lo = Double.POSITIVE_INFINITY
-					var hi = Double.NEGATIVE_INFINITY
-					for (i in 0..3) {
-						val p = px[i] * nx[axis] + pz[i] * nz[axis]
-						lo = min(lo, p)
-						hi = max(hi, p)
-					}
-					pMin[axis] = lo
-					pMax[axis] = hi
-				}
-				for (box in boxes) {
-					val qx = doubleArrayOf(box.minX - half, box.maxX + half, box.minX - half, box.maxX + half)
-					val qz = doubleArrayOf(box.minZ - half, box.minZ - half, box.maxZ + half, box.maxZ + half)
-					var low = Double.NEGATIVE_INFINITY
-					var high = Double.POSITIVE_INFINITY
-					for (axis in 0..2) {
-						var qMin = Double.POSITIVE_INFINITY
-						var qMax = Double.NEGATIVE_INFINITY
-						for (i in 0..3) {
-							val q = qx[i] * nx[axis] + qz[i] * nz[axis]
-							qMin = min(qMin, q)
-							qMax = max(qMax, q)
-						}
-						// Only touching it isn't hitting it, like the game's collisions.
-						if (abs(k[axis]) < 1e-9) {
-							if (pMin[axis] >= qMax - 1e-7 || pMax[axis] <= qMin + 1e-7) high = low
-						} else {
-							val first = (qMax - 1e-7 - pMin[axis]) / k[axis]
-							val second = (qMin + 1e-7 - pMax[axis]) / k[axis]
-							low = max(low, min(first, second))
-							high = min(high, max(first, second))
-						}
-						if (low >= high) break
-					}
-					if (low < high) out += low to high
-				}
-			}
-			return out
-		}
+		fun blocked(xFirst: Boolean) = swingBlocked(origin, dir, from, to, speed, boxes, xFirst)
 		// The widest stretch of the window none of them is in the way of.
 		fun widest(blocked: List<Pair<Double, Double>>): Passage? {
 			val end = around + window
@@ -4272,6 +4254,179 @@ abstract class ObstaclePassingMode(
 			if (lean != 0 && (best == null || stretch.width > best.width)) best = stretch
 		}
 		return best
+	}
+
+	/**
+	 * The spots across the way, offsets from the line along [dir] through [origin], that gliding along it at [speed] from
+	 * anywhere between [from] and [to] along it a tick's move runs into one of [boxes] from, with the first move along x
+	 * when [xFirst], see [passage]. Each an interval, a block, grown by half the box, is in the way of the spots across
+	 * where one of the move's parallelograms meets it, found by the separating axes x, z and across the way.
+	 */
+	private fun swingBlocked(origin: Vec3d, dir: Vec3d, from: Double, to: Double, speed: Double, boxes: List<Box>, xFirst: Boolean): List<Pair<Double, Double>> {
+		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val across = across(dir)
+		val half = GLIDE_SIZE / 2
+		val moveX = d.x * speed
+		val moveZ = d.z * speed
+		// Where the way starts and ends right on the line.
+		val ax = origin.x + d.x * from
+		val az = origin.z + d.z * from
+		val bx = origin.x + d.x * to
+		val bz = origin.z + d.z * to
+		// The separating axes x, z and across the way, and how far a step across moves along each.
+		val nx = doubleArrayOf(1.0, 0.0, across.x)
+		val nz = doubleArrayOf(0.0, 1.0, across.z)
+		val k = DoubleArray(3) { across.x * nx[it] + across.z * nz[it] }
+		val out = ArrayList<Pair<Double, Double>>()
+		var shiftX = 0.0
+		var shiftZ = 0.0
+		for (leg in 0..1) {
+			val alongX = (leg == 0) == xFirst
+			val legX = if (alongX) moveX else 0.0
+			val legZ = if (alongX) 0.0 else moveZ
+			val px = doubleArrayOf(ax + shiftX, bx + shiftX, ax + shiftX + legX, bx + shiftX + legX)
+			val pz = doubleArrayOf(az + shiftZ, bz + shiftZ, az + shiftZ + legZ, bz + shiftZ + legZ)
+			shiftX += legX
+			shiftZ += legZ
+			// The leg's parallelogram on each axis, once for all the boxes.
+			val pMin = DoubleArray(3)
+			val pMax = DoubleArray(3)
+			for (axis in 0..2) {
+				var lo = Double.POSITIVE_INFINITY
+				var hi = Double.NEGATIVE_INFINITY
+				for (i in 0..3) {
+					val p = px[i] * nx[axis] + pz[i] * nz[axis]
+					lo = min(lo, p)
+					hi = max(hi, p)
+				}
+				pMin[axis] = lo
+				pMax[axis] = hi
+			}
+			for (box in boxes) {
+				val qx = doubleArrayOf(box.minX - half, box.maxX + half, box.minX - half, box.maxX + half)
+				val qz = doubleArrayOf(box.minZ - half, box.minZ - half, box.maxZ + half, box.maxZ + half)
+				var low = Double.NEGATIVE_INFINITY
+				var high = Double.POSITIVE_INFINITY
+				for (axis in 0..2) {
+					var qMin = Double.POSITIVE_INFINITY
+					var qMax = Double.NEGATIVE_INFINITY
+					for (i in 0..3) {
+						val q = qx[i] * nx[axis] + qz[i] * nz[axis]
+						qMin = min(qMin, q)
+						qMax = max(qMax, q)
+					}
+					// Only touching it isn't hitting it, like the game's collisions.
+					if (abs(k[axis]) < 1e-9) {
+						if (pMin[axis] >= qMax - 1e-7 || pMax[axis] <= qMin + 1e-7) high = low
+					} else {
+						val first = (qMax - 1e-7 - pMin[axis]) / k[axis]
+						val second = (qMin + 1e-7 - pMax[axis]) / k[axis]
+						low = max(low, min(first, second))
+						high = min(high, max(first, second))
+					}
+					if (low >= high) break
+				}
+				if (low < high) out += low to high
+			}
+		}
+		return out
+	}
+
+	/**
+	 * Whether gliding along [dir] at [speed] from anywhere between [from] and [to] along the line through [origin], at
+	 * any spot from [low] to [high] across it, no tick's move runs into one of [boxes]. With the heading tilted [lean]
+	 * across the way which axis goes first is known, else it may be either, see [passage].
+	 */
+	private fun swingClear(origin: Vec3d, dir: Vec3d, from: Double, to: Double, speed: Double, boxes: List<Box>, low: Double, high: Double, lean: Int = 0): Boolean {
+		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val heading = d.add(across(dir).multiply(lean * Math.tan(Math.toRadians(THREAD_TILT))))
+		val orders = if (abs(d.x * d.z) < 1e-3) listOf(abs(d.x) >= abs(d.z)) else if (lean == 0) listOf(true, false)
+			else listOf(abs(heading.x) >= abs(heading.z))
+		return orders.all { xFirst -> swingBlocked(origin, dir, from, to, speed, boxes, xFirst).none { (l, h) -> l < high && h > low } }
+	}
+
+	/** How fast a tick's move may be judged at, at [speed] now: a sprint jump pushes you on, not sprinting the glide hardly does. */
+	private fun swingSpeed(speed: Double) = speed + if (sprintOff()) SWING_SPEED_MARGIN else BOUNCE_SPEED_GAIN
+
+	/**
+	 * Whether the block at [pos] that a ray out past your width hit, from [origin] along [dir], is only in the way of the
+	 * rays: the box on the line, up to [extra] to either side, at [speed] gets past it at every tick, swinging out to
+	 * either side or with the heading tilted [lean] only that side, see [swingClear]. The rays look as far out as the
+	 * swing reaches all along the way, e.g. the stair-step corners of a diagonal tunnel's walls, the moves along one axis
+	 * and then the other clear them.
+	 */
+	private fun SafeContext.swingClears(origin: Vec3d, dir: Vec3d, pos: BlockPos, shape: VoxelShape, speed: Double, extra: Double, lean: Int): Boolean {
+		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
+		val boxes = shape.boundingBoxes.map { it.offset(pos) }
+		val at = Vec3d(pos.x + 0.5 - origin.x, 0.0, pos.z + 0.5 - origin.z).dotProduct(d)
+		val v = swingSpeed(speed)
+		return swingClear(origin, dir, at - 1.5 - v, at + 1.5, v, boxes, -extra - SWING_FIT_MARGIN, extra + SWING_FIT_MARGIN, lean)
+	}
+
+	/**
+	 * The fastest a tick's move, gliding along [dir] on [lane] across the line through [linePoint], and over from [off]
+	 * where you are, clears what's beside the way at every tick for [look] ahead, both axes first: diagonally the box
+	 * swings out across the way the farther the faster, e.g. into the stair-step corners of a narrow diagonal tunnel's
+	 * walls. Up to what's in the way on the lane itself, that's an obstacle, passed some other way. Infinite along an
+	 * axis, with nothing near or fitting faster than you'd get, 0 when not even slow.
+	 */
+	private fun SafeContext.swingFit(linePoint: Vec3d, dir: Vec3d, lane: Double, off: Double, look: Double): Double {
+		val d = Vec3d(dir.x, 0.0, dir.z).normalize()
+		if (abs(d.x * d.z) < 1e-3) return Double.POSITIVE_INFINITY
+		val across = across(dir)
+		val lanePoint = linePoint.add(across.multiply(lane))
+		val to = (lanePoint.obstacleHit(dir, look, speed = 0.0, mobs = false)?.distance?.minus(1.0) ?: look)
+		if (to < 2.0) return Double.POSITIVE_INFINITY
+		val low = min(lane, off) - SWING_FIT_MARGIN
+		val high = max(lane, off) + SWING_FIT_MARGIN
+		val speed = player.velocity.horizontalLength()
+		val top = speed + BOUNCE_SPEED_GAIN + SWING_FIT_ABOVE
+		// As high as a bounce takes you, and you are.
+		val minY = startPos.y + passerConfig.minObstacleHeight
+		val maxY = max(player.y, startPos.y + BOUNCE_PEAK) + GLIDE_SIZE
+		// As far out to either side as the box swings at the fastest looked at, from its middle out to its corner.
+		val reach = GLIDE_SIZE / 2 * (abs(d.x) + abs(d.z)) + top * abs(d.x * d.z) + 1.0
+		val boxes = swingBoxes(linePoint, d, 0.0, to, low - reach, high + reach, minY, maxY)
+		fun fits(v: Double) = swingClear(linePoint, dir, 0.0, to, v, boxes, low, high)
+		if (fits(top)) return Double.POSITIVE_INFINITY
+		if (!fits(SWING_FIT_MIN)) return 0.0
+		var fast = top
+		var slow = SWING_FIT_MIN
+		repeat(7) {
+			val v = (slow + fast) / 2
+			if (fits(v)) slow = v else fast = v
+		}
+		return slow
+	}
+
+	/**
+	 * The blocks' shapes from [from] to [to] along [d] from [origin], [low] to [high] across it, between [minY] and
+	 * [maxY], once each column: [swingClear] only looks at them across the way.
+	 */
+	private fun SafeContext.swingBoxes(origin: Vec3d, d: Vec3d, from: Double, to: Double, low: Double, high: Double, minY: Double, maxY: Double): List<Box> {
+		val across = across(d)
+		val corners = listOf(from to low, from to high, to to low, to to high).map { (a, l) -> origin.add(d.multiply(a)).add(across.multiply(l)) }
+		freshShapes()
+		val boxes = ArrayList<Box>()
+		val pos = BlockPos.Mutable()
+		for (x in floor(corners.minOf { it.x }).toInt()..floor(corners.maxOf { it.x }).toInt())
+			for (z in floor(corners.minOf { it.z }).toInt()..floor(corners.maxOf { it.z }).toInt()) {
+				// Only the cells in the band, a cell reaches 0.71 from its middle diagonally.
+				val middle = Vec3d(x + 0.5 - origin.x, 0.0, z + 0.5 - origin.z)
+				val side = middle.dotProduct(across)
+				val along = middle.dotProduct(d)
+				if (side < low - 0.71 || side > high + 0.71 || along < from - 0.71 || along > to + 0.71) continue
+				for (y in floor(minY).toInt() - 1..floor(maxY).toInt()) {
+					val shape = wayShape(pos.set(x, y, z))
+					if (shape.isEmpty) continue
+					val inRange = shape.boundingBoxes.map { it.offset(x.toDouble(), y.toDouble(), z.toDouble()) }
+						.filter { it.maxY > minY + 1e-7 && it.minY < maxY - 1e-7 }
+					boxes += inRange
+					// A whole block covers the column across the way, more above it change nothing.
+					if (shape === VoxelShapes.fullCube() && inRange.isNotEmpty()) break
+				}
+			}
+		return boxes
 	}
 
 	/** How far out from the way [passage] looks at [speed], up to [window] to either side of [around]. */
@@ -6090,7 +6245,7 @@ abstract class ObstaclePassingMode(
 		bounceRises(hop, progress, player.y, player.velocity.y, player.velocity.horizontalLength(), BOUNCE_SPEED_GAIN, count)
 
 	/** Not sprinting, see [noSprint], a bounce leaves the speed as it is. Else the sprint jump pushes you on. */
-	private fun sprintOff() = slowingToFit || slowJumpsFor != null && thread?.let { it.hopStart == slowJumpsFor && it.maxSpeed.isFinite() } == true
+	private fun sprintOff() = slowingToFit || swingCapped || slowJumpsFor != null && thread?.let { it.hopStart == slowJumpsFor && it.maxSpeed.isFinite() } == true
 
 	private fun bounceGain() = if (sprintOff()) 0.0 else BOUNCE_SPEED_GAIN
 
@@ -6540,6 +6695,10 @@ abstract class ObstaclePassingMode(
 		val across = across(direction)
 		val halfWidth = halfWidth(direction) + extra
 		val sweep = with(safeContext) { speed?.let { sweep(direction, it) } ?: sweep(direction) }
+		val swingAt = speed ?: safeContext.player.velocity.horizontalLength()
+		val diagonal = abs(direction.x * direction.z) > 1e-3 * direction.horizontalLengthSquared()
+		// Which blocks the swing rays hit the moves clear, each looked at once.
+		val cleared = HashMap<Long, Boolean>()
 		val low = -halfWidth - if (lean > 0) 0.0 else sweep
 		val high = halfWidth + if (lean < 0) 0.0 else sweep
 		val rays = ceil((high - low) / RAY_SPACING).toInt()
@@ -6568,7 +6727,12 @@ abstract class ObstaclePassingMode(
 				val range = nearest?.distance ?: within
 				// The world border, as far as a block there would be.
 				with(safeContext) { borderAhead(start, direction) }?.takeIf { it < range }?.let { nearest = Obstacle(it) { "world border" } }
-				if (range > 0) safeContext.blockRay(start, direction, nearest?.distance ?: range)?.let { hit ->
+				// A ray out past your width looks only as far as the swing reaches, past what the moves clear, see [swingClears].
+				val swingRay = diagonal && abs(start.subtract(this).dotProduct(across)) > halfWidth + 1e-6
+				val passes = if (!swingRay) null else { pos: BlockPos, shape: VoxelShape ->
+					cleared.getOrPut(pos.asLong()) { with(safeContext) { swingClears(this@obstacleHits, direction, pos, shape, swingAt, extra, lean) } }
+				}
+				if (range > 0) safeContext.blockRay(start, direction, nearest?.distance ?: range, passes)?.let { hit ->
 						val distance = hit.pos.subtract(start).dotProduct(direction)
 						if (distance < (nearest?.distance ?: Double.POSITIVE_INFINITY))
 							nearest = Obstacle(distance) { "${Registries.BLOCK.getId(safeContext.blockState(hit.blockPos).block).path} ${hit.blockPos.toShortString()}" }
@@ -6724,15 +6888,17 @@ abstract class ObstaclePassingMode(
 	/**
 	 * Where a ray from [start] along [direction] first hits a block's collision shape within [reach], like [rayCast]. One
 	 * narrower than a whole block across the way, e.g. a post, [POST_MARGIN] wider to either side across it: the rays are
-	 * [RAY_SPACING] apart, a post that thin would fit between two of them.
+	 * [RAY_SPACING] apart, a post that thin would fit between two of them. A block it [passes] is looked past.
 	 */
-	private fun SafeContext.blockRay(start: Vec3d, direction: Vec3d, reach: Double): BlockHitResult? {
+	private fun SafeContext.blockRay(start: Vec3d, direction: Vec3d, reach: Double, passes: ((BlockPos, VoxelShape) -> Boolean)? = null): BlockHitResult? {
 		val end = start.add(direction.multiply(reach))
 		val across = across(direction)
 		val wideX = abs(across.x) * POST_MARGIN
 		val wideZ = abs(across.z) * POST_MARGIN
 		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos ->
 			val shape = wayShape(pos)
+			// Looked past, the ray goes on to the next block.
+			if (passes != null && !shape.isEmpty && passes(pos, shape)) return@raycast null
 			if (shape.isEmpty || shape === VoxelShapes.fullCube()) return@raycast shape.raycast(start, end, pos)
 			val bounds = shape.boundingBox
 			val growX = if (bounds.lengthX < 1 - 1e-6) wideX else 0.0
