@@ -301,6 +301,8 @@ object AutoDisconnect : Module(
     private fun SafeContext.requestDisconnect(reasonText: Text, disarmedTrigger: Reason? = null): Boolean {
         if (player.gameMode != GameMode.SURVIVAL && player.gameMode != GameMode.ADVENTURE || disconnectInProgress) return false
         disconnectInProgress = true
+        // Never reconnected automatically after leaving on purpose, AutoReconnect stays on for kicks and restarts.
+        AutoReconnect.leftOnPurpose = true
         if (AutoReconnect.isEnabled && disableAutoReconnect) AutoReconnect.disable()
         ScreenshotRecorder.takeScreenshot(Lambda.mc.framebuffer, 1) { image ->
             val imageIdentifier = Identifier.of("lambda", "auto_disconnect_screenshot")
