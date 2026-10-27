@@ -246,7 +246,8 @@ class BounceElytraFly(
 			if (autoPitch) {
 				val hold = hopPitch()
 				// From the top of the bounce on, the server takes the rise like a jump until there, see below.
-				if (!(slowingForChunks || coasting) || player.isOnGround || !player.isGliding || hold != null) chunkGlideY = null
+				// Also slowing down to fit a lane or a swerve past what's ahead: bouncing, each sprint jump speeds it up again.
+				if (!(slowingForChunks || coasting || slowingToFit) || player.isOnGround || !player.isGliding || hold != null) chunkGlideY = null
 				else if (chunkGlideY == null && player.velocity.y <= 0) chunkGlideY = min(player.y, ceilingY())
 				val glideY = chunkGlideY
 				val target = when {
