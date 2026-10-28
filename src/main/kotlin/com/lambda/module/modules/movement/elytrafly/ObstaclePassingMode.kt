@@ -377,6 +377,8 @@ abstract class ObstaclePassingMode(
 		/** How far onto a layer to bounce on the glide up onto it goes, and how far on it must be free up there. */
 		private const val STEP_ON = 1.0
 		private const val STEP_CLEAR = 4.0
+		/** How far before a layer a step up the next bounce still comes down at least, closer it's walked onto, see [passObstacles]. */
+		private const val STEP_BOUNCE_ROOM = 2.0
 		/** Room above a level to bounce on it, e.g. on a layer in a tunnel two blocks high: as high as you stand. */
 		private const val LEVEL_ROOM = 1.8
 		/** A gap in a layer you bounce on up to this long is glided across, a longer one you drop down into. */
@@ -1128,11 +1130,13 @@ abstract class ObstaclePassingMode(
 	/** The obstacle it last landed for to take off again slower to fit a lane, not again for it, see [startDodge]. */
 	private var restartedFor: Double? get() = ctx.restartedFor; set(value) { ctx.restartedFor = value }
 	/** Until where along which line a route rescued with bounces on, not landing before, and from which tick, see [commitRoute]. */
-	private var bounceOnUntil: Triple<Double, Vec3d, Int>? = null
+	private var bounceOnUntil: BounceOn? = null
+	/** Bouncing on until [until] along the [line] for what's [at], from the [tick], see [commitRoute]. */
+	private class BounceOn(val until: Double, val line: Vec3d, val tick: Int, val at: Double)
 	/** What [routeTakeover] last didn't take over for, its way not getting past from enough starts, see [chooserHolds]. */
 	private var takeoverRefused: Double? = null
 	/** When [routeRescue] last searched, again only [CHOOSER_RELOOK_TICKS] later. */
-	private var rescueTriedAt = Int.MIN_VALUE
+	private var rescueTriedAt: Int? = null
 	/** What [routeRescue] flew past instead of landing last, rescued once only, see [restartedFor]. */
 	private var rescuedFor: Double? get() = ctx.rescuedFor; set(value) { ctx.rescuedFor = value }
 	/** Why the last [dipLane] doesn't bounce through a hole as a dip, for the debug log. */
@@ -1581,6 +1585,7 @@ abstract class ObstaclePassingMode(
 		rescuedFor = null
 		bounceOnUntil = null
 		takeoverRefused = null
+		rescueTriedAt = null
 		commitNoLane(owner)
 		commitBrake(owner, null)
 		commitHop(owner, null)
@@ -1743,6 +1748,7 @@ abstract class ObstaclePassingMode(
 		if (slowFor?.let { progress(player.pos) > it } == true || !player.isGliding) commitSlowFor("passObstacles", null)
 		if (restartedFor?.let { progress(player.pos) > it } == true) restartedFor = null
 		if (rescuedFor?.let { progress(player.pos) > it } == true) rescuedFor = null
+		if (takeoverRefused?.let { progress(player.pos) > it } == true) takeoverRefused = null
 		// Past the hole with the top to touch down on, its side isn't kept for anything ahead any more.
 		if (touchSide?.let { progress(player.pos) > it.second } == true) commitTouchSide(null)
 		// Past it, or on a lane or landing for it.
@@ -2147,9 +2153,16 @@ abstract class ObstaclePassingMode(
 		}
 
 		if (xy.isObstructed(snappedDir)) {
-			ElytraFly.debug { "Way ahead is ${xy.obstruction(snappedDir)}, line y %.2f".format(startPos.y) }
 			// From where it's in the way on, before it the first spot to stand is right here.
 			val blocked = xy.obstacleDistance(snappedDir, searchConfig.obstacleLookAhead.toDouble()) ?: 0.0
+			// A layer a step up to bounce on, e.g. too slow to glide up onto it from this bounce by a hair: bounced on, the
+			// next bounce closer plans the way up (SE through Redstone onto the upper layer, from 0.41 a tick it walked).
+			if (player.isGliding && blocked > STEP_BOUNCE_ROOM + flyer.horizontalSpeed * ROUTE_BOUNCE_TICKS && xy.boxHasFloor(false) &&
+				isStepUp(xy, snappedDir, blocked)) {
+				ElytraFly.debug { "A layer a step up %.1f ahead, bouncing on to get up onto it".format(blocked) }
+				return false
+			}
+			ElytraFly.debug { "Way ahead is ${xy.obstruction(snappedDir)}, line y %.2f".format(startPos.y) }
 			// Blocked ahead, a route may still get past flying, see [routeRescue]. Not when stuck or off the line.
 			return pathToValidPoint(closestLinePoint.add(snappedDir.multiply(blocked)), snappedDir, rescue = true)
 		}
@@ -2957,6 +2970,9 @@ abstract class ObstaclePassingMode(
 		 */
 		fun best() = (done + next + beam.drop(if (todo == null) index else index + 1)).minByOrNull { judged(it) }
 
+		/** [best] with the score it's judged by, see [judged]. */
+		fun bestJudged() = best()?.let { Route(it.steps, it.end, it.ticks, judged(it)) }
+
 		/** [route]'s score as [best] judges it. */
 		fun judged(route: Route) =
 			if (route !in done && route.end.along < horizon && route.end.level < root.level - STEP_HEIGHT / 2) route.score + CHOOSER_BRAKE_COST else route.score
@@ -3141,11 +3157,13 @@ abstract class ObstaclePassingMode(
 		if (hop.let { it != null && progress >= it.start }) return false
 		// Bouncing on for a route found just now, not landing until past it, see [commitRoute].
 		// Only a couple of bounces' time, e.g. not moving it'd never get past it.
-		bounceOnUntil?.let { (until, line, tick) ->
-			if (line == startPos && progress < until && flightTicks - tick <= 2 * ROUTE_BOUNCE_TICKS) return true else bounceOnUntil = null
+		bounceOnUntil?.let { b ->
+			if (b.line != startPos || progress >= b.until || flightTicks - b.tick > 2 * ROUTE_BOUNCE_TICKS) bounceOnUntil = null
+			// Only for what it was for, something else closer is landed for.
+			else if (abs(b.at - at) < RESTART_SAME) return true
 		}
 		// Searched just now, nothing changed much since: e.g. landing doesn't start over a hole, it's called again next tick.
-		if (passTicks - rescueTriedAt < CHOOSER_RELOOK_TICKS) return false
+		if (rescueTriedAt?.let { passTicks - it < CHOOSER_RELOOK_TICKS } == true) return false
 		// Once for what's there: the deciders not taking it on the way, e.g. it doesn't make it from where they look, they land.
 		if (rescuedFor?.let { abs(it - at) < RESTART_SAME } == true) return false
 		val dir = getSnappedDir()
@@ -3164,18 +3182,18 @@ abstract class ObstaclePassingMode(
 			}
 		}
 		val ms = (System.nanoTime() - started) / 1e6
-		val route = search.best()
-		val why = routeUnflyable(route, search.finished, search.horizon)
+		val why = routeUnflyable(search.bestJudged(), search.finished, search.horizon)
 		if (why != null) {
 			ElytraFly.debug { "$reason; no route to fly instead (%s, %.1f ms)".format(why, ms) }
 			return false
 		}
-		if (route!!.steps.first().kind != BOUNCE_ON && !chooserHolds(route.steps.first().way, dir)) {
+		val route = search.bestJudged()!!
+		if (route.steps.first().kind != BOUNCE_ON && !chooserHolds(route.steps.first().way, dir)) {
 			ElytraFly.debug { "$reason; no route to fly instead (its first way doesn't get past from enough starts: $route, %.1f ms)".format(ms) }
 			return false
 		}
 		ElytraFly.debug { "$reason; flying the route instead: $route (score %.1f, %.1f ms)".format(route.score, ms) }
-		commitRoute(route!!, dir, search.root.offset)
+		commitRoute(route, dir, search.root.offset, at)
 		return true
 	}
 
@@ -3188,11 +3206,12 @@ abstract class ObstaclePassingMode(
 		return when {
 			route == null || first == null -> "no route"
 			route.steps.any { it.kind == "brake" } -> "it lands too: $route"
+			// Into a hole, or still down in one, scored like landing, see [RouteSearch.judged].
+			route.score >= CHOOSER_BRAKE_COST -> "it falls in or lands: $route"
 			first.plan -> "it takes the plan: $route"
 			// Not looked at all the way, past where it ends there may be no way on.
 			!finish && route.end.along < horizon -> "cut off, ending %.0f short: $route".format(horizon - route.end.along)
 			first.kind != BOUNCE_ON && first.way.blockAt == null && first.way.hole == null -> "its first way isn't past a block or over a hole: $route"
-
 			else -> null
 		}
 	}
@@ -3208,27 +3227,33 @@ abstract class ObstaclePassingMode(
 			try {
 				val linePoint = flyer.pos.findClosestPointOnLine(dir)
 				val from = Vec3d(flyer.x, linePoint.y, flyer.z)
-				val exit: (Int) -> Double? = way.blockAt?.let { at ->
-					val (_, end, dodgePast) = blockWays(from, linePoint, dir, at - progress(flyer.pos))
-					val rated: (Int) -> Double? = { start -> blockWayExit(way.way, start, from, linePoint, dir, end, dodgePast) }
-					rated
-				} ?: { start -> wayExit(way.way, start, way.hole!!.endInclusive) }
-				exit(0) != null && 1 + (1 until CHOOSER_STARTS.size).count { exit(it) != null } >= CHOOSER_MIN_STARTS
+				val blockAt = way.blockAt
+				val ends = blockAt?.let { blockWays(from, linePoint, dir, it - progress(flyer.pos)) }
+				fun exit(start: Int) = if (ends != null) blockWayExit(way.way, start, from, linePoint, dir, ends.second, ends.third)
+					else wayExit(way.way, start, way.hole!!.endInclusive)
+				// The first start, then the others until enough got past.
+				exit(0) != null && (1 until CHOOSER_STARTS.size).asSequence().filter { exit(it) != null }.take(CHOOSER_MIN_STARTS - 1).count() >= CHOOSER_MIN_STARTS - 1
 			} finally {
 				anyHeightTops = false
 			}
 		}
 	}
 
-	/** Commits [route]'s first way like the chooser commits its pick, see [commitChosenBlock] and [commitChosen], planned from [offset] across the line. */
-	private fun SafeContext.commitRoute(route: Route, dir: Vec3d, offset: Double) {
+	/**
+	 * Commits [route]'s first way like the chooser commits its pick, see [commitChosenBlock] and [commitChosen], planned
+	 * from [offset] across the line, for what's [at] along it.
+	 */
+	private fun SafeContext.commitRoute(route: Route, dir: Vec3d, offset: Double, at: Double) {
 		val way = route.steps.first().way
 		// Bouncing on as it does, not landing until past the bounce, then looked at again, see [routeRescue].
 		if (way.way.kind == BOUNCE_ON) {
-			bounceOnUntil = Triple(way.laneUntil, startPos, flightTicks)
+			bounceOnUntil = BounceOn(way.laneUntil, startPos, flightTicks, at)
 			return
 		}
 		rescuedFor = way.blockAt ?: way.hole!!.start
+		// Theirs dropped, the route's way committed in its place.
+		commitHop("route", null)
+		if (way.way.lane == null) commitNoLane("route")
 		// What the plan was slowing down or bouncing down into a dip for isn't the way any more.
 		commitSlowFor("route", null)
 		commitDip("route", null)
@@ -3243,17 +3268,20 @@ abstract class ObstaclePassingMode(
 	 * it first does, or there's none, e.g. bouncing on into what's ahead), the route doesn't, and what its first way gets
 	 * past is close, within what's still steered past from here, see [rescueBeforeBrake]. Not the same kind of way as
 	 * theirs on the same lane, e.g. a touch-down for their touch-down: they fly theirs looking at it each tick, the route's
-	 * own copy of it taken over mid-glide misses (SW through the Redstone field). On the other side it's another way. Nor once their glide is held. Once for what's there,
-	 * like [routeRescue].
+	 * own copy of it taken over mid-glide misses (SW through the Redstone field). On the other side it's another way. Nor
+	 * once their glide is held. Once for what's there, like [routeRescue].
 	 */
 	private fun SafeContext.routeTakeover(pub: RoutePub) {
 		if (passerConfig.routePlanner != PasserSettings.RoutePlanner.Rescue || hop?.held == true ||
 			!pub.planLands || brakeAt != null || inDip || passingToPos != null) return
+		// Searched for the plan as it was, the deciders may have another by now.
+		val job = routeJob ?: return
+		if (job.plan != routePlanKey() || job.line != startPos) return
 		val route = pub.route ?: return
 		if (routeUnflyable(route, pub.finished, pub.horizon) != null) return
 		val way = route.steps.first().way
+		val dir = job.dir
 		// Bouncing on is what they do already, the same kind of way they fly themselves.
-		val dir = routeJob!!.dir
 		val planOffset = (hop?.lane ?: dodge ?: Vec3d.ZERO).dotProduct(across(dir))
 		if (way.way.kind == BOUNCE_ON || way.way.kind == pub.didKind && abs(route.steps.first().end.offset - planOffset) < ROUTE_SAME_LANE) return
 		val at = way.blockAt ?: way.hole!!.start
@@ -3268,10 +3296,7 @@ abstract class ObstaclePassingMode(
 			return
 		}
 		ElytraFly.debug { "Route takes over, the plan (${pub.did}) lands: $route (score %.1f)".format(route.score) }
-		// Theirs dropped, the route's way committed in its place.
-		commitHop("route", null)
-		if (way.way.lane == null) commitNoLane("route")
-		commitRoute(route, dir, flyer.pos.subtract(startPos).dotProduct(across(dir)))
+		commitRoute(route, dir, flyer.pos.subtract(startPos).dotProduct(across(dir)), at)
 	}
 
 	private var routeChecks = 0
@@ -3453,7 +3478,7 @@ abstract class ObstaclePassingMode(
 				}
 				if (!routePlanner.isCurrent(gen)) return@withCtx
 				expanded += search.expanded
-				search.best()?.takeIf { it.steps.isNotEmpty() && (best == null || it.score < best!!.score) }?.let { found ->
+				search.bestJudged()?.takeIf { it.steps.isNotEmpty() && (best == null || it.score < best!!.score) }?.let { found ->
 					best = found
 					bestView = RouteView(found.steps.map { it.points }, routeCoast(found.end, search.horizon))
 				}
@@ -4762,8 +4787,8 @@ abstract class ObstaclePassingMode(
 		val aim = min(feetY + SWERVE_ABOVE, ceiling)
 		// Held at that height all the way over, nothing higher up in the way.
 		if (stepAt != null) end = stepAt
-		if (path.zipWithNext().any { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, aim + GLIDE_SIZE + SWERVE_HEAD_ROOM, side) })
-			return null.also { miss("held at y %.2f, something higher up in the way".format(aim)) }
+		path.zipWithNext().firstOrNull { (a, b) -> b.first >= from && a.first <= end && !swerveMoveFree(dir, floorY, a, b, feetY, aim + GLIDE_SIZE + SWERVE_HEAD_ROOM, side) }
+			?.let { (_, b) -> return null.also { miss("held at y %.2f, something higher up in the way %.1f ahead %+.2f across".format(aim, b.first - progress, b.second)) } }
 		// Ended a few ticks later than planned: steering back lags behind, at its end it's still close to what's low.
 		return Hop(from, if (stepAt != null) end else end + speed * SWERVE_END_TICKS, feetY, ceiling, from, stepAt != null,
 			aim = aim, swerve = Swerve(swerve.offset, swerve.outAt, swerve.backAt, path, swerve.blockAt))
