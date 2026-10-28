@@ -5020,7 +5020,17 @@ abstract class ObstaclePassingMode(
 		}
 		val lane = way.lane ?: return null
 		if (faster != 0.0 && !stillFree(lane, from, linePoint, dir, dodgePast, speed)) return null
-		return bounceOn(speed, end - at, end - at)?.second
+		// No faster than the box fits along it, bouncing on without the sprint there, see [swingCap].
+		val fit = swingFit(linePoint, dir, lane.offset, from.subtract(linePoint).dotProduct(across(dir)), dodgePast + DODGE_MARGIN)
+		if (fit < SWING_FIT_MIN) return null
+		val bounced = bounceOn(min(speed, fit), end - at, end - at)?.second?.let { min(it, fit) } ?: return null
+		// Past what it was picked for [steerDodge] flies the lane untilted at the speed it's at and looks on from past it
+		// on: judged alike, what follows on the lane from there, see [continuation], like a glide's (SE through the Redstone
+		// carpet track a dodge by a railing judged free only up to the carpet it got past found the railing's corners right
+		// after, at a speed the lane didn't fit, and walked).
+		val then = continuation(lane.target, dir, HopEnd(bounced, max(end, at + dodgePast + DODGE_MARGIN), frame().level, 0.0)) ?: return null
+		if (start == 0) way.then = then
+		return then.exit
 	}
 
 	/**
@@ -5117,27 +5127,32 @@ abstract class ObstaclePassingMode(
 		val found = run {
 			val next = point.obstacleHit(forward, stop + DODGE_STEER_AHEAD, speed = speed, mobs = false)
 				?: return@run Continuation(speed, null, null, end.at, "nothing in reach")
-			inFrame(f.from(ChainStart(end.y, end.climb, speed))) {
+			val ahead = inFrame(f.from(ChainStart(end.y, end.climb, speed))) {
 				// On its lane, the floor bounced off on the way to it is that lane's.
-				planHop(point, forward, next.distance, anyway = true)?.with(lane = lane)?.let { over ->
+				val glide = planHop(point, forward, next.distance, anyway = true)?.with(lane = lane)?.let { over ->
 					// Under it with a little less room, like [holdingFor] holds for it: where the glide before really ends
 					// differs a bit from this, a tick later or higher, and the window to start holding in to get under is a
 					// tick or two, e.g. judged under a floating block 5.2 on, it ended 0.15 higher and missed it.
 					val made = canGetOver(if (over.under) over.with(topY = over.topY - UNDER_TOP_MARGIN) else over, end.at, speed)
 					if (made || chainNearMiss(over))
-						return@run Continuation(if (made) hopExitSpeed else speed, over, null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
+						Continuation(if (made) hopExitSpeed else speed, over, null, end.at + next.distance, "over ${next.what} %.1f on".format(next.distance))
+					else null
 				}
 				// Touched down on like [topWay] does.
-				laneSurfaces(point, forward, end.at + speed, end.at + next.distance + TOP_WAY_PAST, surfaceRises(point)).firstOrNull { touch ->
+				val touched = laneSurfaces(point, forward, end.at + speed, end.at + next.distance + TOP_WAY_PAST, surfaceRises(point)).firstOrNull { touch ->
 					val middle = point.add(forward.multiply(touch.middle - end.at))
 					touch.middle > end.at + topLead(end.y, end.climb, touch.y, speed) && topAt(middle.x, middle.z, touch.y) && roomOffTop(touch, point, forward, speed)
 				}?.let { top ->
 					val offset = lane.dotProduct(across(dir))
-					topHops(point, forward, top, offset, end.at, end.y, speed, offset).take(TOUCH_AIM_TRIES).forEach { hop ->
-						blockHopRun(hop, end.at, speed)?.let { return@run Continuation(it.speed, hop, null, end.at + next.distance, "onto the top at y %.0f %.1f on".format(top.y, top.middle - end.at)) }
+					topHops(point, forward, top, offset, end.at, end.y, speed, offset).take(TOUCH_AIM_TRIES).firstNotNullOfOrNull { hop ->
+						blockHopRun(hop, end.at, speed)?.let { Continuation(it.speed, hop, null, end.at + next.distance, "onto the top at y %.0f %.1f on".format(top.y, top.middle - end.at)) }
 					}
 				}
+				// The faster of the two: a held glide over low blocks slows down, a top bounced off keeps the speed, like
+				// [glidingFaster] judges it (SE through the Redstone carpet track, held over single blocks down to 0.38).
+				if (glide == null || touched != null && glide.exit <= touched.exit + TOUCH_MIN_GAIN) touched else glide
 			}
+			if (ahead != null) return@run ahead
 			if (next.distance >= MIN_DODGE_DISTANCE) {
 				val linePoint = f.origin.add(forward.multiply(end.at))
 				freeLane(point, linePoint, forward, next.distance, lane, speed = speed, mobs = false)?.let {
@@ -7878,13 +7893,18 @@ abstract class ObstaclePassingMode(
 		val lineY = linePoint.y
 		// As far out along each axis as the box swings across the way, it's in the way where the swing hits it. Tilted
 		// [lean], only to that side: half as far each way, moved over that way by as much. Diagonally the box reaches as far
-		// across only right at each spot looked at, a bit more covers in between them, as far as the rays look.
+		// across only right at each spot looked at: in between them it's looked at half a step back too, not padded out
+		// across, that reached farther than the rays finding the lane free, into a railing's corners beside it (SE through
+		// the Redstone carpet track, no glide over a single block on a lane by the railing).
 		val between = HOP_SCAN_STEP / 2 * 2 * abs(dir.x * dir.z) / dir.horizontalLengthSquared()
-		val swing = if (!swings) between else sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (lean == 0) 1 else 2) + between
+		val halfSteps = swings && between > 1e-9
+		val swing = if (!swings) between else sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (lean == 0) 1 else 2)
 		val shift = across(dir).multiply(lean * sweep(dir) / 2)
 		fun box(along: Double, feetY: Double, height: Double = GLIDE_SIZE) = linePoint.add(dir.multiply(along)).add(shift).let {
 			Box(it.x - GLIDE_SIZE / 2, feetY, it.z - GLIDE_SIZE / 2, it.x + GLIDE_SIZE / 2, feetY + height, it.z + GLIDE_SIZE / 2)
 		}
+		fun clear(along: Double, feetY: Double, height: Double = GLIDE_SIZE) = free(box(along, feetY, height).expand(swing, 0.0, swing)) &&
+			(!halfSteps || free(box(along - HOP_SCAN_STEP / 2, feetY, height).expand(swing, 0.0, swing)))
 		val maxY = maxFlightY()
 		// Where it's in the way from, with carpets down to them.
 		val floorY = lineY + if (carpets) CARPET_RAY else searchConfig.minObstacleHeight
@@ -7905,11 +7925,11 @@ abstract class ObstaclePassingMode(
 			along += HOP_SCAN_STEP
 			val maxLength = if (carpets) MAX_CARPET_HOP_LENGTH else if (onFloor) MAX_HOLE_LENGTH else underLength
 			if (along > distance + maxLength) return noHop("longer than ${maxLength.toInt()}")
-			if (free(box(along, floorY, bounceHeight).expand(swing, 0.0, swing))) gap += HOP_SCAN_STEP
+			if (clear(along, floorY, bounceHeight)) gap += HOP_SCAN_STEP
 			else {
 				gap = 0.0
 				end = along
-				if (!free(box(along, floorY).expand(swing, 0.0, swing))) onFloor = true
+				if (!clear(along, floorY)) onFloor = true
 			}
 		}
 		// Carpets the rays saw only at the edge of the swing, the box swinging out diagonally reaches as far only in its
@@ -7923,7 +7943,7 @@ abstract class ObstaclePassingMode(
 		val samples = generateSequence(distance - reach) { it + HOP_SCAN_STEP }.takeWhile { it <= end + reach }.toList()
 		val start = distance - reach
 		val stop = end + reach
-		fun fits(y: Double) = samples.all { free(box(it, y).expand(swing, 0.0, swing)) }
+		fun fits(y: Double) = samples.all { clear(it, y) }
 		// Over carpets a bit higher than just clearing them, onto a layer of them only that.
 		val maxHopY = maxHopY()
 		val heights = generateSequence(lineY + if (carpets && !step) CARPET_GLIDE_FEET else searchConfig.minObstacleHeight) { it + HOP_HEIGHT_STEP }
@@ -7938,7 +7958,7 @@ abstract class ObstaclePassingMode(
 		val under = above == null && !onFloor && lowestFits
 		val feetY = (if (lowestFits) lowest else heights.drop(1).firstOrNull { fits(it) }) ?: run {
 			// What's in the way up there, for the log.
-			val blocked = samples.firstOrNull { !free(box(it, maxHopY).expand(swing, 0.0, swing)) }
+			val blocked = samples.firstOrNull { !clear(it, maxHopY) }
 			val what = blocked?.let { along ->
 				val box = box(along, maxHopY).expand(swing, 0.0, swing)
 				if (!passWorld.spaceEmpty(box)) "a block %.1f ahead".format(along) else "a mob's reach %.1f ahead".format(along)
