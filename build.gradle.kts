@@ -121,7 +121,10 @@ loom {
 //            //property("org.lwjgl.util.DebugAllocator", "true")
 //            //property("org.lwjgl.util.DebugAllocator.fast", "true")
 
-            programArguments.addAll("--username", "Steve", "--uuid", "8667ba71b85a4004af54457a9734eed7", "--accessToken", "****")
+            // -Plambda.devUsername / -Plambda.devUuid to run as someone else, e.g. to see your own skin.
+            val devUsername = project.findProperty("lambda.devUsername")?.toString() ?: "Steve"
+            val devUuid = project.findProperty("lambda.devUuid")?.toString() ?: "8667ba71b85a4004af54457a9734eed7"
+            programArguments.addAll("--username", devUsername, "--uuid", devUuid, "--accessToken", "****")
             jvmArguments.addAll("-XX:+HeapDumpOnOutOfMemoryError", "-XX:+CreateCoredumpOnCrash")
         }
     }

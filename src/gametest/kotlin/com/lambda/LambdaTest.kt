@@ -38,12 +38,12 @@ object LambdaTest : FabricClientGameTest {
 
         world.waitForChunksDownload()
 
-        server.runCommand("/tp Steve ~ ~30 ~")
+        server.runCommand("/tp @p ~ ~30 ~")
         context.unit("assert deadly fall") { isFallDeadly() }
 
-        server.runCommand("/tp Steve ~ -50 ~")
+        server.runCommand("/tp @p ~ -50 ~")
         context.unit("assert safe fall") { !isFallDeadly() }
-        server.runCommand("/tp Steve ~ -60 ~")
+        server.runCommand("/tp @p ~ -60 ~")
 
         // All the tests passed
         singleplayerContext.close()

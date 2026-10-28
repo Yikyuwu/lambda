@@ -32,6 +32,7 @@ object Rotation : HudModule(
 	description = "Show your rotation",
 	tag = ModuleTag.HUD,
 ) {
+	private val showDirection by setting("Show Direction", false, "The direction faced before it, e.g. South West X- Z+")
 	private val formatter by configBlock(FormatterSettings(this))
 		.withEdits {
 			::timeFormat.editSetting { hide() }
@@ -40,7 +41,14 @@ object Rotation : HudModule(
 	override fun ImGuiBuilder.buildLayout() {
 		runSafe {
 			val rotation = player.rotationClient.format(formatter)
-			textCopyable(rotation)
+			textCopyable(if (showDirection) "${direction(player.yaw)} $rotation" else rotation)
 		}
 	}
+
+	private val directions = listOf(
+		"South Z+", "South West X- Z+", "West X-", "North West X- Z-", "North Z-", "North East X+ Z-", "East X+", "South East X+ Z+",
+	)
+
+	/** The one of eight directions [yaw] faces, yaw 0 facing south. */
+	private fun direction(yaw: Float) = directions[Math.floorMod(Math.round(yaw / 45.0).toInt(), 8)]
 }
