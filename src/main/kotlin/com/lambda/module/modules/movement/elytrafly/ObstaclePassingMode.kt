@@ -2950,8 +2950,16 @@ abstract class ObstaclePassingMode(
 		var ticks = 0
 		val finished get() = depth >= maxDepth || beam.isEmpty()
 
-		/** The best route there is so far: ended, one way on, or not looked on from yet, not those looked on from already. */
-		fun best() = (done + next + beam.drop(if (todo == null) index else index + 1)).minByOrNull { it.score }
+		/**
+		 * The best route there is so far: ended, one way on, or not looked on from yet, not those looked on from already.
+		 * One not ended that's still down below the level it started on, e.g. off a layer into a hole's bottom, hasn't
+		 * shown a way back up out of there: as if it lands, see [CHOOSER_BRAKE_COST].
+		 */
+		fun best() = (done + next + beam.drop(if (todo == null) index else index + 1)).minByOrNull { judged(it) }
+
+		/** [route]'s score as [best] judges it. */
+		fun judged(route: Route) =
+			if (route !in done && route.end.along < horizon && route.end.level < root.level - STEP_HEIGHT / 2) route.score + CHOOSER_BRAKE_COST else route.score
 
 		/**
 		 * Whether the deciders' plan lands: none of the routes left that fly it first gets past without landing. With none
@@ -2960,7 +2968,7 @@ abstract class ObstaclePassingMode(
 		 */
 		fun planLands(): Boolean {
 			val plans = (done + next + beam).filter { it.steps.firstOrNull()?.plan == true }
-			return if (plans.isEmpty()) didKind == "on" else plans.all { it.score >= CHOOSER_BRAKE_COST }
+			return if (plans.isEmpty()) didKind == "on" else plans.all { judged(it) >= CHOOSER_BRAKE_COST }
 		}
 	}
 
@@ -4536,8 +4544,19 @@ abstract class ObstaclePassingMode(
 		fun text(lane: Double) = "on %+.2f".format(lane)
 		// Over on that lane by [by] along the line from where you are, like a dodge steers.
 		fun reached(lane: Double, hit: Double, by: Double) = abs(lane - off) <= TOUCH_LANE_OFF || steerReach(off, dir, lane, hit)?.let { progress + it <= by } == true
-		if (!inDip && isStepUp(from, dir, distance)) planHop(linePoint, dir, distance, true, anyway = true)?.let { up ->
-			ways += HoleWay("step", up, null, "onto the layer at y %.2f".format(up.feetY))
+		if (!inDip && isStepUp(from, dir, distance)) {
+			planHop(linePoint, dir, distance, true, anyway = true)?.let { up -> ways += HoleWay("step", up, null, "onto the layer at y %.2f".format(up.feetY)) }
+			// Up onto it on a lane beside the line too, steered over to before it, e.g. past what's on the layer on the line,
+			// like [dodgePastOnLayer] does: which side is looked at past it, see [routeStep].
+			for (lane in listOf(-step, step, -2 * step, 2 * step)) {
+				if (abs(lane) > searchConfig.maxDodge + 1e-6) continue
+				val point = linePoint.add(across.multiply(lane))
+				val upAt = point.obstacleDistance(dir, distance + STEP_CLEAR)?.takeIf { isStepUp(point, dir, it) } ?: continue
+				if (!reached(lane, upAt, progress + upAt)) continue
+				planHop(point, dir, upAt, true, anyway = true)?.let { up ->
+					ways += HoleWay("step", up.with(lane = across.multiply(lane)), null, "onto the layer at y %.2f ${text(lane)}".format(up.feetY))
+				}
+			}
 		}
 		else for (lane in listOf(0.0, -step / 2, step / 2, -step, step) + listOf(off).filter { o -> listOf(0.0, step / 2, step).none { abs(abs(o) - it) < 0.05 } }) {
 			val point = linePoint.add(across.multiply(lane))
