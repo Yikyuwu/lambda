@@ -47,7 +47,16 @@ object ElytraSim : FabricClientGameTest {
 		context.waitFor({ it.world != null && it.player != null && it.server != null }, 20 * 120)
 		context.waitTicks(40)
 		val prep = lines.filter { it.startsWith("/") }
-		prep.forEach { command(context, it) }
+		prep.forEach { if (it.startsWith("/wait ")) context.waitTicks(it.removePrefix("/wait ").trim().toInt()) else command(context, it) }
+		// Only building: saved, to be copied and flown later.
+		if (prep.isNotEmpty() && lines.none { !it.startsWith("world ") && !it.startsWith("/") }) {
+			context.waitTicks(100)
+			context.runOnClient<RuntimeException> { c ->
+				val server = c.server!!
+				server.execute { server.saveAll(false, true, true) }
+			}
+			context.waitTicks(400)
+		}
 
 		for (line in lines.filter { !it.startsWith("world ") && !it.startsWith("/") }) {
 			val parts = line.split(Regex("\\s+"))
