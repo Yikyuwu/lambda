@@ -126,6 +126,14 @@ private const val ROUTE_DEPTH = 4
 private const val ROUTE_HORIZON = 64.0
 /** How long planning a route may take each tick, it goes on the next, see [ObstaclePassingMode.RouteSearch]. */
 private const val ROUTE_BUDGET_NANOS = 3_000_000L
+/** How many ticks a route bounces on for at most before looking again, about a bounce, see [ObstaclePassingMode.bounceOnWay]. */
+private const val ROUTE_BOUNCE_TICKS = 12.0
+/** How far a route bounces on at least before looking again, see [ObstaclePassingMode.bounceOnWay]. */
+private const val ROUTE_BOUNCE_MIN = 3.0
+/** How far before what's ahead a route's bounce on ends at least, closer there's no getting past it after, see [ObstaclePassingMode.bounceOnWay]. */
+private const val ROUTE_BOUNCE_ROOM = 2.0
+/** The kind of way bouncing on along the lane, see [ObstaclePassingMode.bounceOnWay]. */
+private const val BOUNCE_ON = "bounce"
 /** How long Rescue may search for a route instead of landing, on the game thread, see [ObstaclePassingMode.routeRescue]. */
 private const val ROUTE_RESCUE_NANOS = 30_000_000L
 /** How many ticks a route search goes on for at most, then the routes not looked on from yet are scored as they are. */
@@ -1117,6 +1125,8 @@ abstract class ObstaclePassingMode(
 	private var restartFor: Double? get() = ctx.restartFor; set(value) { ctx.restartFor = value }
 	/** The obstacle it last landed for to take off again slower to fit a lane, not again for it, see [startDodge]. */
 	private var restartedFor: Double? get() = ctx.restartedFor; set(value) { ctx.restartedFor = value }
+	/** Until where along which line a route rescued with bounces on, not landing before, see [commitRoute]. */
+	private var bounceOnUntil: Pair<Double, Vec3d>? = null
 	/** What [routeRescue] flew past instead of landing last, rescued once only, see [restartedFor]. */
 	private var rescuedFor: Double? get() = ctx.rescuedFor; set(value) { ctx.rescuedFor = value }
 	/** Why the last [dipLane] doesn't bounce through a hole as a dip, for the debug log. */
@@ -1563,6 +1573,7 @@ abstract class ObstaclePassingMode(
 		pausedWalk = false
 		restartedFor = null
 		rescuedFor = null
+		bounceOnUntil = null
 		commitNoLane(owner)
 		commitBrake(owner, null)
 		commitHop(owner, null)
@@ -3103,6 +3114,8 @@ abstract class ObstaclePassingMode(
 			passingToPos != null || brakeAt != null || inDip) return false
 		val progress = progress(flyer.pos)
 		if (hop.let { it != null && progress >= it.start }) return false
+		// Bouncing on for a route found just now, not landing until past it, see [commitRoute].
+		bounceOnUntil?.let { (until, line) -> if (line == startPos && progress < until) return true else bounceOnUntil = null }
 		// Once for what's there: the deciders not taking it on the way, e.g. it doesn't make it from where they look, they land.
 		if (rescuedFor?.let { abs(it - at) < RESTART_SAME } == true) return false
 		val dir = getSnappedDir()
@@ -3143,7 +3156,7 @@ abstract class ObstaclePassingMode(
 			first.plan -> "it takes the plan: $route"
 			// Not looked at all the way, past where it ends there may be no way on.
 			!finish && route.end.along < horizon -> "cut off, ending %.0f short: $route".format(horizon - route.end.along)
-			first.way.blockAt == null && first.way.hole == null -> "its first way isn't past a block or over a hole: $route"
+			first.kind != BOUNCE_ON && first.way.blockAt == null && first.way.hole == null -> "its first way isn't past a block or over a hole: $route"
 			else -> null
 		}
 	}
@@ -3151,6 +3164,11 @@ abstract class ObstaclePassingMode(
 	/** Commits [route]'s first way like the chooser commits its pick, see [commitChosenBlock] and [commitChosen], planned from [offset] across the line. */
 	private fun SafeContext.commitRoute(route: Route, dir: Vec3d, offset: Double) {
 		val way = route.steps.first().way
+		// Bouncing on as it does, not landing until past the bounce, then looked at again, see [routeRescue].
+		if (way.way.kind == BOUNCE_ON) {
+			bounceOnUntil = way.laneUntil to startPos
+			return
+		}
 		rescuedFor = way.blockAt ?: way.hole!!.start
 		// An opening it was going through isn't any more, unless that's the way.
 		if (way.way.thread == null) commitThread("route", null)
@@ -3171,6 +3189,8 @@ abstract class ObstaclePassingMode(
 		val route = pub.route ?: return
 		if (routeUnflyable(route, pub.finished, pub.horizon) != null) return
 		val way = route.steps.first().way
+		// Bouncing on is what they do already.
+		if (way.way.kind == BOUNCE_ON) return
 		val at = way.blockAt ?: way.hole!!.start
 		val progress = progress(flyer.pos)
 		if (hop.let { it != null && progress >= it.start }) return
@@ -3684,7 +3704,7 @@ abstract class ObstaclePassingMode(
 				holeWays(floorLine, dir, hole, layerAt, laneVec(across.multiply(state.offset)), sideStep).map { RouteWay(it, until, hole = hole, layerAt = layerAt) }
 			}
 			val down = routeTimed(RouteWork.DownWay) { downWay(here, dir, state, hole.start) }
-			return@lookingFrom RouteWays(ways + listOfNotNull(down).map { RouteWay(it, until) }, swerves = false)
+			return@lookingFrom RouteWays(ways + listOfNotNull(down).map { RouteWay(it, until) } + listOfNotNull(bounceOnWay(state, hole.start)), swerves = false)
 		}
 		if (block == null || block.mob) return@lookingFrom null
 		val outerTops = anyHeightTops
@@ -3695,10 +3715,21 @@ abstract class ObstaclePassingMode(
 			}
 			val (ways, end, dodgePast) = routeTimed(RouteWork.BlockWays) { blockWays(here, linePoint, dir, block.distance) }
 			val laneUntil = max(end, state.along + dodgePast + DODGE_MARGIN)
-			RouteWays(ways.map { RouteWay(it, laneUntil, blockAt = blockAt) }, swerves = block.distance >= MIN_DODGE_DISTANCE)
+			RouteWays(ways.map { RouteWay(it, laneUntil, blockAt = blockAt) } + listOfNotNull(bounceOnWay(state, blockAt!!)), swerves = block.distance >= MIN_DODGE_DISTANCE)
 		} finally {
 			anyHeightTops = outerTops
 		}
+	}
+
+	/**
+	 * Bouncing on along the lane [state] is on for a bounce, [ROUTE_BOUNCE_TICKS] at its speed, gaining speed, and looking
+	 * again from there: e.g. too slow to glide over what's [at] along the line yet, a bounce or two on first gets over it.
+	 * Not with less than [ROUTE_BOUNCE_ROOM] left before it after the bounce.
+	 */
+	private fun bounceOnWay(state: RouteState, at: Double): RouteWay? {
+		val until = state.along + max(ROUTE_BOUNCE_MIN, state.speed * ROUTE_BOUNCE_TICKS)
+		if (at - until < ROUTE_BOUNCE_ROOM) return null
+		return RouteWay(HoleWay(BOUNCE_ON, null, Lane(Vec3d.ZERO, 0, state.offset), "bouncing on"), until)
 	}
 
 	/**
@@ -9879,7 +9910,7 @@ abstract class ObstaclePassingMode(
 		// Touching down between bounces you still glide. Walking off like that, packets are held back and the sprint is
 		// kept, the server takes your input and speed wrong and sets back every step. So land first, like for a brake.
 		val first = if (guaranteeOneSkip) 1.0 else 0.0
-		if (!landed && player.getFlag(Entity.GLIDING_FLAG_INDEX)) return brake(progress(startSearchPos) + first, "Still gliding", carpets)
+		if (!landed && player.getFlag(Entity.GLIDING_FLAG_INDEX)) return brake(progress(startSearchPos) + first, "Still gliding", carpets).let { false }
 		// Block by block. Best a spot with room to take off again after it, walking through all that's in the way at
 		// once. Else, among obstacles close together, the first spot to stand with a few free after it.
 		// On the floor you started on, also from up on a layer. Layers are only bounced on, taking off is from the floor.
