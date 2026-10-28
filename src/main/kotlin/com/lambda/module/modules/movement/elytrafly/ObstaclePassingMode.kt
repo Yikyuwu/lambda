@@ -751,6 +751,8 @@ abstract class ObstaclePassingMode(
 		private const val SWING_FIT_ABOVE = 0.4
 		/** Slower than this no tick fits, it's in the way, not beside it, see [swingFit]. */
 		private const val SWING_FIT_MIN = 0.5
+		/** How much slower than the box fits along the way to an opening it's held to, see [threadPlan]. */
+		private const val THREAD_APPROACH_MARGIN = 0.05
 		/** How often [swingFit] is looked at again, in ticks. */
 		private const val SWING_FIT_TICKS = 2
 		/** How much faster than now a lane is picked for, bouncing over to it speeds you up, diagonally by a block a tick or so. */
@@ -5964,7 +5966,10 @@ abstract class ObstaclePassingMode(
 	private fun SafeContext.swingCap(linePoint: Vec3d, dir: Vec3d) {
 		// Gliding over or through something, or bouncing on a top up above the floor, the way on was planned with the
 		// sprint jumps, through an opening as slow as that fits, see [threadHold].
-		if (!passerConfig.dodge || !flyer.isGliding || hop != null || flyer.y > startPos.y + BOUNCE_PEAK + SWING_FIT_ABOVE) {
+		// Bouncing toward an opening, before the hold: as slow as the box fits along the way to it too, e.g. between the
+		// staircase sides of a diagonal tunnel, sprint bounces took it to 1.7 and it ran into the side before the wall.
+		val threading = hop?.let { h -> thread?.takeIf { threaded(h) && !h.held } }
+		if (!passerConfig.dodge || !flyer.isGliding || hop != null && threading == null || flyer.y > startPos.y + BOUNCE_PEAK + SWING_FIT_ABOVE) {
 			swingFitSpeed = Double.POSITIVE_INFINITY
 			swingCapped = false
 			return
@@ -5973,7 +5978,8 @@ abstract class ObstaclePassingMode(
 			swingFitTick = flightTicks
 			val off = flyer.pos.subtract(linePoint).dotProduct(across(dir))
 			// As far as it looks for obstacles, for time to slow down before a tunnel narrows.
-			swingFitSpeed = swingFit(linePoint, dir, if (dodge != null) dodgeOffset else 0.0, off, searchConfig.dodgeLookAhead.toDouble())
+			swingFitSpeed = swingFit(linePoint, dir, threading?.centre ?: if (dodge != null) dodgeOffset else 0.0, off,
+				threading?.let { max(1.0, it.wallAt - progress(flyer.pos) - 1.0) } ?: searchConfig.dodgeLookAhead.toDouble())
 		}
 		val speed = flyer.horizontalSpeed
 		// Nothing fitting even slow is an obstacle in the band from where you are over to the lane, e.g. what's dodged on the
@@ -6590,11 +6596,16 @@ abstract class ObstaclePassingMode(
 			return null.also { threadMiss = "%+.2f where it gets through, can't be steered over to in time".format(plan.centre) }
 		// The way over to it too, the box swinging out to the side it steers to: a spot by a field's wall, steered over to,
 		// had the box run into the wall's corners.
-		swingPathHit(linePoint, dir, steerOffsets(here, plan.centre, speed, wall), wall - 1, minY, maxY)?.let { hit ->
-			return null.also { threadMiss = "%+.2f where it gets through, the way over to it runs into something %.1f ahead".format(plan.centre, hit) }
+		// Slower it may still fit, held to that like the opening's own limit: a gap off the middle of a diagonal tunnel, the
+		// way along its staircase side fitting only 1.1 a tick.
+		val approachFit = swingPathHit(linePoint, dir, steerOffsets(here, plan.centre, speed, wall), wall - 1, minY, maxY)?.let { hit ->
+			val fit = swingFit(linePoint, dir, plan.centre, here, wall - 1.0) - THREAD_APPROACH_MARGIN
+			if (fit < SWING_FIT_MIN || swingPathHit(linePoint, dir, steerOffsets(here, plan.centre, fit, wall), wall - 1, minY, maxY) != null)
+				return null.also { threadMiss = "%+.2f where it gets through, the way over to it runs into something %.1f ahead".format(plan.centre, hit) }
+			fit
 		}
-		return Thread(linePoint, dir, from, to, minY, maxY, plan.centre, plan.width, plan.lean, maxSpeed, over.obstacle, over.start,
-			max(at + to, over.obstacle + DODGE_MARGIN))
+		return Thread(linePoint, dir, from, to, minY, maxY, plan.centre, plan.width, plan.lean, approachFit?.let { min(maxSpeed, it) } ?: maxSpeed,
+			over.obstacle, over.start, max(at + to, over.obstacle + DODGE_MARGIN))
 	}
 
 	/**
@@ -8912,7 +8923,8 @@ abstract class ObstaclePassingMode(
 		val slow = slowJumpsFor == thread.hopStart
 		val rises = risesAhead(progress, hop, THREAD_HOLD_RISES)
 		fun later(gain: Double) = rises.any { canHop(hop, progress, it + NEXT_BOUNCE_MARGIN, gain = gain) && hopWallSpeed <= thread.maxSpeed }
-		if (!slow && later(BOUNCE_SPEED_GAIN)) return false
+		// Not with the sprint while the box only just fits along the way, see [swingCap].
+		if (!slow && !swingCapped && later(BOUNCE_SPEED_GAIN)) return false
 		if (later(0.0)) {
 			if (!slow) ElytraFly.debug { "Bouncing on without the sprint %.1f before the opening at %.2f, holding from a later bounce it gets there slow enough, it fits up to %.2f".format(
 				thread.wallAt - progress, flyer.horizontalSpeed, thread.maxSpeed) }
