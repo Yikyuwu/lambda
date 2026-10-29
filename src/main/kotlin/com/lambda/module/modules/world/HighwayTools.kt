@@ -119,6 +119,7 @@ object HighwayTools : Module(
     private val rimHeight by setting("Pavement Rim Height", 1, 0..6, 1) { pavement != Material.None }
     private val rim by setting("Rim Height", 0, 0..6, 1, "Rims of solid blocks like netherrack on both sides of the hole without a pavement, kept where they are and placed where missing, like walls. Only with a width of 3 or more, so a lane is left between them") { pavement == Material.None }
     /** Rims on the hole's own edge columns, which leave no lane to walk in narrower than 3. */
+    private val keepAboveRim by setting("Keep Blocks Above Rim", false, "Leaves the blocks above the rims as they are, placing missing ones, instead of digging the full height there. Without a pavement a block of air stays over the rim for the obsidian railing that's paved later") { pavement != Material.None && rimHeight > 0 || pavement == Material.None && rim > 0 }
     private val hasRims get() = pavement == Material.None && rim > 0 && width >= 3
     private val cornerBlock by setting("Corner", Corner.None, "Include corner blocks in the highway") { pavement != Material.None }
     private val pavementMaterial by setting("Pavement Material", Blocks.OBSIDIAN, "Material to build the highway with") { pavement == Material.Block }
@@ -1026,6 +1027,14 @@ object HighwayTools : Module(
         // Without a pavement the rims stand on the floor, the hole's sides up to their height.
         if (hasRims) listOf(-center + width - 1, -center).forEach { side ->
             structure += generateDirectionalTube(orthogonal, 1, rim, side, 0).associateWith { target(Material.Solid, wallMaterial) }
+        }
+
+        // Above the rims only the hole's middle is dug to its full height. Paved, the railing is the rim; without a
+        // pavement a block over the rim is left free for the railing paved there later.
+        val railTop = if (pavement != Material.None) rimHeight else if (hasRims) rim else 0
+        if (keepAboveRim && railTop > 0 && height - railTop - 1 > 0) listOf(-center + width - 1, -center).forEach { side ->
+            structure += generateDirectionalTube(orthogonal, 1, height - railTop - 1, side, railTop + 1)
+                .associateWith { target(Material.Solid, wallMaterial) }
         }
 
         if (ceiling != Material.None) {
