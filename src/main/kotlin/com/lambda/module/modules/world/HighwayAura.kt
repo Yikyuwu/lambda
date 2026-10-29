@@ -17,9 +17,12 @@
 
 package com.lambda.module.modules.world
 
+import baritone.api.pathing.goals.GoalBlock
+import com.lambda.Lambda.LOG
 import com.lambda.config.ConfigBlock
 import com.lambda.context.Automated
 import com.lambda.context.SafeContext
+import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.SpleefGuard
 import com.lambda.interaction.managers.hotbar.HotbarRequest
 import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotationRequest
@@ -28,8 +31,10 @@ import com.lambda.interaction.material.StackSelection.Companion.select
 import com.lambda.task.tasks.OpenContainerTask
 import com.lambda.task.tasks.StationTask.Companion.isItemGrabber
 import com.lambda.threading.runSafeAutomated
+import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.Describable
+import com.lambda.util.EntityUtils.getClosestPointTo
 import com.lambda.util.EntityUtils.isInReach
 import com.lambda.util.NamedEnum
 import com.lambda.util.combat.CombatUtils.attackEntity
@@ -54,6 +59,8 @@ import net.minecraft.entity.mob.ZombifiedPiglinEntity
 import net.minecraft.entity.passive.StriderEntity
 import net.minecraft.item.Item
 import net.minecraft.item.Items
+import net.minecraft.util.math.BlockPos
+import java.util.Collections
 import java.util.WeakHashMap
 import kotlin.math.ceil
 
@@ -95,7 +102,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     /** Calm endermen in the way are left to the fight, so the build doesn't spleef them. */
     val killsCalmEndermen get() = enabled && calmEndermen
     /** Whether a mob is being fought or about to be, so others close their container and wait instead of acting against it. */
-    val isFighting get() = target != null || waiting
+    val isFighting get() = target != null || waiting || approaching != null
     private val settle = RotationSettle()
     private var warnedNoWeapon = false
     /** Mobs given up on since they couldn't be hit, e.g. behind a wall, and when. */
@@ -105,12 +112,22 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     private var screenWaitTicks = 0
     private var heldSlot = -1
     private var heldTicks = 0
+    /** A mob in the way out of reach being walked up to, see [approach]. */
+    private var approaching: LivingEntity? = null
+    private var approachGoal: BlockPos? = null
+    private var approachTicks = 0
+    private var approachStallTicks = 0
+    private var approachClosest = Double.MAX_VALUE
+    /** Mobs a walk up to failed for, and when, so the build's own unstuck gets its turn. */
+    private val unapproachable = WeakHashMap<Entity, Long>()
+    /** Mobs told about in the chat, once each. */
+    private val announced: MutableSet<Entity> = Collections.newSetFromMap(WeakHashMap())
 
     fun SafeContext.tick() {
         val screenOpen = player.currentScreenHandler != player.playerScreenHandler
         if (!screenOpen) screenWaitTicks = 0
         if (!enabled) return stopFighting()
-        var next = findTarget() ?: return stopFighting()
+        var next = findTarget() ?: return approach(screenOpen)
         val pauses = pauseBuild && c.isBuilding
         // Busy with something else, e.g. a restock, so only fight what attacks you or would take a drop.
         if (pauses && !c.canPauseFor(this@HighwayAura)) next = findTarget(threatsOnly = true) ?: return stopFighting()
@@ -124,6 +141,8 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
             return
         }
         if (pauses) c.pauseFor(this@HighwayAura)
+        // In reach now, the fight takes over.
+        stopApproaching()
         if (next !== target) {
             settle.reset()
             missTicks = 0
@@ -133,12 +152,16 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
     }
 
     fun crouch(input: Input) {
-        if (crouch && target != null && !OpenContainerTask.isOpening) input.sneaking = true
+        // Walking up always crouches, like the build's own walks, so it can't step off an edge.
+        if ((crouch && target != null || approaching != null) && !OpenContainerTask.isOpening) input.sneaking = true
     }
 
     fun clear() {
         target = null
+        stopApproaching()
         unhittable.clear()
+        unapproachable.clear()
+        announced.clear()
     }
 
     /** The mob being fought while it's in reach, so one knocked out of the way doesn't come back. Else the closest. */
@@ -149,26 +172,19 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
         val reach = buildConfig.entityReach
         // Reach goes to the hitbox, which for a ghast is far from where it stands.
         val inReach = entitySearch<LivingEntity>(reach + SEARCH_EXTRA) {
-            it.isAlive && it !in unhittable && (!threatsOnly || it.isThreat || it.isGrabberTarget) && it.isInReach(player.eyePos, reach) && when {
-                it.isGrabberTarget || it.isAngryPiglin -> true
-                it is EndermanEntity -> if (it.isAngry) angryEndermen else calmEndermen
-                it is GhastEntity -> ghasts
-                it is StriderEntity -> striders
-                it is MagmaCubeEntity -> magmaCubes
-                it is AbstractSkeletonEntity -> skeletons
-                it is HoglinEntity -> hoglins
-                else -> false
-            }
+            it.isAlive && it !in unhittable && (!threatsOnly || it.isThreat || it.isGrabberTarget) && it.isInReach(player.eyePos, reach) && it.isKilled
         }
         inReach.firstOrNull { it === target }?.let { return it }
 
         return inReach
             .filter {
-                val allowed = !onlyInTheWay || it in SpleefGuard.recentBlockers
+                // One walked up to isn't reported any more while the build is paused.
+                val inTheWay = it in SpleefGuard.recentBlockers || it === approaching
+                val allowed = !onlyInTheWay || inTheWay
                 when {
                     it.isGrabberTarget || it.isAngryPiglin -> true
                     // Too wide to spleef, so the build would wait for one in the way forever.
-                    it is HoglinEntity -> it in SpleefGuard.recentBlockers || it.squaredDistanceTo(player) <= hoglinRange * hoglinRange
+                    it is HoglinEntity -> inTheWay || it.squaredDistanceTo(player) <= hoglinRange * hoglinRange
                     it is AbstractSkeletonEntity -> it.squaredDistanceTo(player) <= skeletonRange * skeletonRange
                     // An angry enderman is coming for you.
                     it is EndermanEntity -> it.isAngry || allowed
@@ -176,6 +192,88 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
                 }
             }
             .minByOrNull { it.squaredDistanceTo(player) }
+    }
+
+    /** A kind of mob the settings have killed, wherever it is. */
+    private val LivingEntity.isKilled get() = when {
+        isGrabberTarget || isAngryPiglin -> true
+        this is EndermanEntity -> if (isAngry) angryEndermen else calmEndermen
+        this is GhastEntity -> ghasts
+        this is StriderEntity -> striders
+        this is MagmaCubeEntity -> magmaCubes
+        this is AbstractSkeletonEntity -> skeletons
+        this is HoglinEntity -> hoglins
+        else -> false
+    }
+
+    /**
+     * Blocks are placed further than mobs are hit, so one in the way can be out of reach, and a magma cube or strider
+     * on a narrow highway may never get out of it. The build is paused and the player walks along the highway, crouched,
+     * up to the closest spot it's in reach from. Once it is, [findTarget] has it and the fight takes over.
+     * Given up on for a while when no spot on the highway reaches it or the walk stops getting closer.
+     */
+    private fun SafeContext.approach(screenOpen: Boolean) {
+        val now = System.currentTimeMillis()
+        unapproachable.entries.removeIf { now - it.value > UNAPPROACHABLE_MS }
+        val mob = approachTarget() ?: return stopFighting()
+        // Others first: eating, a container, or a walk, stare or restock of the build. Fought once it comes in reach.
+        if (player.isUsingItem || screenOpen || !c.isBuilding || !c.canPauseFor(this@HighwayAura)) return stopFighting()
+        val spot = with(c) { approachSpot(mob, buildConfig.entityReach - APPROACH_MARGIN) }
+            ?: return giveUpApproach(mob, "no spot on the highway within ${HighwayTools.APPROACH_STEPS} blocks reaches it", chat = false)
+        if (!c.pauseFor(this@HighwayAura)) return stopFighting()
+        target = null
+        waiting = false
+        val distance = mob.boundingBox.getClosestPointTo(player.eyePos).distanceTo(player.eyePos)
+        if (mob !== approaching) {
+            approaching = mob
+            approachGoal = null
+            approachTicks = 0
+            approachStallTicks = 0
+            approachClosest = distance
+            LOG.info("[HighwayAura] walking up to ${mob.name.string} at ${mob.blockPos.toShortString()}, ${"%.1f".format(distance)} away, from ${player.blockPos.toShortString()} to ${spot.toShortString()}")
+            if (announced.add(mob)) c.info("Walking up to the ${mob.name.string} in the way to kill it")
+        }
+        if (distance < approachClosest - APPROACH_PROGRESS) {
+            approachClosest = distance
+            approachStallTicks = 0
+        } else if (++approachStallTicks > APPROACH_STALL_TICKS) return giveUpApproach(mob, "got no closer for ${APPROACH_STALL_TICKS / 20}s")
+        if (++approachTicks > APPROACH_TIMEOUT_TICKS) return giveUpApproach(mob, "not in reach after ${APPROACH_TIMEOUT_TICKS / 20}s")
+        // The mob moving, e.g. a magma cube hopping, can move the spot on.
+        if (spot != approachGoal) {
+            approachGoal = spot
+            BaritoneHandler.setGoalAndPath(GoalBlock(spot))
+        }
+    }
+
+    /** The mob being walked up to, else the closest killable one in the way out of reach. */
+    private fun SafeContext.approachTarget(): LivingEntity? {
+        // The build is paused on the way, so it doesn't report the mob as in the way any more.
+        approaching?.takeIf { it.isAlive && it.world === world && it !in unhittable && it !in unapproachable && it.isKilled }
+            ?.let { return it }
+        val range = HighwayTools.APPROACH_STEPS + buildConfig.entityReach + 1
+        return SpleefGuard.recentBlockers.asSequence()
+            .filterIsInstance<LivingEntity>()
+            .filter {
+                // Skeletons and threats come to you, and a mob only close by isn't in the way.
+                it.isAlive && it.world === world && it !in unhittable && it !in unapproachable && it.isKilled &&
+                    it !is AbstractSkeletonEntity && it.squaredDistanceTo(player) <= range * range
+            }
+            .minByOrNull { it.squaredDistanceTo(player) }
+    }
+
+    private fun SafeContext.giveUpApproach(mob: LivingEntity, why: String, chat: Boolean = true) {
+        LOG.info("[HighwayAura] gave up walking up to ${mob.name.string} at ${mob.blockPos.toShortString()} from ${player.blockPos.toShortString()}: $why")
+        if (chat) c.warn("Can't get to the ${mob.name.string} in the way, $why")
+        unapproachable[mob] = System.currentTimeMillis()
+        stopFighting()
+    }
+
+    /** Ends a walk up to a mob, if there is one. Baritone only stops for one, else it may be the build's own path. */
+    private fun stopApproaching() {
+        if (approaching == null) return
+        approaching = null
+        approachGoal = null
+        BaritoneHandler.cancel()
     }
 
     private fun SafeContext.fight(target: LivingEntity) {
@@ -237,6 +335,7 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
         this is HoglinEntity || this is AbstractSkeletonEntity || (this is EndermanEntity && isAngry) || isAngryPiglin
 
     fun stopFighting() {
+        stopApproaching()
         target = null
         waiting = false
         heldTicks = 0
@@ -253,5 +352,12 @@ class HighwayAura(override val c: HighwayTools) : ConfigBlock, Automated by c {
          */
         const val MAX_SCREEN_WAIT_TICKS = 100
         const val UNHITTABLE_MS = 5_000L
+        /** Long enough for the build to wait, step forward or unstuck before the next walk up to the same mob. */
+        const val UNAPPROACHABLE_MS = 30_000L
+        /** Less than reach, so standing a bit off the spot's middle still reaches. */
+        const val APPROACH_MARGIN = 0.4
+        const val APPROACH_PROGRESS = 0.1
+        const val APPROACH_STALL_TICKS = 60
+        const val APPROACH_TIMEOUT_TICKS = 300
     }
 }

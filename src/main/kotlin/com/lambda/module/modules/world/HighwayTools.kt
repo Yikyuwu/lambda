@@ -74,6 +74,7 @@ import com.lambda.util.item.ItemUtils
 import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.CommunicationUtils.logError
 import com.lambda.util.CommunicationUtils.warn
+import com.lambda.util.EntityUtils.isInReach
 import com.lambda.util.Describable
 import com.lambda.util.NamedEnum
 import com.lambda.util.TickTimer
@@ -89,6 +90,8 @@ import com.lambda.util.player.RotationUtils.lookAt
 import com.lambda.util.world.StructureUtils.generateDirectionalTube
 import net.minecraft.block.Block
 import net.minecraft.block.Blocks
+import net.minecraft.entity.Entity
+import net.minecraft.entity.EntityPose
 import net.minecraft.entity.mob.EndermanEntity
 import net.minecraft.item.BlockItem
 import net.minecraft.item.ItemStack
@@ -214,6 +217,8 @@ object HighwayTools : Module(
     }
 
     private const val STARE_TIMEOUT_TICKS = 100
+    /** How far along the highway [HighwayAura] walks up to a mob in the way it can't reach. */
+    const val APPROACH_STEPS = 6
     private const val PROVOKE_RANGE = 16.0
     private const val WALK_START_TICKS = 40
     private const val TICKS_PER_BLOCK = 20
@@ -803,6 +808,18 @@ object HighwayTools : Module(
         return (1..distance)
             .map { player.blockPos.offset(octant, it * sign) }
             .takeWhile { canStandAt(it) }
+    }
+
+    /**
+     * The closest block along the highway towards [entity], at most [APPROACH_STEPS] away and safe to walk to, from
+     * which crouched eyes reach its hitbox within [reach]. Null if none does, e.g. for a ghast high up.
+     */
+    fun SafeContext.approachSpot(entity: Entity, reach: Double): BlockPos? {
+        val toEntity = entity.pos.subtract(player.pos)
+        val ahead = toEntity.x * octant.offsetX + toEntity.z * octant.offsetZ > 0
+        val eyeHeight = player.getDimensions(EntityPose.CROUCHING).eyeHeight().toDouble()
+        return safeSteps(forward = ahead, APPROACH_STEPS)
+            .firstOrNull { entity.isInReach(Vec3d.ofBottomCenter(it).add(0.0, eyeHeight, 0.0), reach) }
     }
 
     private fun walkAlong(steps: List<BlockPos>) = walkTo(steps.last(), WALK_START_TICKS + steps.size * TICKS_PER_BLOCK)
