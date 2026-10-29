@@ -30,6 +30,7 @@ import net.minecraft.util.shape.VoxelShape
 import net.minecraft.util.shape.VoxelShapes
 import net.minecraft.world.BlockView
 import net.minecraft.world.border.WorldBorder
+import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.floor
 import kotlin.math.max
@@ -90,6 +91,24 @@ class CorridorWorld(
 	}
 
 	private fun cell(pos: BlockPos) = cell(pos.x, pos.y, pos.z)
+
+	/** The boxes of the shapes in [palette] and of a whole block, by identity, see [boxesOf]. Only read after. */
+	private val paletteBoxes = IdentityHashMap<VoxelShape, List<Box>>().apply {
+		put(VoxelShapes.fullCube(), VoxelShapes.fullCube().boundingBoxes)
+		for (cell in palette) {
+			if (cell.shape !in this) put(cell.shape, cell.shape.boundingBoxes)
+			if (cell.bare !in this) put(cell.bare, cell.bare.boundingBoxes)
+		}
+	}
+
+	/** The boxes around the shapes in [palette], like [paletteBoxes]. */
+	private val paletteBounds = IdentityHashMap<VoxelShape, Box>().apply {
+		for (shape in paletteBoxes.keys) if (!shape.isEmpty) put(shape, shape.boundingBox)
+	}
+
+	override fun boxesOf(shape: VoxelShape) = paletteBoxes[shape] ?: shape.boundingBoxes
+
+	override fun boundsOf(shape: VoxelShape) = paletteBounds[shape] ?: shape.boundingBox
 
 	override fun blockState(pos: BlockPos) = cell(pos).state
 

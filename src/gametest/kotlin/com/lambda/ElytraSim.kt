@@ -27,9 +27,9 @@ import java.io.File
 
 /**
  * Flies ElytraFly over the scenarios in elytra-sim/scenarios.txt in the run directory, in the save named there, one
- * line each: `name x y z yaw ticks distance`, ending that far from the start (where the highway ends), the first line
- * `world <save>`, lines starting with / are commands run once. Writes each tick to elytra-sim/out/<name>.csv.
- * Does nothing without the file.
+ * line each: `name x y z yaw ticks distance [dimension]`, ending that far from the start (where the highway ends), in
+ * the dimension given (default minecraft:the_nether), the first line `world <save>`, lines starting with / are commands
+ * run once. Writes each tick to elytra-sim/out/<name>.csv. Does nothing without the file.
  */
 @Suppress("UnstableApiUsage")
 object ElytraSim : FabricClientGameTest {
@@ -55,8 +55,9 @@ object ElytraSim : FabricClientGameTest {
 		waitForOthers(context, "ready")
 		val prep = lines.filter { it.startsWith("/") }
 		prep.forEach { if (it.startsWith("/wait ")) context.waitTicks(it.removePrefix("/wait ").trim().toInt()) else command(context, it) }
+		val flights = lines.filter { !it.startsWith("world ") && !it.startsWith("/") }
 		// Only building: saved, to be copied and flown later.
-		if (prep.isNotEmpty() && lines.none { !it.startsWith("world ") && !it.startsWith("/") }) {
+		if (prep.isNotEmpty() && flights.isEmpty()) {
 			context.waitTicks(100)
 			context.runOnClient<RuntimeException> { c ->
 				val server = c.server!!
@@ -65,24 +66,25 @@ object ElytraSim : FabricClientGameTest {
 			context.waitTicks(400)
 		}
 
-		val flights = lines.filter { !it.startsWith("world ") && !it.startsWith("/") }
 		// The first flight flown once unscored first: the first two or three flew at 20 to 60 frames a second, the planner's
 		// code not compiled yet, then above 100.
-		val warmup = flights.firstOrNull()?.split(Regex("\\s+"))?.toMutableList()?.apply {
+		val warmup = flights.firstOrNull()?.split(SPACES)?.toMutableList()?.apply {
 			this[0] = WARMUP
 			this[5] = "$WARMUP_TICKS"
 		}?.joinToString(" ")
 		for ((round, line) in (listOfNotNull(warmup) + flights).withIndex()) {
 			// Teleported together with the others' next flights, not while they fly: loading a new spot drops their frames.
 			if (round > 0) waitForOthers(context, "${round - 1}.done")
-			val parts = line.split(Regex("\\s+"))
+			val parts = line.split(SPACES)
 			val name = parts[0]
 			val (x, y, z, yaw) = parts.subList(1, 5).map { it.toDouble() }
 			val ticks = parts[5].toInt()
 			val distance = parts.getOrNull(6)?.toDouble() ?: Double.MAX_VALUE
+			val dimension = parts.getOrNull(7) ?: "minecraft:the_nether"
+			fun tp(feet: Double) = command(context, "/execute in $dimension run tp @a ${x.plain()} ${feet.plain()} ${z.plain()} $yaw 0")
 			context.runOnClient<RuntimeException> { ElytraFly.disable() }
 			context.waitTicks(5)
-			command(context, "/execute in minecraft:the_nether run tp @a ${x.plain()} ${y.plain()} ${z.plain()} $yaw 0")
+			tp(y)
 			command(context, "/gamemode survival @a")
 			command(context, "/item replace entity @a armor.chest with minecraft:elytra")
 			command(context, "/effect give @a minecraft:resistance infinite 4 true")
@@ -91,7 +93,7 @@ object ElytraSim : FabricClientGameTest {
 			command(context, "/effect give @a minecraft:instant_health 1 10 true")
 			context.waitTicks(60)
 			// Started in the air, a little above the floor: the takeoff from standing doesn't start the glide in a test.
-			command(context, "/execute in minecraft:the_nether run tp @a ${x.plain()} ${(y + 1.2).plain()} ${z.plain()} $yaw 0")
+			tp(y + 1.2)
 			context.runOnClient<RuntimeException> {
 				it.player!!.yaw = yaw.toFloat()
 				it.player!!.pitch = 0f
@@ -107,24 +109,26 @@ object ElytraSim : FabricClientGameTest {
 			var minFps = Int.MAX_VALUE
 			for (tick in 0 until ticks) {
 				context.waitTick()
-				// Decimals with a point whatever the system's language, the fps on its own.
-				val (row, fps) = context.computeOnClient<Pair<String, Int>, RuntimeException> { c ->
+				// Decimals with a point whatever the system's language, the fps and what ends the flight on their own.
+				val tickRow = context.computeOnClient<TickRow, RuntimeException> { c ->
 					val p = c.player!!
 					val v = p.velocity
 					val fps = c.currentFps
 					val flags = "${p.isOnGround},${p.isGliding},${p.horizontalCollision},${p.verticalCollision},$fps,${ElytraFly.isEnabled}"
-					String.format(java.util.Locale.ROOT, "$tick,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,$flags", p.x, p.y, p.z, v.x, v.y, v.z) to fps
+					val text = String.format(java.util.Locale.ROOT, "$tick,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,$flags", p.x, p.y, p.z, v.x, v.y, v.z)
+					// Where you are as written, to 4 decimals.
+					TickRow(text, fps, ElytraFly.isEnabled, p.isOnGround, p.horizontalCollision, p.x.rounded(), p.z.rounded())
 				}
-				rows.append(row).append('\n')
-				if (tick >= 20) minFps = minOf(minFps, fps)
+				rows.append(tickRow.text).append('\n')
+				if (tick >= 20) minFps = minOf(minFps, tickRow.fps)
 				if (tick < 30) context.runOnClient<RuntimeException> { probe(it) }
-				if (row.endsWith(",false")) break
-				val cols = row.split(",")
+				if (!tickRow.enabled) break
 				// Bumped or landed to walk: the flight failed there, off its way the rest of the track says nothing more.
-				groundTicks = if (cols[7] == "true") groundTicks + 1 else 0
-				if (cols[9] == "true" || groundTicks > WALK_STOP_TICKS) break
+				groundTicks = if (tickRow.ground) groundTicks + 1 else 0
+				if (tickRow.bumped || groundTicks > WALK_STOP_TICKS) break
 				// Stuck, e.g. walking into a wall or bouncing in place: on to the next.
-				val (px, pz) = cols[1].toDouble() to cols[3].toDouble()
+				val px = tickRow.x
+				val pz = tickRow.z
 				if (Math.hypot(px - x, pz - z) >= distance) break
 				if (tick % STUCK_TICKS == 0) {
 					if (tick > 0 && Math.hypot(px - stuckX, pz - stuckZ) < 3) break
@@ -192,6 +196,14 @@ object ElytraSim : FabricClientGameTest {
 
 	/** Written out in full for a command, never like 2.9999983E7: the ring road at the 30M edge didn't parse. */
 	private fun Double.plain() = "%.4f".format(java.util.Locale.ROOT, this)
+
+	/** As a tick's row has it, to 4 decimals. */
+	private fun Double.rounded() = String.format(java.util.Locale.ROOT, "%.4f", this).toDouble()
+
+	/** A tick's [text] in the csv, the [fps], and what ends the flight: ElytraFly [enabled], on the [ground], [bumped], where you are. */
+	private class TickRow(val text: String, val fps: Int, val enabled: Boolean, val ground: Boolean, val bumped: Boolean, val x: Double, val z: Double)
+
+	private val SPACES = Regex("\\s+")
 
 	/**
 	 * With -Delytrasim.barrier=<folder> and -Delytrasim.count=<n>, several runs at once keep in step: they start flying

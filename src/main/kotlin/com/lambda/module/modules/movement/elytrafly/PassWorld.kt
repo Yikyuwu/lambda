@@ -18,6 +18,7 @@
 package com.lambda.module.modules.movement.elytrafly
 
 import net.minecraft.block.BlockState
+import net.minecraft.registry.Registries
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
@@ -74,9 +75,10 @@ interface PassWorld {
 	 */
 	fun hotFloorUnder(x: Double, y: Double, z: Double): Boolean {
 		val below = floor(y - 0.05).toInt()
+		val pos = BlockPos.Mutable()
 		for (bx in floor(x - 0.29).toInt()..floor(x + 0.29).toInt())
 			for (bz in floor(z - 0.29).toInt()..floor(z + 0.29).toInt())
-				if (hotFloor(BlockPos(bx, below, bz))) return true
+				if (hotFloor(pos.set(bx, below, bz))) return true
 		return false
 	}
 
@@ -93,11 +95,21 @@ interface PassWorld {
 					val shape = if (hazards) wayShape(pos.set(x, y, z)) else shapeAt(pos.set(x, y, z))
 					if (shape.isEmpty) continue
 					val hit = if (shape === VoxelShapes.fullCube()) box.intersects(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
-						else shape.boundingBoxes.any { it.offset(x.toDouble(), y.toDouble(), z.toDouble()).intersects(box) }
+						// Each part as offset to the block and intersected, without a box made for it.
+						else boxesOf(shape).any { p ->
+							p.minX + x < box.maxX && p.maxX + x > box.minX && p.minY + y < box.maxY && p.maxY + y > box.minY &&
+								p.minZ + z < box.maxZ && p.maxZ + z > box.minZ
+						}
 					if (hit) return false
 				}
 		return true
 	}
+
+	/** The boxes [shape] is made of, its [VoxelShape.getBoundingBoxes], kept for the shapes read often. */
+	fun boxesOf(shape: VoxelShape): List<Box> = shape.boundingBoxes
+
+	/** The box around all of [shape], its [VoxelShape.getBoundingBox], kept like [boxesOf]. */
+	fun boundsOf(shape: VoxelShape): Box = shape.boundingBox
 
 	/** The boxes of the entities as solid as blocks to you around you, e.g. boats, as [spaceEmpty] counts them. */
 	fun solidBoxes(): List<Box>
@@ -112,7 +124,7 @@ interface PassWorld {
 	 */
 	fun blockRay(start: Vec3d, direction: Vec3d, reach: Double, passes: ((BlockPos, VoxelShape) -> Boolean)? = null): BlockHitResult? {
 		val end = start.add(direction.multiply(reach))
-		val across = Vec3d(-direction.z, 0.0, direction.x).normalize()
+		val across = across(direction)
 		val wideX = abs(across.x) * POST_MARGIN
 		val wideZ = abs(across.z) * POST_MARGIN
 		return BlockView.raycast<BlockHitResult?, Unit>(start, end, Unit, { _, pos ->
@@ -120,7 +132,7 @@ interface PassWorld {
 			// Looked past, the ray goes on to the next block.
 			if (passes != null && !shape.isEmpty && passes(pos, shape)) return@raycast null
 			if (shape.isEmpty || shape === VoxelShapes.fullCube()) return@raycast shape.raycast(start, end, pos)
-			val bounds = shape.boundingBox
+			val bounds = boundsOf(shape)
 			val growX = if (bounds.lengthX < 1 - 1e-6) wideX else 0.0
 			val growZ = if (bounds.lengthZ < 1 - 1e-6) wideZ else 0.0
 			if (growX < 1e-6 && growZ < 1e-6) shape.raycast(start, end, pos)
@@ -171,6 +183,9 @@ interface PassWorld {
 	/** The magma cubes and hoglins in [box], glided over like a block. */
 	fun glidedOverMobs(box: Box): List<PassEntity>
 }
+
+/** The block's id without its namespace, e.g. for the debug log. */
+internal fun BlockState.idPath(): String = Registries.BLOCK.getId(block).path
 
 /**
  * How far wider across the way a block narrower than a whole one is to [PassWorld.blockRay], e.g. a glass pane, iron

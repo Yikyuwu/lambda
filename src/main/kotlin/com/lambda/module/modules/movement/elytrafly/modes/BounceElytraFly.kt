@@ -564,18 +564,12 @@ class BounceElytraFly(
 	private fun SafeContext.ceilingY(ceiling: Double = maxFlightY()): Double = ceilingYIn(ceiling) { findCeilingY(ceiling) }
 
 	private fun SafeContext.findCeilingY(ceiling: Double): Double {
-		// Taken for a search on the route thread: the first rise with the roof in the way, the same one the scan below stops at.
-		(modeInputs as BounceInputs?)?.let { taken ->
-			val rise = taken.roofRise?.takeIf { taken.y + it - ROOF_SCAN_STEP < ceiling } ?: return ceiling
-			return min(ceiling, taken.y + rise - ROOF_SCAN_STEP - ROOF_MARGIN)
-		}
-		var rise = ROOF_SCAN_STEP
-		while (rise <= ROOF_SCAN_HEIGHT && player.y + rise - ROOF_SCAN_STEP < ceiling) {
-			if (!world.isSpaceEmpty(player, player.boundingBox.offset(0.0, rise, 0.0)))
-				return min(ceiling, player.y + rise - ROOF_SCAN_STEP - ROOF_MARGIN)
-			rise += ROOF_SCAN_STEP
-		}
-		return ceiling
+		// The first rise with the roof in the way: taken for a search on the route thread, else looked for now. One no
+		// lower than [ceiling] leaves it as it is.
+		val taken = modeInputs as BounceInputs?
+		val y = taken?.y ?: player.y
+		val rise = (if (taken != null) taken.roofRise else roofRise())?.takeIf { y + it - ROOF_SCAN_STEP < ceiling } ?: return ceiling
+		return min(ceiling, y + rise - ROOF_SCAN_STEP - ROOF_MARGIN)
 	}
 
 	/** How far up from you the first box with the roof in it is, by [ROOF_SCAN_STEP]s up to [ROOF_SCAN_HEIGHT], null with none, see [findCeilingY]. */

@@ -69,7 +69,6 @@ import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket
 import net.minecraft.network.packet.s2c.play.EntityTrackerUpdateS2CPacket
 import net.minecraft.network.packet.s2c.play.EntityVelocityUpdateS2CPacket
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket
-import net.minecraft.registry.Registries
 import net.minecraft.sound.SoundEvents
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
@@ -109,9 +108,7 @@ object ElytraFly : Module(
     private val chooserLog by setting("Chooser Log", false, "Also logs which way past an obstacle the coming chooser would pick, costs a few ms a decision") { debugLog }
 
     private const val BOUNCE_TAB = "Bounce"
-//    private const val CONTROL_TAB = "Control"
     private const val GRIM_CONTROL_TAB = "Grim Control"
-//    private const val PACKET_TAB = "Packet"
     private const val GENERAL_TAB = "None"
 
     private const val GRIM_ROCKET_BOOST_RESCALE = 1.65
@@ -136,8 +133,6 @@ object ElytraFly : Module(
         .withEdits { forEachSetting { visibility { old -> { old() && mode == FlyMode.Bounce } } } }
     @Tab(GRIM_CONTROL_TAB) @JvmStatic val grimControlMode by configBlock(GrimControlElytraFly(this))
         .withEdits { forEachSetting { visibility { old -> { old() && mode == FlyMode.GrimControl } } } }
-//    @Tab(CONTROL_TAB) @JvmStatic val controlMode by configBlock(ControlElytraFly(this))
-//    @Tab(PACKET_TAB) @JvmStatic val packetMode by configBlock(PacketElytraFly(this))
 
     // Last sent movement packet state, used to rebuild Grim's firework prediction box.
     private var lastMovementIncludedPosition = true
@@ -235,55 +230,12 @@ object ElytraFly : Module(
             event.cancel()
         }
 
-        listen<PacketEvent.Receive.Pre> { event ->
-            val packet = event.packet as? PlayerPositionLookS2CPacket ?: return@listen
-            if (debugLog) synchronized(recent) {
-                if (recent.isNotEmpty()) {
-                    LOG.info("[ElytraFly] The ${recent.size} lines before the setback:")
-                    recent.forEach { LOG.info("[ElytraFly] $it") }
-                    recent.clear()
-                }
-            }
-            debug { "Setback to ${packet.change.position.short} ${packet.relatives}, velocity ${packet.change.deltaMovement.short} (was ${player.velocity.short}), gliding ${player.isGliding}, on ground ${player.isOnGround}" }
-            trace(TRACE_TICKS)
-            val to = packet.change.position
-            // On the game thread, the world and its entities change there meanwhile.
-            if (debugLog) runGameScheduled {
-                if (lastSurroundings?.let { it.squaredDistanceTo(to) < 1.0 } != true) {
-                    lastSurroundings = to
-                    debug { "Around the setback: ${surroundings(to)}" }
-                }
-            }
-            // Set back over and over, e.g. by a block only the server has, walking or flying on never gets anywhere.
-            val now = System.currentTimeMillis()
-            val stuck = synchronized(recentSetbacks) {
-                recentSetbacks.removeAll { now - it > SETBACK_WINDOW_MS }
-                recentSetbacks.add(now)
-                (recentSetbacks.size >= MAX_SETBACKS).also { if (it) recentSetbacks.clear() }
-            }
-            if (stuck) {
-                // Dropping what it was at and planning anew gets it out. It never stops for it, when that doesn't it
-                // only says so and starts over again.
-                runGameScheduled {
-                    stuckAt.removeAll { (time, pos) -> now - time > STUCK_WINDOW_MS || pos.squaredDistanceTo(to) > STUCK_RADIUS * STUCK_RADIUS }
-                    stuckAt.add(now to to)
-                    if (stuckAt.size >= MAX_STUCK) {
-                        stuckAt.clear()
-                        warn("Set back over and over at ${to.short} even after starting over $MAX_STUCK times. The server may have a block there the client doesn't, starting over again")
-                    } else debug { "Set back $MAX_SETBACKS times within ${SETBACK_WINDOW_MS / 1000} seconds, starting over" }
-                    mode.elytraFly.onStuckListeners.forEach { it() }
-                }
-                return@listen
-            }
-            // On the game thread, the listeners change what it reads there, e.g. Bounce's pause timer it counts each tick.
-            runGameScheduled { mode.elytraFly.onFlagListeners.forEach { it() } }
-        }
-
         listen<PacketEvent.Send.Post> { event ->
             if (debugLog) traceLine("  sent ${describe(event.packet)}")
         }
 
         listen<PacketEvent.Receive.Pre> { event ->
+            (event.packet as? PlayerPositionLookS2CPacket)?.let { setBack(it) }
             if (!debugLog) return@listen
             // What the server says about you, e.g. that it ended your glide.
             when (val packet = event.packet) {
@@ -314,9 +266,6 @@ object ElytraFly : Module(
             hitWall = wall
             lastHorizontalSpeed = player.velocity.horizontalLength()
             lastTickPos = player.pos
-        }
-
-        listen<TickEvent.Post> {
             if (!debugLog) return@listen
             val v = player.velocity
             traceLine(
@@ -352,6 +301,50 @@ object ElytraFly : Module(
         }
     }
 
+    /** Set back to where [packet] has you: logged, and stuck there over and over it starts over, else the listeners are told. */
+    private fun SafeContext.setBack(packet: PlayerPositionLookS2CPacket) {
+        if (debugLog) synchronized(recent) {
+            if (recent.isNotEmpty()) {
+                LOG.info("[ElytraFly] The ${recent.size} lines before the setback:")
+                recent.forEach { LOG.info("[ElytraFly] $it") }
+                recent.clear()
+            }
+        }
+        debug { "Setback to ${packet.change.position.short} ${packet.relatives}, velocity ${packet.change.deltaMovement.short} (was ${player.velocity.short}), gliding ${player.isGliding}, on ground ${player.isOnGround}" }
+        trace(TRACE_TICKS)
+        val to = packet.change.position
+        // On the game thread, the world and its entities change there meanwhile.
+        if (debugLog) runGameScheduled {
+            if (lastSurroundings?.let { it.squaredDistanceTo(to) < 1.0 } != true) {
+                lastSurroundings = to
+                debug { "Around the setback: ${surroundings(to)}" }
+            }
+        }
+        // Set back over and over, e.g. by a block only the server has, walking or flying on never gets anywhere.
+        val now = System.currentTimeMillis()
+        val stuck = synchronized(recentSetbacks) {
+            recentSetbacks.removeAll { now - it > SETBACK_WINDOW_MS }
+            recentSetbacks.add(now)
+            (recentSetbacks.size >= MAX_SETBACKS).also { if (it) recentSetbacks.clear() }
+        }
+        if (stuck) {
+            // Dropping what it was at and planning anew gets it out. It never stops for it, when that doesn't it
+            // only says so and starts over again.
+            runGameScheduled {
+                stuckAt.removeAll { (time, pos) -> now - time > STUCK_WINDOW_MS || pos.squaredDistanceTo(to) > STUCK_RADIUS * STUCK_RADIUS }
+                stuckAt.add(now to to)
+                if (stuckAt.size >= MAX_STUCK) {
+                    stuckAt.clear()
+                    warn("Set back over and over at ${to.short} even after starting over $MAX_STUCK times. The server may have a block there the client doesn't, starting over again")
+                } else debug { "Set back $MAX_SETBACKS times within ${SETBACK_WINDOW_MS / 1000} seconds, starting over" }
+                mode.elytraFly.onStuckListeners.forEach { it() }
+            }
+            return
+        }
+        // On the game thread, the listeners change what it reads there, e.g. Bounce's pause timer it counts each tick.
+        runGameScheduled { mode.elytraFly.onFlagListeners.forEach { it() } }
+    }
+
     /** Whether the chooser that only logs runs, see [ObstaclePassingMode]. */
     val choosing get() = debugLog && chooserLog
 
@@ -365,6 +358,16 @@ object ElytraFly : Module(
     var debugMuted
         get() = debugMutes.get()[0]
         set(value) { debugMutes.get()[0] = value }
+
+    /** Runs [block] with [debug] writing nothing on this thread, see [debugMuted]. */
+    inline fun <T> muted(block: () -> T): T {
+        debugMuted++
+        try {
+            return block()
+        } finally {
+            debugMuted--
+        }
+    }
 
     /** Writes [message] to the game log with [debugLog]. */
     fun debug(message: () -> String) {
@@ -414,7 +417,7 @@ object ElytraFly : Module(
             val state = world.getBlockState(blockPos)
             val shape = state.getCollisionShape(world, blockPos)
             if (shape.isEmpty || shape.boundingBoxes.none { it.offset(blockPos).intersects(swept) }) null
-            else "${Registries.BLOCK.getId(state.block).path} ${blockPos.toShortString()}"
+            else "${state.idPath()} ${blockPos.toShortString()}"
         }.joinToString()
     }
 
@@ -426,14 +429,14 @@ object ElytraFly : Module(
             val shape = state.getCollisionShape(world, blockPos)
             // Also ones without collision, like cobwebs, that still slow you down.
             if (state.isAir) null
-            else "${Registries.BLOCK.getId(state.block).path} ${blockPos.toShortString()} ${if (shape.isEmpty) "no collision" else shape.boundingBox.offset(blockPos).short}"
+            else "${state.idPath()} ${blockPos.toShortString()} ${if (shape.isEmpty) "no collision" else shape.boundingBox.offset(blockPos).short}"
         }
         val entities = world.getOtherEntities(player, box.expand(2.0)).map {
             "${EntityType.getId(it.type).path} ${it.boundingBox.short}"
         }
         // What it stands on, a floor only the client has would let it walk where the server makes it fall.
         val floor = BlockPos.stream(box.offset(0.0, -1.0, 0.0).withMaxY(box.minY - 0.5)).map { it.toImmutable() }.toList().map { blockPos ->
-            "${Registries.BLOCK.getId(world.getBlockState(blockPos).block).path} ${blockPos.toShortString()}"
+            "${world.getBlockState(blockPos).idPath()} ${blockPos.toShortString()}"
         }
         return "blocks [${blocks.joinToString()}], floor [${floor.joinToString()}], entities [${entities.joinToString()}]"
     }
@@ -540,9 +543,7 @@ object ElytraFly : Module(
 
     enum class FlyMode(private val elytraFlyGetter: () -> ElytraFlyMode) {
         Bounce({ bounceMode }),
-//        Control({ controlMode }),
         GrimControl({ grimControlMode }),
-//        Packet({ packetMode }),
         General({ generalMode });
 
         val elytraFly get() = elytraFlyGetter()
