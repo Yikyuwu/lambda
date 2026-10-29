@@ -40,7 +40,7 @@ import net.minecraft.item.ItemStack
 import net.minecraft.registry.tag.ItemTags
 
 /**
- * Places buttons down the middle of the highway.s floor against magma cubes spawning on it. Once none are
+ * Places buttons down the middle of the highway's floor against magma cubes spawning on it. Once none are
  * left, crafts as many as were carried at the start from a carried shulker of logs, or one the ender chest trip takes
  * and puts back afterwards.
  */
