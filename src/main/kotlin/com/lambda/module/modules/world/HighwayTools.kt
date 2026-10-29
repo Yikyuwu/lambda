@@ -955,7 +955,7 @@ object HighwayTools : Module(
     private fun SafeContext.buttonTarget(
         structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton, spots: Set<BlockPos>,
     ): TargetState {
-        if (state != TargetState.Air || pos.y != startPos.y || structure[pos.down()]?.isEmpty() != false) return state
+        if (state != TargetState.Air || structure[pos.down()]?.isEmpty() != false) return state
         val index = highwayIndex(pos)
         val spot = (index - SPAWN_SLICES..index + SPAWN_SLICES).any { pos.subtract(highwayPos(it)) in spots }
         return if (spot && NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
@@ -963,16 +963,17 @@ object HighwayTools : Module(
     }
 
     /**
-     * The floor blocks of [slice], relative to it, a magma cube can spawn on once dug: its spawn box is 4 times a small
-     * one's, 2.08 wide and high, so all 3 x 3 blocks around and 3 up are open, along the highway into the slices
-     * before and after. A button there stops it, the box itself ignores buttons, they don't collide. None on a highway
-     * too narrow for the box, e.g. 2 wide, or on a diagonal less than 5 straight across.
+     * The open blocks of [slice], relative to it, a magma cube can spawn in once dug, on the floor or e.g. on a rim with
+     * the hole open above it: its spawn box is 4 times a small one's, 2.08 wide and high, so all 3 x 3 blocks around and
+     * 3 up are open, along the highway into the slices before and after. A button there stops it, the box itself
+     * ignores buttons, they don't collide. None on a highway too narrow for the box, e.g. 2 wide, or on a diagonal less
+     * than 5 straight across. Blocks the slice doesn't build, e.g. beside it without walls, count as closed.
      */
     private fun spawnSpots(slice: Structure): Set<BlockPos> {
         val step = BlockPos(octant.offsetX, 0, octant.offsetZ)
         fun open(pos: BlockPos) = (-SPAWN_SLICES..SPAWN_SLICES).any { slice[pos.subtract(step.multiply(it))] == TargetState.Air }
         return slice.entries.filter { (pos, state) ->
-            state == TargetState.Air && pos.y == 0 && slice[pos.down()]?.isEmpty() == false &&
+            state == TargetState.Air && slice[pos.down()]?.isEmpty() == false &&
                 (-1..1).all { dx -> (-1..1).all { dz -> (0..2).all { dy -> open(pos.add(dx, dy, dz)) } } }
         }.mapTo(mutableSetOf()) { it.key }
     }
