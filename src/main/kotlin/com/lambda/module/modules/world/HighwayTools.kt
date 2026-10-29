@@ -102,6 +102,7 @@ import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
 import net.minecraft.util.math.EightWayDirection
 import net.minecraft.util.math.Vec3d
+import net.minecraft.util.math.Vec3i
 import net.minecraft.world.World
 import net.minecraft.world.biome.BiomeKeys
 import java.util.WeakHashMap
@@ -118,8 +119,8 @@ object HighwayTools : Module(
     private val pavement by setting("Pavement", Material.None, "Material for the pavement")
     private val rimHeight by setting("Pavement Rim Height", 1, 0..6, 1) { pavement != Material.None }
     private val rim by setting("Rim Height", 0, 0..6, 1, "Rims of solid blocks like netherrack on both sides of the hole without a pavement, kept where they are and placed where missing, like walls. Only with a width of 3 or more, so a lane is left between them") { pavement == Material.None }
-    /** Rims on the hole's own edge columns, which leave no lane to walk in narrower than 3. */
     private val keepAboveRim by setting("Keep Blocks Above Rim", false, "Leaves the blocks above the rims as they are, placing missing ones, instead of digging the full height there. Without a pavement a block of air stays over the rim for the obsidian railing that's paved later") { pavement != Material.None && rimHeight > 0 || pavement == Material.None && rim > 0 }
+    /** Rims on the hole's own edge columns, which leave no lane to walk in narrower than 3. */
     private val hasRims get() = pavement == Material.None && rim > 0 && width >= 3
     private val cornerBlock by setting("Corner", Corner.None, "Include corner blocks in the highway") { pavement != Material.None }
     private val pavementMaterial by setting("Pavement Material", Blocks.OBSIDIAN, "Material to build the highway with") { pavement == Material.Block }
@@ -164,6 +165,12 @@ object HighwayTools : Module(
 
     private var octant = EightWayDirection.NORTH
     private var startPos = BlockPos.ORIGIN
+    /** What [slice] was made from, it's made anew once that changes. */
+    private var sliceKey: List<Any>? = null
+    private var cachedSlice: Structure = emptyStructure()
+    private var cachedSpots: Set<BlockPos>? = null
+    /** [buttonTarget]'s block relative to its slice, reused for every block it's asked about. */
+    private val spotPos = BlockPos.Mutable()
     private var runningTask: Task<*>? = null
     private var blueprint: PropagatingBlueprint? = null
     /** The slices being built, by their index along the highway. */
@@ -243,8 +250,6 @@ object HighwayTools : Module(
     private const val FOOD_RETRY_TICKS = 600
     private const val JOIN_GRACE_TICKS = 40
     private const val BLOCKS_TARGET = 128
-    /** How many slices either way a magma cube's spawn box reaches into, see [spawnSpots]. */
-    private const val SPAWN_SLICES = 2
     /**
      * The nether biomes magma cubes don't spawn in, no buttons are placed there. A fortress spawns them in any biome, but
      * only inside its pieces, and those stay below y 100, under the highways at 120.
@@ -685,10 +690,10 @@ object HighwayTools : Module(
     }
 
     private fun SafeContext.nextCruiseTarget(): BlockPos? {
-        val slice = generateSlice()
+        val slice = slice()
         val button = with(buttons) { floorButton() }
         val index = highwayIndex(player.blockPos)
-        val spots = spawnSpots(slice)
+        val spots = spawnSpots()
         fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots)
 
         if (!done(index)) return null
@@ -866,10 +871,10 @@ object HighwayTools : Module(
                 disable()
                 return@propagatingBlueprint emptyStructure()
             }
-            val slice = generateSlice()
+            val slice = slice()
             val button = with(buttons) { floorButton() }
             blueprintPlacing = button?.placing
-            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }), button, spawnSpots(slice))
+            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }), button, spawnSpots())
         }
         this.blueprint = blueprint
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
@@ -883,9 +888,9 @@ object HighwayTools : Module(
      * are restocked the slices are built anew too, else the blueprint and [sliceDone] disagree and none counts as done.
      */
     private fun SafeContext.rollSlices(task: BuildTask) {
-        val slice = generateSlice()
+        val slice = slice()
         val button = with(buttons) { floorButton() }
-        val spots = spawnSpots(slice)
+        val spots = spawnSpots()
         var dropped = false
         while (slices.isNotEmpty() && sliceDone(slice, slices.first(), button, spots) { task.isPending(it) }) {
             slices.removeFirst()
@@ -909,13 +914,15 @@ object HighwayTools : Module(
 
     /** Moves the highway sideways so nothing is to be dug behind the world border, e.g. when started right next to it. */
     private fun SafeContext.keepInsideBorder() {
-        val slice = generateSlice()
+        val slice = slice()
         val orthogonal = octant.rotateClockwise(2)
+        // A block across, along a diagonal along x like the slice's rows, see [tube]. A diagonal step moved it 2.
+        val across = BlockPos(orthogonal.offsetX, 0, if (orthogonal.offsetX != 0) 0 else orthogonal.offsetZ)
         fun digsOutside(start: BlockPos) =
             slice.move(start).any { (pos, state) -> state.isEmpty() && !world.worldBorder.contains(pos) }
         if (!digsOutside(startPos)) return
-        val shift = (1..width).flatMap { listOf(it, -it) }.firstOrNull { !digsOutside(startPos.offset(orthogonal, it)) } ?: return
-        startPos = startPos.offset(orthogonal, shift)
+        val shift = (1..width).flatMap { listOf(it, -it) }.firstOrNull { !digsOutside(startPos.add(across.multiply(it))) } ?: return
+        startPos = startPos.add(across.multiply(shift))
         info("Moved the highway ${abs(shift)} block(s) away from the world border, nothing can be dug behind it")
     }
 
@@ -956,26 +963,52 @@ object HighwayTools : Module(
         structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton, spots: Set<BlockPos>,
     ): TargetState {
         if (state != TargetState.Air || structure[pos.down()]?.isEmpty() != false) return state
-        val index = highwayIndex(pos)
-        val spot = (index - SPAWN_SLICES..index + SPAWN_SLICES).any { pos.subtract(highwayPos(it)) in spots }
+        val origin = highwayPos(sliceAt(pos.subtract(startPos)))
+        val spot = spotPos.set(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z) in spots
         return if (spot && NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
         else TargetState.FloorButton(button.accepts, placing = false)
     }
 
     /**
-     * The open blocks of [slice], relative to it, a magma cube can spawn in once dug, on the floor or e.g. on a rim with
+     * The open blocks of the [slice], relative to it, a magma cube can spawn in once dug, on the floor or e.g. on a rim with
      * the hole open above it: its spawn box is 4 times a small one's, 2.08 wide and high, so all 3 x 3 blocks around and
      * 3 up are open, along the highway into the slices before and after. A button there stops it, the box itself
      * ignores buttons, they don't collide. None on a highway too narrow for the box, e.g. 2 wide, or on a diagonal less
      * than 5 straight across. Blocks the slice doesn't build, e.g. beside it without walls, count as closed.
      */
-    private fun spawnSpots(slice: Structure): Set<BlockPos> {
+    private fun spawnSpots(): Set<BlockPos> {
+        // First, it drops the spots of a slice made from other settings.
+        val slice = slice()
+        cachedSpots?.let { return it }
         val step = BlockPos(octant.offsetX, 0, octant.offsetZ)
-        fun open(pos: BlockPos) = (-SPAWN_SLICES..SPAWN_SLICES).any { slice[pos.subtract(step.multiply(it))] == TargetState.Air }
+        fun open(pos: BlockPos) = slice[pos.subtract(step.multiply(sliceAt(pos)))] == TargetState.Air
         return slice.entries.filter { (pos, state) ->
             state == TargetState.Air && slice[pos.down()]?.isEmpty() == false &&
                 (-1..1).all { dx -> (-1..1).all { dz -> (0..2).all { dy -> open(pos.add(dx, dy, dz)) } } }
-        }.mapTo(mutableSetOf()) { it.key }
+        }.mapTo(mutableSetOf()) { it.key }.also { cachedSpots = it }
+    }
+
+    /**
+     * The slice a block [offset] from the start, or from a slice, falls in: along an axis its steps along the way, along
+     * a diagonal its row along x, see [tube]. [highwayIndex] goes by how far along the way it is, which along a diagonal
+     * is another slice for blocks off the middle.
+     */
+    private fun sliceAt(offset: Vec3i) =
+        if (octant.offsetX != 0 && octant.offsetZ != 0) offset.z * octant.offsetZ
+        else offset.x * octant.offsetX + offset.z * octant.offsetZ
+
+    /** [generateSlice], kept until a setting it's made from or the octant changes. */
+    private fun slice(): Structure {
+        val key = listOf(
+            octant, height, width, pavement, rimHeight, rim, keepAboveRim, cornerBlock, pavementMaterial, floor, floorMaterial,
+            rightWall, leftWall, wallMaterial, ceiling, ceilingMaterial, replaceableSolids,
+        )
+        if (key != sliceKey) {
+            cachedSlice = generateSlice()
+            cachedSpots = null
+            sliceKey = key
+        }
+        return cachedSlice
     }
 
     private fun generateSlice(): Structure {
