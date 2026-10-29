@@ -17,6 +17,7 @@
 
 package com.lambda.module.modules.player
 
+import com.lambda.Lambda.LOG
 import com.lambda.Lambda.mc
 import com.lambda.event.events.ChatEvent
 import com.lambda.event.events.TickEvent
@@ -95,6 +96,9 @@ object StuckAlarm : Module(
     /** What 2b2t says once you're through its queue. */
     private const val CONNECTED = "Connected to the server."
 
+    /** How long after [CONNECTED] a world join still counts as the connected one. */
+    private const val CONNECTED_GRACE_MS = 10_000L
+
     /** KDE's Ocean sounds are softer, so they're preferred when installed. */
     private val soundDirs = listOf("/usr/share/sounds/ocean/stereo", "/usr/share/sounds/freedesktop/stereo")
 
@@ -110,6 +114,8 @@ object StuckAlarm : Module(
      * after its restarts in it again, you stand still in a world of its own until you're connected.
      */
     private var armed = false
+    /** When the server last said you're connected, which may come just before the join of its world. */
+    private var connectedAt = 0L
 
     /** The last notification. A new one replaces it, so they don't pile up over a long session. */
     @Volatile private var notification: DesktopNotification? = null
@@ -130,13 +136,16 @@ object StuckAlarm : Module(
         // Back from a disconnect, the time away isn't time stuck.
         listen<WorldEvent.Join> {
             reset()
-            armed = false
+            armed = System.currentTimeMillis() - connectedAt < CONNECTED_GRACE_MS
+            if (armed) LOG.info("[StuckAlarm] armed on joining a world, connected just before")
         }
 
         listen<ChatEvent.Receive> {
             if (it.message.string.trim() == CONNECTED) {
                 reset()
                 armed = true
+                connectedAt = System.currentTimeMillis()
+                LOG.info("[StuckAlarm] armed, the server said you're connected")
             }
         }
 
@@ -148,12 +157,9 @@ object StuckAlarm : Module(
             val now = System.currentTimeMillis()
             val start = anchor
             if (!armed) {
-                if (start != null && moved(start, player.pos)) armed = true
-                if (start == null || armed) {
-                    anchor = player.pos
-                    anchorTime = now
-                }
-                return@listen
+                if (start != null && !moved(start, player.pos)) return@listen
+                armed = start != null
+                if (armed) LOG.info("[StuckAlarm] armed, you moved")
             }
 
             if (start == null || moved(start, player.pos)) {
