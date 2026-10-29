@@ -112,6 +112,7 @@ object HighwayTools : Module(
     private val width by setting("Width", 2, 1..30, 1)
     private val pavement by setting("Pavement", Material.None, "Material for the pavement")
     private val rimHeight by setting("Pavement Rim Height", 1, 0..6, 1) { pavement != Material.None }
+    private val rim by setting("Rim Height", 0, 0..6, 1, "Rims of solid blocks like netherrack on both sides of the hole without a pavement, kept where they are and placed where missing, like walls") { pavement == Material.None }
     private val cornerBlock by setting("Corner", Corner.None, "Include corner blocks in the highway") { pavement != Material.None }
     private val pavementMaterial by setting("Pavement Material", Blocks.OBSIDIAN, "Material to build the highway with") { pavement == Material.Block }
     private val floor by setting("Floor", Material.Solid, "Material for the floor")
@@ -946,6 +947,25 @@ object HighwayTools : Module(
             }
         }
 
+        // Without a pavement the rims stand on the floor, the hole's sides up to their height.
+        if (pavement == Material.None && rim > 0) {
+            structure += generateDirectionalTube(
+	            orthogonal,
+	            1,
+	            rim,
+	            -center + width - 1,
+	            0,
+            ).associateWith { target(Material.Solid, wallMaterial) }
+
+            structure += generateDirectionalTube(
+	            orthogonal,
+	            1,
+	            rim,
+	            -center,
+	            0,
+            ).associateWith { target(Material.Solid, wallMaterial) }
+        }
+
         if (ceiling != Material.None) {
             structure += generateDirectionalTube(
 	            orthogonal,
@@ -956,9 +976,10 @@ object HighwayTools : Module(
             ).associateWith { target(ceiling, ceilingMaterial) }
         }
 
-        // From the rim's height up, right beside it, the way it's always been built. Written as `rimHeight else 0 + 1` it
-        // read as if a block more was meant, which would leave a gap beside the rim all along the way.
-        val wallElevation = if (pavement != Material.None) rimHeight else 0
+        // From the rim's top up, right beside it, the way it's always been built. Written as `rimHeight else 0 + 1` it
+        // read as if a block more was meant, which would leave a gap beside the rim all along the way. Without a
+        // pavement nothing moves down a block, so the rim's top is a block lower.
+        val wallElevation = if (pavement != Material.None) rimHeight else (rim - 1).coerceAtLeast(0)
         if (rightWall != Material.None) {
             structure += wall(orthogonal, center, 1, wallElevation).associateWith { target(rightWall, wallMaterial) }
         }
