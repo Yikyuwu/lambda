@@ -5204,7 +5204,9 @@ abstract class ObstaclePassingMode(
 		recenteredAt = flightTicks
 		if (abs(dir.x) < 1e-6 || abs(dir.z) < 1e-6 || abs(abs(dir.x) - abs(dir.z)) < 1e-6) return false
 		if (!centerLine(dir, startPos.add(dir.multiply(progress(player.pos))))) return false
+		// Their lanes are offsets from the old line.
 		forgetChooser()
+		forgetRoute()
 		return true
 	}
 
