@@ -920,8 +920,8 @@ object HighwayTools : Module(
     }
 
     /**
-     * Buttons on the floor down the highway's middle line, every second block along it (diagonally every second
-     * diagonal step), counted from the world grid so a restart keeps the same spots. Only where the slice has a floor
+     * Buttons on the floor down the highway's middle line, every [HighwayButtons.spacing] blocks along it (diagonally
+     * that many diagonal steps), counted from the world grid so a restart keeps the same spots. Only where the slice has a floor
      * or pavement below.
      */
     private fun SafeContext.withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
@@ -935,7 +935,7 @@ object HighwayTools : Module(
      */
     private fun SafeContext.buttonTarget(structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton): TargetState {
         if (state != TargetState.Air || pos.y != startPos.y || structure[pos.down()]?.isEmpty() != false) return state
-        return if (onMiddleLine(pos) && Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, 2) == 0 &&
+        return if (onMiddleLine(pos) && Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, buttons.spacing) == 0 &&
             NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
         else TargetState.FloorButton(button.accepts, placing = false)
     }

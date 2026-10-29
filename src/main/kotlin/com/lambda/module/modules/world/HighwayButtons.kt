@@ -45,7 +45,8 @@ import net.minecraft.registry.tag.ItemTags
  * and puts back afterwards.
  */
 class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c {
-    val enabled by c.setting("Place Buttons", false, "Places a button on every second floor block down the middle of the highway, against magma cubes spawning on it")
+    val enabled by c.setting("Place Buttons", false, "Places buttons on the floor down the middle of the highway, against magma cubes spawning on it")
+    val spacing by c.setting("Button Spacing", 1, 1..4, 1, "A button on every this many blocks along the middle, diagonally every this many diagonal steps") { enabled }
     private val stoneButtons by c.setting("Stone Buttons", true, "Also places stone and polished blackstone buttons when carried. Only wooden ones are crafted") { enabled }
     private val restock by c.setting("Restock Buttons", true, "Once none are left, crafts as many as were carried at the start from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
 
