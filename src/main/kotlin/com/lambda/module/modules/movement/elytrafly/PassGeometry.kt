@@ -93,7 +93,11 @@ internal fun laneStep(dir: Vec3d) = dir.horizontalLength() / (abs(dir.x) + abs(d
 internal fun halfWidth(direction: Vec3d) = 0.3 * (abs(direction.x) + abs(direction.z)) / direction.horizontalLength() - WIDTH_MARGIN
 
 /** The heading along [d] tilted [THREAD_TILT] to [lean] across it, [across] it to the right. */
-internal fun tilted(d: Vec3d, across: Vec3d, lean: Int) = d.add(across.multiply(lean * Math.tan(Math.toRadians(THREAD_TILT))))
+internal fun tilted(d: Vec3d, across: Vec3d, lean: Int) = d.add(across.multiply(lean * TAN_THREAD_TILT))
+
+/** How far across a block along the heading tilted [THREAD_TILT] and [THREAD_MAX_TILT] goes, see [tilted] and [swingSide]. */
+private val TAN_THREAD_TILT = Math.tan(Math.toRadians(THREAD_TILT))
+private val TAN_THREAD_MAX_TILT = Math.tan(Math.toRadians(THREAD_MAX_TILT))
 
 /**
  * The side across [dir] the box swings out to with the heading tilted [lean] across it, 1 to the right, -1 to the left,
@@ -107,14 +111,15 @@ internal fun swingSide(dir: Vec3d, lean: Int): Int {
 	val d = forward(dir)
 	if (lean == 0 || abs(d.x * d.z) < 1e-3) return lean
 	val across = across(d)
-	fun side(degrees: Double): Int {
-		val heading = d.add(across.multiply(lean * Math.tan(Math.toRadians(degrees))))
-		val xFirst = abs(heading.x) >= abs(heading.z)
-		// The first leg's move across the way: along x it's d.x · across.x = -d.x · d.z, along z d.z · across.z.
-		return if ((if (xFirst) -d.x * d.z else d.x * d.z) > 0) 1 else -1
+	// The first leg's move across the way: along x it's d.x · across.x = -d.x · d.z, along z d.z · across.z, the other way.
+	val xSide = if (-d.x * d.z > 0) 1 else -1
+	fun side(tan: Double): Int {
+		val x = d.x + across.x * (lean * tan)
+		val z = d.z + across.z * (lean * tan)
+		return if (abs(x) >= abs(z)) xSide else -xSide
 	}
-	val least = side(THREAD_TILT)
-	return if (side(THREAD_MAX_TILT) == least) least else 0
+	val least = side(TAN_THREAD_TILT)
+	return if (side(TAN_THREAD_MAX_TILT) == least) least else 0
 }
 
 /**

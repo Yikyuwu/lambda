@@ -5073,19 +5073,17 @@ abstract class ObstaclePassingMode(
 	 * unloaded.
 	 */
 	private fun SafeContext.findLineDir(look: Vec3d): Vec3d? {
-		val y = startPos.y
-		fun free(at: Vec3d) = passWorld.vanillaSpaceEmpty(glideBox(at, y + searchConfig.minObstacleHeight, y + GLIDE_SIZE), you = false)
 		// How far from [at] the box goes [side] before a wall, to a sixteenth, null with none in [LINE_FIND_HALF].
 		fun reach(at: Vec3d, side: Vec3d): Double? {
 			var lo = 0.0
-			while (free(at.add(side.multiply(lo + 1)))) if (++lo >= LINE_FIND_HALF) return null
+			while (glideFree(at.add(side.multiply(lo + 1)))) if (++lo >= LINE_FIND_HALF) return null
 			var hi = lo + 1
-			repeat(4) { val mid = (lo + hi) / 2; if (free(at.add(side.multiply(mid)))) lo = mid else hi = mid }
+			repeat(4) { val mid = (lo + hi) / 2; if (glideFree(at.add(side.multiply(mid)))) lo = mid else hi = mid }
 			return lo
 		}
 		val middles = ArrayList<Vec3d>()
 		var heading = forward(look)
-		var at = Vec3d(startPos.x, y, startPos.z)
+		var at = startPos
 		var misses = 0
 		var along = 0.0
 		var why = "blocked or in the open"
@@ -5095,9 +5093,9 @@ abstract class ObstaclePassingMode(
 			val side = across(heading)
 			// Into a wall when looked along off it, or a block in the way: the nearest free spot across from it.
 			val spot = generateSequence(0.0) { it + 0.5 }.takeWhile { it <= LINE_FIND_HALF }
-				.flatMap { sequenceOf(it, -it) }.map { at.add(side.multiply(it)) }.firstOrNull { free(it) }
+				.flatMap { if (it == 0.0) sequenceOf(it) else sequenceOf(it, -it) }.map { at.add(side.multiply(it)) }.firstOrNull { glideFree(it) }
 			val right = spot?.let { reach(it, side) }
-			val left = spot?.let { reach(it, side.negate()) }
+			val left = right?.let { reach(spot, side.negate()) }
 			if (spot == null || right == null || left == null) {
 				misses++
 				at = at.add(heading.multiply(LINE_FIND_STEP))
@@ -5159,8 +5157,7 @@ abstract class ObstaclePassingMode(
 		val origin = from ?: startPos
 		val across = across(dir)
 		val step = laneStep(dir)
-		fun free(at: Vec3d) = passWorld.vanillaSpaceEmpty(glideBox(at, at.y + searchConfig.minObstacleHeight, at.y + GLIDE_SIZE), you = false)
-		fun free(along: Double, lane: Int) = free(origin.add(dir.multiply(along)).add(across.multiply(lane * step)))
+		fun free(along: Double, lane: Int) = glideFree(origin.add(dir.multiply(along)).add(across.multiply(lane * step)))
 		if (!free(0.0, 0)) return false
 		// The walls at a few spots ahead, the middle one found each side. A block lying beside you at one of them isn't
 		// the wall, it'd move the line next to the real one across. Not where there's a wall on that side at most of them.
@@ -5184,11 +5181,15 @@ abstract class ObstaclePassingMode(
 		}
 		if (abs(shift) < if (from != null) CENTER_DRIFT else if (straight) 0.01 else 0.1) return false
 		val center = origin.add(across.multiply(shift))
-		if (!center.hasFloor() || !free(center)) return false
+		if (!center.hasFloor() || !glideFree(center)) return false
 		startPos = if (from != null) startPos.add(across.multiply(shift)) else center.subtract(dir.multiply(CENTER_BACKOFF))
 		ElytraFly.debug { "Moved the line ${across.multiply(shift).describe(dir)}, to the middle of the highway${if (from != null) " (drifted)" else ""}" }
 		return true
 	}
+
+	/** Whether the gliding box at [at] fits there, from as low as obstacles count up, the world's blocks only, see [centerLine]. */
+	private fun SafeContext.glideFree(at: Vec3d) =
+		passWorld.vanillaSpaceEmpty(glideBox(at, at.y + searchConfig.minObstacleHeight, at.y + GLIDE_SIZE), you = false)
 
 	/** When the line was last looked at for drifting off the highway's middle, see [recenterLine]. */
 	private var recenteredAt = 0
@@ -9721,14 +9722,14 @@ abstract class ObstaclePassingMode(
 		// Across only, the line may be on the floor below you or a layer up, which would shorten it.
 		val travelDiff = Vec3d(player.x - startPos.x, 0.0, player.z - startPos.z).normalize()
 		val travel = lockYawToStep(travelDiff)
-		// Fixed for the flight, see [setUpLine]. Where you went snapped to the same step is that one but for the last bit
-		// of its length, taken as before so a flight along a step flies as it did; off it by over half a step, or along a
-		// highway between steps, it'd turn the line.
+		// Fixed for the flight, see [setUpLine]. Where you went snapped to the line's own step, equal but for rounding, is
+		// taken as before, so a flight along a step flies as it did; snapped to another, e.g. over half a step off it or
+		// along a highway between steps, it'd turn the line.
 		val line = lineDir ?: return travel
 		return if (travel.dotProduct(line) > 1 - SAME_LINE_DIR) travel else line
 	}
 
-	/** The way [degrees] from +x toward +z goes, a block long, as [lockYawToStep] turns a step into one. */
+	/** The way [degrees] from +x toward +z goes, a block long, see [lockYawToStep]. */
 	private fun stepDir(degrees: Double): Vec3d {
 		val yaw = Math.toRadians((degrees % 360.0 + 360.0) % 360.0)
 		return Vec3d(cos(yaw), 0.0, sin(yaw))
@@ -9743,23 +9744,10 @@ abstract class ObstaclePassingMode(
 	private fun lockYawToStep(vector: Vec3d): Vec3d {
 		// No step, no snapping. Dividing by it would round NaN, which throws.
 		if (searchConfig.directionStep <= 0.0) return vector
-		val yaw = atan2(vector.z, vector.x)
-		val yawDegrees = Math.toDegrees(yaw)
-
-		val normalizedYaw = (yawDegrees % 360.0 + 360.0) % 360.0
-
-		val steps = normalizedYaw / searchConfig.directionStep
-		val roundedSteps = steps.roundToInt()
-		val lockedYawDegrees = roundedSteps * searchConfig.directionStep
-
-		val normalizedLockedYawDegrees = (lockedYawDegrees % 360.0 + 360.0) % 360.0
-		val lockedYaw = Math.toRadians(normalizedLockedYawDegrees)
-
+		val normalizedYaw = (degreesOf(vector) % 360.0 + 360.0) % 360.0
+		val locked = stepDir((normalizedYaw / searchConfig.directionStep).roundToInt() * searchConfig.directionStep)
 		val horizontalLength = hypot(vector.x, vector.z)
-		val x = cos(lockedYaw) * horizontalLength
-		val z = sin(lockedYaw) * horizontalLength
-
-		return Vec3d(x, vector.y, z)
+		return Vec3d(locked.x * horizontalLength, vector.y, locked.z * horizontalLength)
 	}
 
 	/**
