@@ -243,6 +243,8 @@ object HighwayTools : Module(
     private const val FOOD_RETRY_TICKS = 600
     private const val JOIN_GRACE_TICKS = 40
     private const val BLOCKS_TARGET = 128
+    /** How many slices either way a magma cube's spawn box reaches into, see [spawnSpots]. */
+    private const val SPAWN_SLICES = 2
     /**
      * The nether biomes magma cubes don't spawn in, no buttons are placed there. A fortress spawns them in any biome, but
      * only inside its pieces, and those stay below y 100, under the highways at 120.
@@ -686,7 +688,8 @@ object HighwayTools : Module(
         val slice = generateSlice()
         val button = with(buttons) { floorButton() }
         val index = highwayIndex(player.blockPos)
-        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button)
+        val spots = spawnSpots(slice)
+        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots)
 
         if (!done(index)) return null
         return safeSteps(forward = true, CRUISE_LOOKAHEAD)
@@ -866,7 +869,7 @@ object HighwayTools : Module(
             val slice = generateSlice()
             val button = with(buttons) { floorButton() }
             blueprintPlacing = button?.placing
-            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }), button)
+            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }), button, spawnSpots(slice))
         }
         this.blueprint = blueprint
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
@@ -882,8 +885,9 @@ object HighwayTools : Module(
     private fun SafeContext.rollSlices(task: BuildTask) {
         val slice = generateSlice()
         val button = with(buttons) { floorButton() }
+        val spots = spawnSpots(slice)
         var dropped = false
-        while (slices.isNotEmpty() && sliceDone(slice, slices.first(), button) { task.isPending(it) }) {
+        while (slices.isNotEmpty() && sliceDone(slice, slices.first(), button, spots) { task.isPending(it) }) {
             slices.removeFirst()
             dropped = true
         }
@@ -893,10 +897,12 @@ object HighwayTools : Module(
         rolling = false
     }
 
-    private fun SafeContext.sliceDone(slice: Structure, index: Int, button: TargetState.FloorButton?, pending: (BlockPos) -> Boolean = { false }): Boolean {
+    private fun SafeContext.sliceDone(
+        slice: Structure, index: Int, button: TargetState.FloorButton?, spots: Set<BlockPos>, pending: (BlockPos) -> Boolean = { false },
+    ): Boolean {
         val structure = fitToBorder(slice.move(highwayPos(index)))
         return structure.all { (pos, state) ->
-            val target = if (button != null) buttonTarget(structure, pos, state, button) else state
+            val target = if (button != null) buttonTarget(structure, pos, state, button, spots) else state
             target.matches(blockState(pos), pos) && !pending(pos)
         }
     }
@@ -937,30 +943,39 @@ object HighwayTools : Module(
         return fitted + seal.associateWith { TargetState.Solid(emptySet()) }
     }
 
-    /**
-     * Buttons on the floor down the highway's middle line, every [HighwayButtons.spacing] blocks along it (diagonally
-     * that many diagonal steps), counted from the world grid so a restart keeps the same spots. Only where the slice has a floor
-     * or pavement below.
-     */
-    private fun SafeContext.withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
+    /** Buttons on the floor where a magma cube could spawn, see [spawnSpots]. */
+    private fun SafeContext.withButtons(structure: Structure, button: TargetState.FloorButton?, spots: Set<BlockPos>): Structure =
         if (button == null) structure
-        else structure.mapValues { (pos, state) -> buttonTarget(structure, pos, state, button) }
+        else structure.mapValues { (pos, state) -> buttonTarget(structure, pos, state, button, spots) }
 
     /**
-     * [button] on a button spot, not in a biome magma cubes don't spawn in. Elsewhere on the floor a button is left as it
-     * is, e.g. one from a run started further across, whose middle line was another: wooden ones want an axe to break,
-     * and a digger carries none.
+     * [button] on one of the [spots], not in a biome magma cubes don't spawn in. Elsewhere on the floor a button is left
+     * as it is, e.g. one placed by an earlier run: wooden ones want an axe to break, and a digger carries none.
      */
-    private fun SafeContext.buttonTarget(structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton): TargetState {
+    private fun SafeContext.buttonTarget(
+        structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton, spots: Set<BlockPos>,
+    ): TargetState {
         if (state != TargetState.Air || pos.y != startPos.y || structure[pos.down()]?.isEmpty() != false) return state
-        return if (onMiddleLine(pos) && Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, buttons.spacing) == 0 &&
-            NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
+        val index = highwayIndex(pos)
+        val spot = (index - SPAWN_SLICES..index + SPAWN_SLICES).any { pos.subtract(highwayPos(it)) in spots }
+        return if (spot && NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
         else TargetState.FloorButton(button.accepts, placing = false)
     }
 
-    /** Whether [pos] is on the line [startPos] goes along, a whole number of steps of the octant from it. */
-    private fun onMiddleLine(pos: BlockPos) =
-        (pos.x - startPos.x) * octant.offsetZ == (pos.z - startPos.z) * octant.offsetX
+    /**
+     * The floor blocks of [slice], relative to it, a magma cube can spawn on once dug: its spawn box is 4 times a small
+     * one's, 2.08 wide and high, so all 3 x 3 blocks around and 3 up are open, along the highway into the slices
+     * before and after. A button there stops it, the box itself ignores buttons, they don't collide. None on a highway
+     * too narrow for the box, e.g. 2 wide, or on a diagonal less than 5 straight across.
+     */
+    private fun spawnSpots(slice: Structure): Set<BlockPos> {
+        val step = BlockPos(octant.offsetX, 0, octant.offsetZ)
+        fun open(pos: BlockPos) = (-SPAWN_SLICES..SPAWN_SLICES).any { slice[pos.subtract(step.multiply(it))] == TargetState.Air }
+        return slice.entries.filter { (pos, state) ->
+            state == TargetState.Air && pos.y == 0 && slice[pos.down()]?.isEmpty() == false &&
+                (-1..1).all { dx -> (-1..1).all { dz -> (0..2).all { dy -> open(pos.add(dx, dy, dz)) } } }
+        }.mapTo(mutableSetOf()) { it.key }
+    }
 
     private fun generateSlice(): Structure {
         val structure = mutableMapOf<BlockPos, TargetState>()

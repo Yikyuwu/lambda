@@ -40,14 +40,13 @@ import net.minecraft.item.ItemStack
 import net.minecraft.registry.tag.ItemTags
 
 /**
- * Places buttons down the middle of the highway's floor against magma cubes spawning on it. Once on the last stack,
+ * Places buttons on the highway's floor where magma cubes could spawn. Once on the last stack,
  * crafts back up to as many as were carried at the start, at least two stacks, from a carried shulker of logs, or one the
  * ender chest trip takes and puts back afterwards. Early, so a restock waits for a safe moment, e.g. a mob gone, instead
  * of the highway going on without buttons.
  */
 class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c {
-    val enabled by c.setting("Place Buttons", false, "Places buttons on the floor down the middle of the highway, against magma cubes spawning on it")
-    val spacing by c.setting("Button Spacing", 1, 1..4, 1, "A button on every this many blocks along the middle, diagonally every this many diagonal steps") { enabled }
+    val enabled by c.setting("Place Buttons", false, "Places a button on every floor block a magma cube could spawn on, where 3 x 3 blocks around it and 3 up are open. Narrower highways need none")
     private val stoneButtons by c.setting("Stone Buttons", true, "Also places stone and polished blackstone buttons when carried. Only wooden ones are crafted") { enabled }
     private val restock by c.setting("Restock Buttons", true, "Once on the last stack, crafts back up to as many as were carried at the start, at least two stacks, from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
 
