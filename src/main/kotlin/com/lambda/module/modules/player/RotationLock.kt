@@ -27,6 +27,7 @@ import com.lambda.interaction.managers.rotating.IRotationRequest.Companion.rotat
 import com.lambda.interaction.managers.rotating.RotationMode
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
+import com.lambda.task.tasks.OpenContainerTask
 import kotlin.math.roundToInt
 
 @Suppress("unused")
@@ -51,6 +52,8 @@ object RotationLock : Module(
 	        }
 
         listen<TickEvent.Pre> {
+            // Its request would win over the turn to a container being opened, e.g. by a restock, which then never opens.
+            if (OpenContainerTask.isOpening) return@listen
             val yaw = when (yawMode) {
                 Mode.Custom -> customYaw
                 Mode.Snap -> {
