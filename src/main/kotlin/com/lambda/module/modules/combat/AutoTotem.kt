@@ -71,7 +71,7 @@ object AutoTotem : Module(
 	                ?.let { totems ->
 		                val cursor = player.currentScreenHandler.cursorStack
 		                val targetSlot = player.currentScreenHandler.slots
-			                .findLast { !cursor.isEmpty && it.canInsert(cursor) }
+			                .findLast { !cursor.isEmpty && it.stack.isEmpty && it.canInsert(cursor) }
 
 						inventoryRequest {
 							targetSlot?.let { pickup(it.id, 0) }
