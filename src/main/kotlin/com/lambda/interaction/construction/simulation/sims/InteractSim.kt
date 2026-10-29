@@ -106,7 +106,7 @@ class InteractSim internal constructor(simInfo: InteractSimInfo)
 		val testBlockState = blockState(pos)
 		// Only the target itself can be air placed, clicking an empty neighbor would place into that neighbor.
 		val shape = testBlockState.getOutlineShape(world, pos).let { outlineShape ->
-			if (!outlineShape.isEmpty || !interactConfig.airPlace.isEnabled || pos != this@InteractSim.pos) outlineShape
+			if (!outlineShape.isEmpty || !interactConfig.airPlace.isEnabled || !preProcessing.info.airPlace || pos != this@InteractSim.pos) outlineShape
 			else VoxelShapes.fullCube()
 		}
 		if (shape.isEmpty) return

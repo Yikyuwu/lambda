@@ -872,7 +872,7 @@ object HighwayTools : Module(
     private fun SafeContext.sliceDone(slice: Structure, index: Int, button: TargetState.FloorButton?, pending: (BlockPos) -> Boolean = { false }): Boolean {
         val structure = fitToBorder(slice.move(highwayPos(index)))
         return structure.all { (pos, state) ->
-            val target = if (button != null && isButtonSpot(structure, pos, state)) button else state
+            val target = if (button != null) buttonTarget(structure, pos, state, button) else state
             target.matches(blockState(pos), pos) && !pending(pos)
         }
     }
@@ -920,11 +920,17 @@ object HighwayTools : Module(
      */
     private fun withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
         if (button == null) structure
-        else structure.mapValues { (pos, state) -> if (isButtonSpot(structure, pos, state)) button else state }
+        else structure.mapValues { (pos, state) -> buttonTarget(structure, pos, state, button) }
 
-    private fun isButtonSpot(structure: Structure, pos: BlockPos, state: TargetState) =
-        state == TargetState.Air && pos.y == startPos.y && onMiddleLine(pos) &&
-            Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, 2) == 0 && structure[pos.down()]?.isEmpty() == false
+    /**
+     * [button] on a button spot. Elsewhere on the floor a button is left as it is, e.g. one from a run started further
+     * across, whose middle line was another: wooden ones want an axe to break, and a digger carries none.
+     */
+    private fun buttonTarget(structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton): TargetState {
+        if (state != TargetState.Air || pos.y != startPos.y || structure[pos.down()]?.isEmpty() != false) return state
+        return if (onMiddleLine(pos) && Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, 2) == 0) button
+        else TargetState.FloorButton(button.accepts, placing = false)
+    }
 
     /** Whether [pos] is on the line [startPos] goes along, a whole number of steps of the octant from it. */
     private fun onMiddleLine(pos: BlockPos) =

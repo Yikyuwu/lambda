@@ -190,9 +190,10 @@ sealed class TargetState : StateMatcher {
     }
 
     /**
-     * A button on the top of the block below, of any kind and facing, e.g. so mobs can't spawn there. The one placed is one
-     * [accepts] in the inventory, not the offhand, like HighwayButtons counts them. While [placing] is off, e.g. with none
-     * left, air does too, so placed ones aren't broken.
+     * A button placed on the top of the block below, e.g. so mobs can't spawn there. Any button there will do, of any
+     * kind, facing or face, wooden ones want an axe to break. The one placed is one [accepts] in the inventory, not the
+     * offhand, like HighwayButtons counts them. While [placing] is off, e.g. with none left, air does too, so placed ones
+     * aren't broken.
      */
     class FloorButton(val accepts: (ItemStack) -> Boolean, val placing: Boolean) : TargetState() {
         override fun toString() = "Floor button"
@@ -202,7 +203,7 @@ sealed class TargetState : StateMatcher {
             state: BlockState,
             pos: BlockPos,
             ignoredProperties: Collection<Property<*>>
-        ) = isFloorButton(state) || !placing && state.isAir
+        ) = state.block is ButtonBlock || !placing && state.isAir
 
         context(automatedSafeContext: AutomatedSafeContext)
         override fun getStack(pos: BlockPos): ItemStack =
@@ -216,9 +217,5 @@ sealed class TargetState : StateMatcher {
             else getStack(pos).item.block.defaultState.with(Properties.BLOCK_FACE, BlockFace.FLOOR)
 
         override fun isEmpty() = !placing
-
-        companion object {
-            fun isFloorButton(state: BlockState) = state.block is ButtonBlock && state.get(Properties.BLOCK_FACE) == BlockFace.FLOOR
-        }
     }
 }

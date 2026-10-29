@@ -108,7 +108,7 @@ abstract class Sim<T : BuildResult> : Results<T> {
             boxes.forEach { box ->
                 launch {
                     if (!buildConfig.strictRayCast) {
-                        box.scanClosestPoints(pov, sides, preProcessing, interactConfig.airPlace.isEnabled) { vec, side ->
+                        box.scanClosestPoints(pov, sides, preProcessing, interactConfig.airPlace.isEnabled && preProcessing?.info?.airPlace != false) { vec, side ->
                             if (pov distSq vec > reachSq)
                                 misses.add(Pair(vec, side))
                             else {

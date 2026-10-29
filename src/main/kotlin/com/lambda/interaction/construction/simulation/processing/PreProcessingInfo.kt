@@ -36,6 +36,8 @@ interface PreProcessingInfo {
 	val sneak: Boolean?
 	val noCaching: Boolean
 	val omitInteraction: Boolean
+	/** Whether it may be air placed, with that on: not where the side clicked decides how it's attached. */
+	val airPlace: Boolean
 
 	companion object {
 		context(_: AutomatedSafeContext)
@@ -49,6 +51,7 @@ interface PreProcessingInfo {
 			override val sneak = null
 			override val noCaching = true
 			override val omitInteraction = false
+			override val airPlace = true
 		}
 	}
 }
@@ -62,7 +65,8 @@ class PreProcessingInfoAccumulator(
 	override var placing: Boolean = true,
 	override var sneak: Boolean? = null,
 	override var noCaching: Boolean = false,
-	override var omitInteraction: Boolean = false
+	override var omitInteraction: Boolean = false,
+	override var airPlace: Boolean = true,
 ) : PreProcessingInfo {
 	@InfoAccumulator
 	fun offerSurfaceScan(scan: SurfaceScan) {
@@ -118,6 +122,11 @@ class PreProcessingInfoAccumulator(
 	@InfoAccumulator
 	fun omitInteraction() {
 		omitInteraction = true
+	}
+
+	@InfoAccumulator
+	fun noAirPlace() {
+		airPlace = false
 	}
 
 	@InfoAccumulator

@@ -34,6 +34,8 @@ object BlockFacePreProcessor : PropertyPreProcessor {
 	context(safeContext: SafeContext)
     override fun PreProcessingInfoAccumulator.preProcess(state: BlockState, targetState: BlockState, pos: BlockPos) {
         val property = targetState.get(Properties.BLOCK_FACE) ?: return
+        // Air placed, the server picks the face from where you look, e.g. a floor button ends up on the wall.
+        noAirPlace()
 	    when (property) {
 			BlockFace.FLOOR -> retainSides(Direction.DOWN)
 		    BlockFace.CEILING -> retainSides(Direction.UP)
