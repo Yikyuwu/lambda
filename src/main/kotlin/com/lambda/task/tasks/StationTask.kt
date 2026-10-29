@@ -219,7 +219,7 @@ abstract class StationTask<P : StationPhase>(
 
     protected fun enter(next: P, extraTicks: Int = 0) {
         // Which step it got stuck in, should it.
-        LOG.info("[$title] ${next.description}")
+        log(next.description)
         phase = next
         phaseTimeout = next.timeoutTicks?.plus(extraTicks) ?: Int.MAX_VALUE
         phaseTimer.reset()
@@ -335,19 +335,35 @@ abstract class StationTask<P : StationPhase>(
     /** Stacks matching [predicate] in the inventory, which is all a container reaches. */
     protected fun SafeContext.inInventory(predicate: (ItemStack) -> Boolean) = carried(predicate, offhand = false)
 
-    /** Items matching [predicate] in the inventory. */
-    protected fun SafeContext.carriedCount(predicate: (ItemStack) -> Boolean) =
-        player.hotbarAndInventorySlots.sumOf { if (predicate(it.stack)) it.stack.count else 0 }
-
     /** Whether there's a free slot. Otherwise throws away a disposable stack, or fails if there's none. */
     protected fun SafeContext.hasFreeSlotOrThrow(whereIsShulker: () -> String): Boolean {
         if (player.hotbarAndInventorySlots.any { it.stack.isEmpty }) return true
-        val junk = player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
+        val junk = junkSlot()
         if (junk == null) failure("Inventory is full and has nothing to throw away. ${whereIsShulker()}")
-        else LOG.info("[$title] throwing ${junk.stack.count}x ${junk.stack.name.string} to make room, sent ${submit { throwStack(junk.id) }}")
+        else log("throwing ${junk.stack.count}x ${junk.stack.name.string} to make room, sent ${submit { throwStack(junk.id) }}")
         return false
     }
 
+    /** An inventory slot with a disposable stack, thrown away to make room. */
+    protected fun SafeContext.junkSlot() =
+        player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
+
+    protected fun log(msg: String) = LOG.info("[$title] $msg")
+
+    /**
+     * Makes room to take [what] out of the open container [handler]: with no free slot, throws away a disposable stack
+     * [keep] doesn't want. Null while there's a free slot, else whether one was thrown, warning when there's none.
+     */
+    protected fun SafeContext.throwJunkIfFull(handler: ScreenHandler, what: String, keep: (ItemStack) -> Boolean = { false }): Boolean? {
+        // A digger's inventory is usually full, and a quick move into it would silently do nothing.
+        if (handler.playerSlots.any { it.stack.isEmpty }) return null
+        val junk = handler.playerSlots.firstOrNull { it.stack.item in inventoryConfig.disposables && !keep(it.stack) } ?: run {
+            warn("Inventory is full and has nothing to throw away, can't take $what")
+            return false
+        }
+        submit { throwStack(junk.id) }
+        return true
+    }
 
     /**
      * Whether the container at [pos] can be broken now. A mob nearby that would pick up its drop is waited out,
@@ -377,7 +393,7 @@ abstract class StationTask<P : StationPhase>(
 
     /** Logs why the phase failed, to find where it got stuck, then lets [stepFailed] recover. */
     protected fun SafeContext.phaseFailed(reason: String?) {
-        LOG.info("[$title] ${phase.description} failed: $reason")
+        log("${phase.description} failed: $reason")
         stepFailed(reason)
     }
 
@@ -420,6 +436,9 @@ abstract class StationTask<P : StationPhase>(
     companion object {
         /** Swap button that targets the offhand instead of a hotbar slot. */
         const val OFFHAND_BUTTON = 40
+        const val STACK_SIZE = 64
+        /** Extra time for a phase per stack it moves. */
+        const val TICKS_PER_STACK = 10
         private const val MAX_ATTEMPTS = 3
         private const val RESUME_DELAY_TICKS = 10
         private const val CURSOR_EXTRA_CLICKS = 4
@@ -432,6 +451,11 @@ abstract class StationTask<P : StationPhase>(
         private var warnedPlayer: String? = null
         /** How close to a placed container a mob that would pick up its drop holds off breaking it. */
         private const val GRABBER_RANGE = 6.0
+
+        /** Items matching [predicate] in the inventory, and with [offhand] also there, e.g. where food is often kept. */
+        fun SafeContext.carriedCount(predicate: (ItemStack) -> Boolean, offhand: Boolean = false) =
+            player.inventory.mainStacks.sumOf { if (predicate(it)) it.count else 0 } +
+                if (offhand && predicate(player.offHandStack)) player.offHandStack.count else 0
 
         /** Another player close enough to see a placed container or take its drop, friends too since they'd pick it up as well. */
         fun SafeContext.nearbyPlayer() =

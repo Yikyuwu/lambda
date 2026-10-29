@@ -58,12 +58,12 @@ class TakeFromShulkerTask @Ta5kBuilder constructor(
     private var carriedAtStart = 0
 
     /** Also the offhand, which is where food is often kept, like the module that asked for it counts. */
-    private fun SafeContext.carried() = carriedCount(isWanted) + player.offHandStack.let { if (isWanted(it)) it.count else 0 }
+    private fun SafeContext.carried() = carriedCount(isWanted, offhand = true)
     private fun inShulker(stack: ItemStack) =
         if (isShulker(stack)) stack.shulkerBoxContents.sumOf { if (isWanted(it)) it.count else 0 } else 0
 
     override fun SafeContext.resume() {
-        if (stopping) return if (placedPos != null) collect() else finish()
+        if (endIfStopping()) return
         val pos = placedPos ?: return place()
         open(pos, Phase.Taking, extraTicks = TICKS_PER_STACK * player.hotbarAndInventorySlots.size)
     }
@@ -76,15 +76,10 @@ class TakeFromShulkerTask @Ta5kBuilder constructor(
 
     private fun SafeContext.place() {
         carriedAtStart = carried()
-        val needed = target - carriedAtStart
-        val shulkers = player.hotbarAndInventorySlots.filter { inShulker(it.stack) > 0 }
-        val shulker = shulkers.filter { inShulker(it.stack) >= needed }.minByOrNull { inShulker(it.stack) }
-            ?: shulkers.maxByOrNull { inShulker(it.stack) }
-            ?: run {
-                warn("No shulker with $what left")
-                return finish()
-            }
-
+        val shulker = pickShulker(target - carriedAtStart, ::inShulker) ?: run {
+            warn("No shulker with $what left")
+            return finish()
+        }
         info("Taking $what from ${shulker.stack.name.string}")
         placeShulker(shulker)
     }
@@ -110,40 +105,20 @@ class TakeFromShulkerTask @Ta5kBuilder constructor(
             return true
         }
         val stack = stacks.minByOrNull { it.stack.count } ?: return false
-        // A digger's inventory is usually full, and a quick move into it would silently do nothing.
-        if (handler.playerSlots.none { it.stack.isEmpty }) {
-            val junk = handler.playerSlots.firstOrNull { it.stack.item in inventoryConfig.disposables && !isWanted(it.stack) }
-            if (junk == null) {
-                warn("Inventory is full and has nothing to throw away, can't take $what")
-                return false
-            }
-            submit { throwStack(junk.id) }
-            return true
-        }
+        throwJunkIfFull(handler, what, keep = isWanted)?.let { return it }
         submit { quickMove(stack.id) }
         return true
     }
 
     override fun SafeContext.workFailed(reason: String?) {
-        when (phase) {
-            Phase.Opening -> if (++openAttempts < MAX_OPEN_ATTEMPTS) resume() else {
-                warn("Couldn't open the shulker ($reason), picking it back up")
-                collect()
-            }
-            else -> {
-                warn("Failed while taking $what ($reason)")
-                collect()
-            }
-        }
+        if (retryOpening(reason)) return
+        warn("Failed while taking $what ($reason)")
+        collect()
     }
 
     override fun SafeContext.finish() {
         val took = carried() - carriedAtStart
         if (took > 0) info("Took $took $what")
         success()
-    }
-
-    private companion object {
-        const val TICKS_PER_STACK = 10
     }
 }

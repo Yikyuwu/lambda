@@ -190,8 +190,9 @@ sealed class TargetState : StateMatcher {
     }
 
     /**
-     * A button on the top of the block below, of any kind and facing, e.g. so mobs can't spawn there. The one placed is a
-     * carried one [accepts]. While [placing] is off, e.g. with none left, air does too, so placed ones aren't broken.
+     * A button on the top of the block below, of any kind and facing, e.g. so mobs can't spawn there. The one placed is one
+     * [accepts] in the inventory, not the offhand, like HighwayButtons counts them. While [placing] is off, e.g. with none
+     * left, air does too, so placed ones aren't broken.
      */
     class FloorButton(val accepts: (ItemStack) -> Boolean, val placing: Boolean) : TargetState() {
         override fun toString() = "Floor button"

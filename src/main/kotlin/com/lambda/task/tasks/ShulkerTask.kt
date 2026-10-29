@@ -26,6 +26,7 @@ import com.lambda.task.tasks.PlaceContainerTask.Companion.isSafeContainerSpot
 import com.lambda.util.BlockUtils.blockState
 import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.item.ItemUtils
+import com.lambda.util.player.SlotUtils.hotbarAndInventorySlots
 import com.lambda.util.world.closestEntity
 import net.minecraft.block.ShulkerBoxBlock
 import net.minecraft.entity.ItemEntity
@@ -83,7 +84,10 @@ abstract class ShulkerTask<P : StationPhase>(
         }
     }
 
-    override fun SafeContext.packUp() = when {
+    override fun SafeContext.packUp() = packUpShulker()
+
+    /** Picks the shulker back up for [stop], see [packUp]. */
+    protected fun SafeContext.packUpShulker() = when {
         phase == placing || phase in collectPhases -> true
         placedPos == null -> false
         else -> {
@@ -91,6 +95,32 @@ abstract class ShulkerTask<P : StationPhase>(
             collect()
             true
         }
+    }
+
+    /**
+     * The shulker to place for [needed] of what [amountIn] counts: the one with the fewest that still has enough, so
+     * they're used up one after another, else the fullest. Null with none holding any.
+     */
+    protected fun SafeContext.pickShulker(needed: Int, amountIn: (ItemStack) -> Int): Slot? {
+        val shulkers = player.hotbarAndInventorySlots.map { it to amountIn(it.stack) }.filter { it.second > 0 }
+        return (shulkers.filter { it.second >= needed }.minByOrNull { it.second } ?: shulkers.maxByOrNull { it.second })?.first
+    }
+
+    /** Once stopped, picks the shulker back up or ends instead of going on. Whether it's stopping. */
+    protected fun SafeContext.endIfStopping(): Boolean {
+        if (!stopping) return false
+        if (placedPos != null) collect() else finish()
+        return true
+    }
+
+    /** Opening the shulker failed: tries again, else picks it back up. Whether it was opening that failed. */
+    protected fun SafeContext.retryOpening(reason: String?): Boolean {
+        if (phase != opening) return false
+        if (++openAttempts < MAX_OPEN_ATTEMPTS) resume() else {
+            warn("Couldn't open the shulker ($reason), picking it back up")
+            collect()
+        }
+        return true
     }
 
     protected fun SafeContext.placeShulker(shulker: Slot) {

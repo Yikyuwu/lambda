@@ -384,7 +384,6 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
                 }
             }
         }
-        private const val TICKS_PER_STACK = 10
         private const val MIN_SILK_DURABILITY = 0.01f
         /** Until the swap shows in the inventory, so it isn't swapped back out. */
         private const val HOTBAR_COOLDOWN_TICKS = 10

@@ -17,7 +17,6 @@
 
 package com.lambda.task.tasks
 
-import com.lambda.Lambda.LOG
 import com.lambda.context.Automated
 import com.lambda.context.SafeContext
 import com.lambda.interaction.managers.inventory.InventoryRequest.InvRequestBuilder
@@ -72,15 +71,16 @@ class CraftButtonsTask @Ta5kBuilder constructor(
      * one craft until the server says it took all, which comes with the inventory it crafted into.
      */
     private var outputWait = 0
-    /** Set when crafting failed once, then it only takes what's in the grid back out. */
+    /** Set when crafting failed once or the task is stopped, then it only takes what's in the grid back out. */
     private var clearing = false
+    /** Set once the grid is emptied again after the leftovers went back, which may have made room for it. */
+    private var gridRetried = false
 
-    /** Also the offhand, like the module that asked for it counts. */
-    private fun SafeContext.buttons() = carriedCount(isButton) + player.offHandStack.let { if (isButton(it)) it.count else 0 }
+    private fun SafeContext.buttons() = carriedCount(isButton)
     private fun SafeContext.missing() = target - buttons()
 
     override fun SafeContext.resume() {
-        if (stopping) return if (placedPos != null) collect() else finish()
+        if (endIfStopping()) return
         val pos = placedPos ?: return place()
         if (crafted) open(pos, Phase.Returning, extraTicks = TICKS_PER_STACK * player.hotbarAndInventorySlots.size)
         else open(pos, Phase.Taking, extraTicks = TICKS_PER_STACK * logsNeeded().stacks)
@@ -88,11 +88,18 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
     override fun SafeContext.onPlaced() = resume()
 
+    /** Mid-craft the grid is emptied first, then the shulker picked up, so nothing is left in it. */
+    override fun SafeContext.packUp(): Boolean {
+        if (phase != Phase.Crafting) return packUpShulker()
+        clearing = true
+        return true
+    }
+
     override fun SafeContext.tickWork() {
         when (phase) {
             Phase.Taking -> containerStep(onDone = { startCrafting() }) { take(it) }
             Phase.Crafting -> craft()
-            Phase.Returning -> containerStep(onDone = { collect() }) { putBack(it) }
+            Phase.Returning -> containerStep(onDone = { returned() }) { putBack(it) }
             else -> {}
         }
     }
@@ -100,47 +107,39 @@ class CraftButtonsTask @Ta5kBuilder constructor(
     private fun SafeContext.place() {
         buttonsAtStart = buttons()
         val needed = logsNeeded()
-        val shulkers = player.hotbarAndInventorySlots.filter { logsIn(it.stack) > 0 }
-        // The one with the fewest that still has enough, so they're used up one after another.
-        val shulker = shulkers.filter { logsIn(it.stack) >= needed }.minByOrNull { logsIn(it.stack) }
-            ?: shulkers.maxByOrNull { logsIn(it.stack) }
-            ?: run {
-                warn("No shulker with logs left")
-                return finish()
-            }
+        val shulker = pickShulker(needed, ::logsIn) ?: run {
+            warn("No shulker with logs left")
+            return finish()
+        }
         info("Crafting ${missing()} buttons from ${shulker.stack.name.string}")
-        LOG.info("[Restocking buttons] ${buttons()} carried, target $target, $needed logs needed, ${logsIn(shulker.stack)} in ${shulker.stack.name.string}")
+        log("${buttons()} carried, target $target, $needed logs needed, ${logsIn(shulker.stack)} in ${shulker.stack.name.string}")
         placeShulker(shulker)
     }
 
     /** Logs still to take: a log makes 4 planks, a plank one button, and carried planks and logs count. */
     private fun SafeContext.logsNeeded(): Int {
         val planksNeeded = missing() - carriedCount(::isPlank)
-        return (ceilDiv(planksNeeded, PLANKS_PER_LOG) - carriedCount(::isLog)).coerceAtLeast(0)
+        return (Math.ceilDiv(planksNeeded, PLANKS_PER_LOG) - carriedCount(::isLog)).coerceAtLeast(0)
     }
 
     /** Takes whole stacks of logs, throwing away junk to make room. */
     private fun SafeContext.take(handler: ScreenHandler): Boolean {
-        if (logsNeeded() <= 0) return false
+        val needed = logsNeeded()
+        if (needed <= 0) return false
         val logs = handler.containerSlots.filter { isLog(it.stack) }
         // The smallest that's enough, so fewer leftovers go back.
-        val from = logs.filter { it.stack.count >= logsNeeded() }.minByOrNull { it.stack.count }
+        val from = logs.filter { it.stack.count >= needed }.minByOrNull { it.stack.count }
             ?: logs.maxByOrNull { it.stack.count }
             ?: return false
-        if (handler.playerSlots.none { it.stack.isEmpty }) {
-            val junk = handler.playerSlots.firstOrNull { it.stack.item in inventoryConfig.disposables } ?: run {
-                warn("Inventory is full and has nothing to throw away, can't take logs")
-                return false
-            }
-            submit { throwStack(junk.id) }
-            return true
-        }
-        LOG.info("[Restocking buttons] taking ${from.stack.count}x ${from.stack.name.string}")
+        throwJunkIfFull(handler, "logs")?.let { return it }
+        log("taking ${from.stack.count}x ${from.stack.name.string}")
         submit { quickMove(from.id) }
         return true
     }
 
-    private fun startCrafting() {
+    /** The grid is the inventory's, which can't be reached with the shulker open. */
+    private fun SafeContext.startCrafting() {
+        closeContainer()
         enter(Phase.Crafting)
         fill = 0
     }
@@ -164,32 +163,31 @@ class CraftButtonsTask @Ta5kBuilder constructor(
             return
         }
 
-        if (!grid.stack.isEmpty && !clearing && grid.stack.count < fill) return topUp(grid)
+        if (clearing) return filledGridSlot()?.let { takeOut(it) } ?: doneCrafting()
+        // Anything in the rest of the grid would spoil the recipe.
+        GRID_SLOTS.drop(1).map(handler::getSlot).firstOrNull { !it.stack.isEmpty }?.let { return takeOut(it) }
+
+        if (!grid.stack.isEmpty && grid.stack.count < fill) return topUp(grid)
 
         if (!grid.stack.isEmpty) {
             val result = output.stack
-            if (result.isEmpty && !clearing && ++outputWait < OUTPUT_WAIT_TICKS) return
-            if (clearing || result.isEmpty || !(isPlank(result) || isButton(result))) {
-                // Nothing to craft, e.g. something else was in it, so it goes back into the inventory.
-                if (!hasRoomFor(grid.stack)) return makeRoomOrStop(grid.stack)
-                LOG.info("[Restocking buttons] taking ${grid.stack.count}x ${grid.stack.name.string} back out of the grid")
-                act { quickMove(GRID_SLOT) }
-                return
-            }
+            if (result.isEmpty && ++outputWait < OUTPUT_WAIT_TICKS) return
+            // Nothing to craft, e.g. something else was in it, so it goes back into the inventory.
+            if (result.isEmpty || !(isPlank(result) || isButton(result))) return takeOut(grid)
             if (!hasRoomFor(result)) return makeRoomOrStop(result)
-            LOG.info("[Restocking buttons] crafting ${result.name.string} from ${grid.stack.count}x ${grid.stack.name.string}")
+            log("crafting ${result.name.string} from ${grid.stack.count}x ${grid.stack.name.string}")
             act { quickMove(OUTPUT_SLOT) }
             fill = 0
             return
         }
 
         val missing = missing()
-        if (clearing || missing <= 0) return doneCrafting()
+        if (missing <= 0) return doneCrafting()
         val planks = smallest(::isPlank)
         val logs = smallest(::isLog)
         when {
             planks != null -> putInGrid(planks, missing.coerceAtMost(planks.stack.maxCount))
-            logs != null -> putInGrid(logs, ceilDiv(missing, PLANKS_PER_LOG).coerceAtMost(logs.stack.maxCount))
+            logs != null -> putInGrid(logs, Math.ceilDiv(missing, PLANKS_PER_LOG).coerceAtMost(logs.stack.maxCount))
             else -> {
                 warn("Out of logs with $missing buttons still missing")
                 doneCrafting()
@@ -197,19 +195,15 @@ class CraftButtonsTask @Ta5kBuilder constructor(
         }
     }
 
-    /** Puts [amount] of [from] into the empty grid: the whole stack in one go, else one at a time. */
+    /** Puts [amount] of [from] into the empty grid. */
     private fun SafeContext.putInGrid(from: Slot, amount: Int) {
         fill = amount
-        LOG.info("[Restocking buttons] putting $amount ${from.stack.name.string} in the grid")
-        if (amount >= from.stack.count) act {
-            pickup(from.id)
-            pickup(GRID_SLOT)
-        } else placeSingles(from, amount)
+        log("putting $amount ${from.stack.name.string} in the grid")
+        moveToGrid(from, amount)
     }
 
     /** Adds the rest of [fill] from carried stacks of the same item. With none left, crafts what's there. */
     private fun SafeContext.topUp(grid: Slot) {
-        val wanted = fill - grid.stack.count
         val from = player.hotbarAndInventorySlots
             .filter { ItemStack.areItemsAndComponentsEqual(it.stack, grid.stack) }
             .minByOrNull { it.stack.count }
@@ -217,21 +211,35 @@ class CraftButtonsTask @Ta5kBuilder constructor(
                 fill = grid.stack.count
                 return
             }
-        if (wanted >= from.stack.count) act {
-            pickup(from.id)
-            pickup(GRID_SLOT)
-        } else placeSingles(from, wanted)
+        moveToGrid(from, fill - grid.stack.count)
     }
 
-    /** Picks up [from], right-clicks some of it into the grid one by one and puts the rest back, so the cursor ends empty. */
-    private fun SafeContext.placeSingles(from: Slot, amount: Int) {
-        val now = amount.coerceAtMost(SINGLES_PER_REQUEST)
+    /**
+     * Moves [amount] of [from] into the grid: the whole stack in one go, else picked up, right-clicked in one by one and
+     * the rest put back, so the cursor ends empty.
+     */
+    private fun moveToGrid(from: Slot, amount: Int) {
+        if (amount >= from.stack.count) return act {
+            pickup(from.id)
+            pickup(GRID_SLOT)
+        }
         act {
             pickup(from.id)
-            repeat(now) { pickup(GRID_SLOT, 1) }
+            repeat(amount.coerceAtMost(SINGLES_PER_REQUEST)) { pickup(GRID_SLOT, 1) }
             pickup(from.id)
         }
     }
+
+    /** Takes what's in a grid slot back into the inventory, making room first. */
+    private fun SafeContext.takeOut(slot: Slot) {
+        if (!hasRoomFor(slot.stack)) return makeRoomOrStop(slot.stack)
+        log("taking ${slot.stack.count}x ${slot.stack.name.string} back out of the grid")
+        act { quickMove(slot.id) }
+    }
+
+    private fun SafeContext.filledGridSlot() = GRID_SLOTS.map(player.playerScreenHandler::getSlot).firstOrNull { !it.stack.isEmpty }
+
+    private fun SafeContext.inGrid() = GRID_SLOTS.sumOf { player.playerScreenHandler.getSlot(it).stack.count }
 
     /** Whether all of [stack] fits into the inventory, where a shift-click puts it. */
     private fun SafeContext.hasRoomFor(stack: ItemStack) =
@@ -245,9 +253,8 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
     /** Throws away a junk stack, else stops crafting and puts the logs back, since nothing else may go. */
     private fun SafeContext.makeRoomOrStop(stack: ItemStack) {
-        val junk = player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
-            ?: return craftFailed("No room for ${stack.count}x ${stack.name.string} and nothing to throw away")
-        LOG.info("[Restocking buttons] throwing ${junk.stack.count}x ${junk.stack.name.string} to make room")
+        val junk = junkSlot() ?: return craftFailed("No room for ${stack.count}x ${stack.name.string} and nothing to throw away")
+        log("throwing ${junk.stack.count}x ${junk.stack.name.string} to make room")
         act { throwStack(junk.id) }
     }
 
@@ -265,7 +272,7 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
     private fun SafeContext.doneCrafting() {
         crafted = true
-        LOG.info("[Restocking buttons] crafted, ${buttons()} buttons carried, target $target")
+        log("crafted, ${buttons()} buttons carried, target $target, ${inGrid()} left in the grid")
         phaseDone()
         resume()
     }
@@ -277,17 +284,22 @@ class CraftButtonsTask @Ta5kBuilder constructor(
             warn("The shulker is full, keeping ${leftover.stack.count}x ${leftover.stack.name.string}")
             return false
         }
-        LOG.info("[Restocking buttons] putting back ${leftover.stack.count}x ${leftover.stack.name.string}")
+        log("putting back ${leftover.stack.count}x ${leftover.stack.name.string}")
         submit { quickMove(leftover.id) }
         return true
     }
 
+    /** Picks the shulker back up. What's still in the grid, for want of room, is taken out once more first. */
+    private fun SafeContext.returned() {
+        if (filledGridSlot() == null || gridRetried) return collect()
+        gridRetried = true
+        clearing = true
+        enter(Phase.Crafting)
+    }
+
     override fun SafeContext.workFailed(reason: String?) {
+        if (retryOpening(reason)) return
         when (phase) {
-            Phase.Opening -> if (++openAttempts < MAX_OPEN_ATTEMPTS) resume() else {
-                warn("Couldn't open the shulker ($reason), picking it back up")
-                collect()
-            }
             Phase.Taking -> {
                 warn("Failed while taking logs ($reason), crafting with what's carried")
                 startCrafting()
@@ -296,9 +308,10 @@ class CraftButtonsTask @Ta5kBuilder constructor(
                 warn("Failed while crafting buttons ($reason), taking what's in the grid back out")
                 clearing = true
                 enter(Phase.Crafting)
-            } else {
-                crafted = true
-                resume()
+            } else doneCrafting()
+            Phase.Returning -> {
+                warn("Failed while ${phase.description} ($reason)")
+                returned()
             }
             else -> {
                 warn("Failed while ${phase.description} ($reason)")
@@ -309,23 +322,26 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
     override fun SafeContext.finish() {
         val made = buttons() - buttonsAtStart
+        val left = inGrid()
         if (made > 0) info("Crafted $made buttons, ${buttons()} carried")
-        LOG.info("[Restocking buttons] done, $made crafted, ${buttons()} carried")
+        log("done, $made crafted, ${buttons()} carried, $left left in the grid")
+        // Not lost, but unusable there, and closing the inventory with no room would drop them.
+        if (left > 0 && !stopping) return failure("$left items are left in the crafting grid, the inventory has no room for them and nothing to throw away")
+        if (left > 0) warn("$left items are left in the crafting grid, the inventory has no room for them")
         success()
     }
 
     private fun SafeContext.smallest(predicate: (ItemStack) -> Boolean) =
         player.hotbarAndInventorySlots.filter { predicate(it.stack) }.minByOrNull { it.stack.count }
 
-    private val Int.stacks get() = ceilDiv(this, MAX_STACK)
+    private val Int.stacks get() = Math.ceilDiv(this, STACK_SIZE)
 
     companion object {
         /** The player's crafting output and its first grid slot, where everything is crafted. */
         private const val OUTPUT_SLOT = 0
         private const val GRID_SLOT = 1
+        private val GRID_SLOTS = 1..4
         const val PLANKS_PER_LOG = 4
-        private const val MAX_STACK = 64
-        private const val TICKS_PER_STACK = 10
         /** Three right-clicks between picking up and putting back stay under the default limit of five inventory packets. */
         private const val SINGLES_PER_REQUEST = 3
         private const val OUTPUT_WAIT_TICKS = 100
@@ -339,7 +355,5 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
         private fun canMerge(stack: ItemStack, other: ItemStack) =
             ItemStack.areItemsAndComponentsEqual(stack, other) && stack.count < stack.maxCount
-
-        private fun ceilDiv(a: Int, b: Int) = if (a <= 0) 0 else (a + b - 1) / b
     }
 }

@@ -60,6 +60,7 @@ import com.lambda.task.tasks.BuildTask.Companion.build
 import com.lambda.task.tasks.EnderChestRestockTask
 import com.lambda.task.tasks.EnderChestRestockTask.Companion.MIN_ENDER_CHESTS
 import com.lambda.task.tasks.EnderChestRestockTask.Want
+import com.lambda.task.tasks.StationTask.Companion.carriedCount
 import com.lambda.task.tasks.StationTask.Companion.waitsForPlayer
 import com.lambda.task.tasks.StationTask.Companion.stopSafely
 import com.lambda.task.tasks.TakeFromShulkerTask
@@ -112,7 +113,9 @@ object HighwayTools : Module(
     private val width by setting("Width", 2, 1..30, 1)
     private val pavement by setting("Pavement", Material.None, "Material for the pavement")
     private val rimHeight by setting("Pavement Rim Height", 1, 0..6, 1) { pavement != Material.None }
-    private val rim by setting("Rim Height", 0, 0..6, 1, "Rims of solid blocks like netherrack on both sides of the hole without a pavement, kept where they are and placed where missing, like walls") { pavement == Material.None }
+    private val rim by setting("Rim Height", 0, 0..6, 1, "Rims of solid blocks like netherrack on both sides of the hole without a pavement, kept where they are and placed where missing, like walls. Only with a width of 3 or more, so a lane is left between them") { pavement == Material.None }
+    /** Rims on the hole's own edge columns, which leave no lane to walk in narrower than 3. */
+    private val hasRims get() = pavement == Material.None && rim > 0 && width >= 3
     private val cornerBlock by setting("Corner", Corner.None, "Include corner blocks in the highway") { pavement != Material.None }
     private val pavementMaterial by setting("Pavement Material", Blocks.OBSIDIAN, "Material to build the highway with") { pavement == Material.Block }
     private val floor by setting("Floor", Material.Solid, "Material for the floor")
@@ -163,6 +166,8 @@ object HighwayTools : Module(
     private var nextSlice = 0
     /** Set while only the done front slices are swapped for new ones, not all of them after the build finished them. */
     private var rolling = false
+    /** Whether the blueprint places buttons, null without them, to build it anew once that changes, see [rollSlices]. */
+    private var blueprintPlacing: Boolean? = null
     /** Who paused the build with [pauseFor]. Only they resume it. */
     private var pausedBy: Any? = null
 
@@ -296,12 +301,8 @@ object HighwayTools : Module(
         }
         onDisable {
             aura.stopFighting()
-            // A restock first picks its shulker or the ender chest back up, so stopping never leaves one behind.
-            toolRestock.stop()
-            buttons.stop()
-            foodTask.stopSafely()
+            stopRestocks()
             if (!isRestockingFood) endFoodRestock()
-            enderChestTask.stopSafely()
             if (!isRestockingFromEnderChest) enderChestTask = null
             runningTask?.cancel()
             runningTask = null
@@ -448,6 +449,11 @@ object HighwayTools : Module(
     /** A restock that's out while another player comes near picks its shulker or the ender chest back up. */
     private fun SafeContext.watchForPlayers() {
         if (!isUsingContainer || !waitsForPlayer()) return
+        stopRestocks()
+    }
+
+    /** A restock first picks its shulker or the ender chest back up, so stopping never leaves one behind. */
+    private fun stopRestocks() {
         toolRestock.stop()
         buttons.stop()
         foodTask.stopSafely()
@@ -458,10 +464,10 @@ object HighwayTools : Module(
     private fun SafeContext.restockFoodFromShulker() {
         if (foodRetryTicks > 0 && --foodRetryTicks > 0) return
         if (isBusy || AutoEat.isEating) return
-        if (carriedCount(::isFood) > minFood || !carriesFoodShulker()) return
+        if (carriedCount(::isFood, offhand = true) > minFood || !carriesFoodShulker()) return
         if (waitsForPlayer() || !pauseFor(FoodRestock)) return
 
-        val before = carriedCount(::isFood)
+        val before = carriedCount(::isFood, offhand = true)
         foodTask = TakeFromShulkerTask(
             what = "food",
             isWanted = ::isFood,
@@ -473,7 +479,7 @@ object HighwayTools : Module(
         ).onCompletion {
             endFoodRestock()
             // E.g. the shulker couldn't be placed anywhere, so not right again.
-            if (carriedCount(::isFood) <= before) foodRetryTicks = FOOD_RETRY_TICKS
+            if (carriedCount(::isFood, offhand = true) <= before) foodRetryTicks = FOOD_RETRY_TICKS
         }.onFailure {
             logError("Taking food from a shulker failed: ${it.message}. Stopped HighwayTools so nothing gets left behind")
             endFoodRestock()
@@ -485,10 +491,10 @@ object HighwayTools : Module(
     private fun SafeContext.stopIfOutOfFood() {
         // Stopping would cancel what has a shulker or the ender chest out, leaving it placed.
         if (!eatConfig.eatOnHunger || isUsingContainer) return
-        if (carriedCount(::isFood) > 0 || carriesFoodShulker()) return
+        if (carriedCount(::isFood, offhand = true) > 0 || carriesFoodShulker()) return
         // Unknown until a trip saw it, and that trip comes first.
         val enderChestMayHave = restockFood && inventoryConfig.accessEnderChest && !restockFailed &&
-            carriedCount(EnderChestRestockTask::isEnderChest) >= MIN_ENDER_CHESTS &&
+            carriedCount(EnderChestRestockTask::isEnderChest, offhand = true) >= MIN_ENDER_CHESTS &&
             (!sawEnderChest || EnderChestContainer.stacks.any { foodIn(it) > 0 })
         if (enderChestMayHave) return
         logError("No food left in the inventory, a shulker or the ender chest. Stopped HighwayTools, add food and start it again")
@@ -537,7 +543,7 @@ object HighwayTools : Module(
         warnedMissing.retainAll(missing.map { it.name }.toSet())
         if (low.isEmpty() || waitsForPlayer()) return
 
-        val chests = carriedCount(EnderChestRestockTask::isEnderChest)
+        val chests = carriedCount(EnderChestRestockTask::isEnderChest, offhand = true)
         if (chests < MIN_ENDER_CHESTS) {
             logError("Need ${low.joinToString { it.name }} from the ender chest, but only $chests ender chest(s) are left and the last one stays. Add ender chests and start HighwayTools again")
             return disable()
@@ -568,26 +574,22 @@ object HighwayTools : Module(
     private fun SafeContext.restockWants() = buildList {
         if (restockPickaxes && toolRestock.enabled) add(Want(
             "a pickaxe shulker", 1, toolRestock::freshTools,
-            isLow = { carriedCount(toolRestock::isToolShulker) == 0 },
-            isMet = { carriedCount(toolRestock::isToolShulker) > 0 },
+            isLow = { carriedCount(toolRestock::isToolShulker, offhand = true) == 0 },
+            isMet = { carriedCount(toolRestock::isToolShulker, offhand = true) > 0 },
         ))
         // Food in a carried shulker is taken from there first, so a shulker with food is enough.
         if (restockFood) add(Want(
             "food", 2, ::foodIn,
-            isLow = { carriedCount(::isFood) <= minFood && !carriesFoodShulker() },
-            isMet = { carriedCount(::isFood) >= FOOD_TARGET || carriesFoodShulker() },
+            isLow = { carriedCount(::isFood, offhand = true) <= minFood && !carriesFoodShulker() },
+            isMet = { carriedCount(::isFood, offhand = true) >= FOOD_TARGET || carriesFoodShulker() },
         ))
         if (restockBlocks) add(Want(
             "building blocks", 2, { if (isBuildMaterial(it)) it.count else 0 },
-            isLow = { carriedCount(::isBuildMaterial) <= minBlocks },
-            isMet = { carriedCount(::isBuildMaterial) >= BLOCKS_TARGET },
+            isLow = { carriedCount(::isBuildMaterial, offhand = true) <= minBlocks },
+            isMet = { carriedCount(::isBuildMaterial, offhand = true) >= BLOCKS_TARGET },
         ))
         with(buttons) { enderChestWant() }?.let(::add)
     }
-
-    /** Also the offhand, where e.g. bottles or food are often kept. */
-    private fun SafeContext.carriedCount(predicate: (ItemStack) -> Boolean) =
-        (player.inventory.mainStacks + player.offHandStack).sumOf { if (predicate(it)) it.count else 0 }
 
     private fun endEnderChestTrip() {
         enderChestTask = null
@@ -670,8 +672,9 @@ object HighwayTools : Module(
 
     private fun SafeContext.nextCruiseTarget(): BlockPos? {
         val slice = generateSlice()
+        val button = with(buttons) { floorButton() }
         val index = highwayIndex(player.blockPos)
-        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i)
+        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button)
 
         if (!done(index)) return null
         return safeSteps(forward = true, CRUISE_LOOKAHEAD)
@@ -837,7 +840,9 @@ object HighwayTools : Module(
                 return@propagatingBlueprint emptyStructure()
             }
             val slice = generateSlice()
-            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }))
+            val button = with(buttons) { floorButton() }
+            blueprintPlacing = button?.placing
+            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }), button)
         }
         this.blueprint = blueprint
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
@@ -847,23 +852,30 @@ object HighwayTools : Module(
 
     /**
      * Swaps the done slices at the front for new ones ahead, so the build keeps going instead of waiting for all of them.
-     * Only once the server confirmed them, a block it puts back would be left behind otherwise.
+     * Only once the server confirmed them, a block it puts back would be left behind otherwise. Once buttons run out or
+     * are restocked the slices are built anew too, else the blueprint and [sliceDone] disagree and none counts as done.
      */
     private fun SafeContext.rollSlices(task: BuildTask) {
         val slice = generateSlice()
+        val button = with(buttons) { floorButton() }
         var dropped = false
-        while (slices.isNotEmpty() && sliceDone(slice, slices.first()) { task.isPending(it) }) {
+        while (slices.isNotEmpty() && sliceDone(slice, slices.first(), button) { task.isPending(it) }) {
             slices.removeFirst()
             dropped = true
         }
-        if (!dropped) return
+        if (!dropped && button?.placing == blueprintPlacing) return
         rolling = true
         blueprint?.next()
         rolling = false
     }
 
-    private fun SafeContext.sliceDone(slice: Structure, index: Int, pending: (BlockPos) -> Boolean = { false }) =
-        withButtons(fitToBorder(slice.move(highwayPos(index)))).all { (pos, state) -> state.matches(blockState(pos), pos) && !pending(pos) }
+    private fun SafeContext.sliceDone(slice: Structure, index: Int, button: TargetState.FloorButton?, pending: (BlockPos) -> Boolean = { false }): Boolean {
+        val structure = fitToBorder(slice.move(highwayPos(index)))
+        return structure.all { (pos, state) ->
+            val target = if (button != null && isButtonSpot(structure, pos, state)) button else state
+            target.matches(blockState(pos), pos) && !pending(pos)
+        }
+    }
 
     /** Moves the highway sideways so nothing is to be dug behind the world border, e.g. when started right next to it. */
     private fun SafeContext.keepInsideBorder() {
@@ -905,13 +917,13 @@ object HighwayTools : Module(
      * Buttons on the floor in the hole's lowest layer where world x and z are both even, so every 3x3 of floor holds one
      * and magma cubes can't spawn. Only where the slice has a floor or pavement below, not e.g. on a rim.
      */
-    private fun SafeContext.withButtons(structure: Structure): Structure {
-        val button = with(buttons) { floorButton() } ?: return structure
-        return structure.mapValues { (pos, state) ->
-            val lattice = pos.y == startPos.y && Math.floorMod(pos.x, 2) == 0 && Math.floorMod(pos.z, 2) == 0
-            if (lattice && state == TargetState.Air && structure[pos.down()]?.isEmpty() == false) button else state
-        }
-    }
+    private fun withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
+        if (button == null) structure
+        else structure.mapValues { (pos, state) -> if (isButtonSpot(structure, pos, state)) button else state }
+
+    private fun isButtonSpot(structure: Structure, pos: BlockPos, state: TargetState) =
+        state == TargetState.Air && pos.y == startPos.y && Math.floorMod(pos.x, 2) == 0 && Math.floorMod(pos.z, 2) == 0 &&
+            structure[pos.down()]?.isEmpty() == false
 
     private fun generateSlice(): Structure {
         val structure = mutableMapOf<BlockPos, TargetState>()
@@ -976,22 +988,8 @@ object HighwayTools : Module(
         }
 
         // Without a pavement the rims stand on the floor, the hole's sides up to their height.
-        if (pavement == Material.None && rim > 0) {
-            structure += generateDirectionalTube(
-	            orthogonal,
-	            1,
-	            rim,
-	            -center + width - 1,
-	            0,
-            ).associateWith { target(Material.Solid, wallMaterial) }
-
-            structure += generateDirectionalTube(
-	            orthogonal,
-	            1,
-	            rim,
-	            -center,
-	            0,
-            ).associateWith { target(Material.Solid, wallMaterial) }
+        if (hasRims) listOf(-center + width - 1, -center).forEach { side ->
+            structure += generateDirectionalTube(orthogonal, 1, rim, side, 0).associateWith { target(Material.Solid, wallMaterial) }
         }
 
         if (ceiling != Material.None) {
@@ -1007,7 +1005,7 @@ object HighwayTools : Module(
         // From the rim's top up, right beside it, the way it's always been built. Written as `rimHeight else 0 + 1` it
         // read as if a block more was meant, which would leave a gap beside the rim all along the way. Without a
         // pavement nothing moves down a block, so the rim's top is a block lower.
-        val wallElevation = if (pavement != Material.None) rimHeight else (rim - 1).coerceAtLeast(0)
+        val wallElevation = if (pavement != Material.None) rimHeight else if (hasRims) rim - 1 else 0
         if (rightWall != Material.None) {
             structure += wall(orthogonal, center, 1, wallElevation).associateWith { target(rightWall, wallMaterial) }
         }
