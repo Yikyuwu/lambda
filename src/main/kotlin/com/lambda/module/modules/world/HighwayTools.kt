@@ -150,6 +150,7 @@ object HighwayTools : Module(
     @Group(ENDER_CHEST_GROUP) private val restockRetryDelay by setting("Restock Retry Delay", 60, 10..600, 10, "Wait after a trip to the ender chest before the next one", " s") { inventoryConfig.accessEnderChest }
     @Group(TOOL_RESTOCK_GROUP) private val toolRestock by configBlock(HighwayToolRestock(this))
     @Group(AURA_GROUP) private val aura by configBlock(HighwayAura(this))
+    @Group(BUTTONS_GROUP) private val buttons by configBlock(HighwayButtons(this))
     private val safetyWarning by setting("Safety Warning", true, "Warns on enable when AutoArmor, AutoDisconnect or AutoTotem is off")
     private val debugLog by setting("Debug Log", false, "Writes the build's progress and what it waits on to the game log every few seconds")
 
@@ -225,6 +226,7 @@ object HighwayTools : Module(
     private const val FOOD_GROUP = "Food"
     private const val TOOL_RESTOCK_GROUP = "Tool Restock"
     private const val AURA_GROUP = "Aura"
+    private const val BUTTONS_GROUP = "Buttons"
     private const val FOOD_TARGET = 64
     private const val FOOD_RETRY_TICKS = 600
     private const val JOIN_GRACE_TICKS = 40
@@ -277,6 +279,7 @@ object HighwayTools : Module(
             sawEnderChest = false
             warnedMissing.clear()
             toolRestock.failed = false
+            buttons.failed = false
             // The tool restock is what takes the pickaxes out of the shulker, so without it the shulker isn't fetched.
             if (inventoryConfig.accessEnderChest && restockPickaxes && !toolRestock.enabled)
                 warn("Restock Tools is off, so no pickaxe shulkers get taken from the ender chest")
@@ -295,6 +298,7 @@ object HighwayTools : Module(
             aura.stopFighting()
             // A restock first picks its shulker or the ender chest back up, so stopping never leaves one behind.
             toolRestock.stop()
+            buttons.stop()
             foodTask.stopSafely()
             if (!isRestockingFood) endFoodRestock()
             enderChestTask.stopSafely()
@@ -320,7 +324,10 @@ object HighwayTools : Module(
             watchForPlayers()
             with(aura) { tick() }
             // Not e.g. in the queue, where a shulker can't be placed.
-            if (isBuilding && world.registryKey == dimension && inventoryLoaded) with(toolRestock) { tick() }
+            if (isBuilding && world.registryKey == dimension && inventoryLoaded) {
+                with(toolRestock) { tick() }
+                with(buttons) { tick() }
+            }
         }
 
         listen<TickEvent.Pre> {
@@ -403,11 +410,13 @@ object HighwayTools : Module(
         dimension = world.registryKey
         octant = player.octant
         startPos = player.blockPos
+        with(buttons) { onStart() }
         keepInsideBorder()
         buildHighway()
         // One still picking up its shulker or the ender chest from the last stop holds the new build until it's done.
         when {
             isRestockingTools -> pauseFor(toolRestock)
+            isRestockingButtons -> pauseFor(buttons)
             isRestockingFood -> pauseFor(FoodRestock)
             isRestockingFromEnderChest -> pauseFor(EnderChestTrip)
         }
@@ -421,6 +430,9 @@ object HighwayTools : Module(
     /** Whether a shulker is out to restock tools. */
     val isRestockingTools get() = toolRestock.isRestocking
 
+    /** Whether a shulker of logs is out to craft buttons. */
+    val isRestockingButtons get() = buttons.isRestocking
+
     /** Whether the ender chest is out to restock. */
     val isRestockingFromEnderChest get() = enderChestTask?.isActive == true
 
@@ -428,15 +440,16 @@ object HighwayTools : Module(
     val isRestockingFood get() = foodTask?.isActive == true
 
     /** Whether a shulker or the ender chest is out, or about to be, for a restock. */
-    val isUsingContainer get() = isRestockingTools || isRestockingFood || isRestockingFromEnderChest
+    val isUsingContainer get() = isRestockingTools || isRestockingButtons || isRestockingFood || isRestockingFromEnderChest
 
     /** Whether a container is out or a mob is being fought, so nothing else starts meanwhile. */
     val isBusy get() = isUsingContainer || isFighting
 
     /** A restock that's out while another player comes near picks its shulker or the ender chest back up. */
     private fun SafeContext.watchForPlayers() {
-        if (!isRestockingTools && !isRestockingFood && !isRestockingFromEnderChest || !waitsForPlayer()) return
+        if (!isUsingContainer || !waitsForPlayer()) return
         toolRestock.stop()
+        buttons.stop()
         foodTask.stopSafely()
         enderChestTask.stopSafely()
     }
@@ -537,8 +550,9 @@ object HighwayTools : Module(
             automated = this@HighwayTools,
             // The aura goes first, the trip carries on once the mob is dead.
             holdWhile = { isFighting },
-            beforeBreaking = { with(toolRestock) { restockNow() } },
-            putBack = ::isUsedUpShulker,
+            // The pickaxes first, breaking the ender chest needs one. A shulker of logs just taken is crafted from, then put back.
+            beforeBreaking = { with(toolRestock) { restockNow() } ?: with(buttons) { craftNow() } },
+            putBack = { isUsedUpShulker(it) || buttons.putsBack(it) },
         ).onCompletion {
             endEnderChestTrip()
             restockRetryTicks = restockRetryDelay * 20
@@ -568,6 +582,7 @@ object HighwayTools : Module(
             isLow = { carriedCount(::isBuildMaterial) <= minBlocks },
             isMet = { carriedCount(::isBuildMaterial) >= BLOCKS_TARGET },
         ))
+        with(buttons) { enderChestWant() }?.let(::add)
     }
 
     /** Also the offhand, where e.g. bottles or food are often kept. */
@@ -576,6 +591,7 @@ object HighwayTools : Module(
 
     private fun endEnderChestTrip() {
         enderChestTask = null
+        buttons.tripEnded()
         resume(EnderChestTrip)
     }
 
@@ -821,7 +837,7 @@ object HighwayTools : Module(
                 return@propagatingBlueprint emptyStructure()
             }
             val slice = generateSlice()
-            fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) })
+            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }))
         }
         this.blueprint = blueprint
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
@@ -847,7 +863,7 @@ object HighwayTools : Module(
     }
 
     private fun SafeContext.sliceDone(slice: Structure, index: Int, pending: (BlockPos) -> Boolean = { false }) =
-        fitToBorder(slice.move(highwayPos(index))).all { (pos, state) -> state.matches(blockState(pos), pos) && !pending(pos) }
+        withButtons(fitToBorder(slice.move(highwayPos(index)))).all { (pos, state) -> state.matches(blockState(pos), pos) && !pending(pos) }
 
     /** Moves the highway sideways so nothing is to be dug behind the world border, e.g. when started right next to it. */
     private fun SafeContext.keepInsideBorder() {
@@ -883,6 +899,18 @@ object HighwayTools : Module(
             }
         }
         return fitted + seal.associateWith { TargetState.Solid(emptySet()) }
+    }
+
+    /**
+     * Buttons on the floor in the hole's lowest layer where world x and z are both even, so every 3x3 of floor holds one
+     * and magma cubes can't spawn. Only where the slice has a floor or pavement below, not e.g. on a rim.
+     */
+    private fun SafeContext.withButtons(structure: Structure): Structure {
+        val button = with(buttons) { floorButton() } ?: return structure
+        return structure.mapValues { (pos, state) ->
+            val lattice = pos.y == startPos.y && Math.floorMod(pos.x, 2) == 0 && Math.floorMod(pos.z, 2) == 0
+            if (lattice && state == TargetState.Air && structure[pos.down()]?.isEmpty() == false) button else state
+        }
     }
 
     private fun generateSlice(): Structure {

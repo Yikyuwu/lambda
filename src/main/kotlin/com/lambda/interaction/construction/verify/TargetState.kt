@@ -28,8 +28,12 @@ import com.lambda.util.StringUtils.capitalize
 import com.lambda.util.item.ItemUtils.block
 import net.minecraft.block.BlockState
 import net.minecraft.block.Blocks
+import net.minecraft.block.ButtonBlock
+import net.minecraft.block.enums.BlockFace
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
+import net.minecraft.item.BlockItem
+import net.minecraft.state.property.Properties
 import net.minecraft.state.property.Property
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
@@ -183,5 +187,37 @@ sealed class TargetState : StateMatcher {
         override fun getState(pos: BlockPos): BlockState = block.defaultState
 
         override fun isEmpty() = false
+    }
+
+    /**
+     * A button on the top of the block below, of any kind and facing, e.g. so mobs can't spawn there. The one placed is a
+     * carried one [accepts]. While [placing] is off, e.g. with none left, air does too, so placed ones aren't broken.
+     */
+    class FloorButton(val accepts: (ItemStack) -> Boolean, val placing: Boolean) : TargetState() {
+        override fun toString() = "Floor button"
+
+        context(safeContext: SafeContext)
+        override fun matches(
+            state: BlockState,
+            pos: BlockPos,
+            ignoredProperties: Collection<Property<*>>
+        ) = isFloorButton(state) || !placing && state.isAir
+
+        context(automatedSafeContext: AutomatedSafeContext)
+        override fun getStack(pos: BlockPos): ItemStack =
+            if (!placing) ItemStack.EMPTY
+            else automatedSafeContext.player.inventory.mainStacks.firstOrNull { accepts(it) && it.item is BlockItem }
+                ?: ItemStack(Items.OAK_BUTTON)
+
+        context(automatedSafeContext: AutomatedSafeContext)
+        override fun getState(pos: BlockPos): BlockState =
+            if (!placing) Blocks.AIR.defaultState
+            else getStack(pos).item.block.defaultState.with(Properties.BLOCK_FACE, BlockFace.FLOOR)
+
+        override fun isEmpty() = !placing
+
+        companion object {
+            fun isFloorButton(state: BlockState) = state.block is ButtonBlock && state.get(Properties.BLOCK_FACE) == BlockFace.FLOOR
+        }
     }
 }

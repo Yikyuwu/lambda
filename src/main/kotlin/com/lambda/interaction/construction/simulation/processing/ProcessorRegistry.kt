@@ -34,7 +34,9 @@ object ProcessorRegistry : Loadable {
 	private val stateProcessors = getInstances<StateProcessor>()
 	private val propertyPreProcessors = getInstances<PropertyPreProcessor>()
 	private val propertyPostProcessors = getInstances<PropertyPostProcessor>()
-	private val processorCache = Collections.synchronizedMap<Triple<BlockState, BlockState, Boolean>, PreProcessingInfo?>(mutableMapOf())
+	private val processorCache = Collections.synchronizedMap<CacheKey, PreProcessingInfo?>(mutableMapOf())
+
+	private data class CacheKey(val state: BlockState, val target: BlockState, val anyOrientation: Boolean, val anyFacing: Boolean)
 
 	/**
 	 * List of properties that can be processed after the block is placed. This is often used to ignore these properties
@@ -136,9 +138,11 @@ object ProcessorRegistry : Loadable {
 		val targetBlockState = targetState.getState(pos)
 		// Any solid block will do, so e.g. basalt can be placed sideways where only a side can be clicked.
 		val anyOrientation = targetState is TargetState.Solid || targetState is TargetState.Support
-		val processorCacheKey = Triple(state, targetBlockState, anyOrientation)
+		// Any way a floor button looks keeps mobs from spawning, so it's placed however the player faces.
+		val anyFacing = targetState is TargetState.FloorButton
+		val processorCacheKey = CacheKey(state, targetBlockState, anyOrientation, anyFacing)
 		val preProcessingInfo = processorCache.getOrElse(processorCacheKey) {
-			preProcess(pos, state, targetBlockState, targetState.getStack(pos), anyOrientation).also { info ->
+			preProcess(pos, state, targetBlockState, targetState.getStack(pos), anyOrientation, anyFacing).also { info ->
 				if (info?.noCaching != true) processorCache[processorCacheKey] = info
 			}
 		} ?: return null
@@ -147,8 +151,9 @@ object ProcessorRegistry : Loadable {
 	}
 
 	context(safeContext: SafeContext)
-	private fun preProcess(pos: BlockPos, state: BlockState, targetState: BlockState, itemStack: ItemStack, anyOrientation: Boolean) =
+	private fun preProcess(pos: BlockPos, state: BlockState, targetState: BlockState, itemStack: ItemStack, anyOrientation: Boolean, anyFacing: Boolean) =
 		PreProcessingInfoAccumulator(targetState, itemStack.item).run {
+			if (anyFacing) addIgnores(Properties.HORIZONTAL_FACING)
 			var stateProcessing = false
 			stateProcessors.forEach { processor ->
 				if (processor.acceptsState(state, targetState)) {

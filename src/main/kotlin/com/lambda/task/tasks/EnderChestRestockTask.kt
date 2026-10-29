@@ -60,7 +60,10 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     private val swapDelay: Int,
     automated: Automated,
     holdWhile: () -> Boolean = { false },
-    /** Runs before the ender chest is broken, e.g. swapping worn pickaxes from a shulker just taken, since breaking it needs one. */
+    /**
+     * Runs before the ender chest is broken, e.g. swapping worn pickaxes from a shulker just taken, since breaking it needs
+     * one, or crafting from a shulker of logs. Asked again after each task it gave, until it gives none.
+     */
     private val beforeBreaking: SafeContext.() -> Task<*>? = { null },
     /**
      * What goes back into the ender chest, e.g. a shulker of pickaxes with no fresh one left. Once [beforeBreaking] used
@@ -103,6 +106,9 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
     private var openAttempts = 0
     private var collectAttempts = 0
     private var ranBeforeBreaking = false
+    private var beforeBreakingSteps = 0
+    /** Set once the ender chest is being broken, so a retry of that doesn't run [beforeBreaking] or open it again. */
+    private var collecting = false
     private var rounds = 1
     private var putBackCount = 0
     /** take runs once per click and the shulker stays, so the full ender chest is only warned about once. */
@@ -215,13 +221,21 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
 
     private fun SafeContext.collect() {
         closeContainer()
-        if (!ranBeforeBreaking && !stopping) {
-            ranBeforeBreaking = true
-            beforeBreaking()?.let { task ->
+        if (!collecting && !stopping) {
+            // Capped, in case one keeps asking for a task that can't do what it should.
+            if (beforeBreakingSteps < MAX_BEFORE_BREAKING_STEPS) beforeBreaking()?.let { task ->
+                ranBeforeBreaking = true
+                beforeBreakingSteps++
                 enter(Phase.BeforeBreaking)
-                return runStep(task) { if (!nextRound()) enter(Phase.MakingRoom) }
+                return runStep(task) { collect() }
             }
+            if (ranBeforeBreaking && nextRound()) return
         }
+        startBreaking()
+    }
+
+    private fun startBreaking() {
+        collecting = true
         enter(Phase.MakingRoom)
     }
 
@@ -324,7 +338,7 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
             }
             Phase.BeforeBreaking -> {
                 beforeBreakingFailure = reason
-                enter(Phase.MakingRoom)
+                startBreaking()
             }
             Phase.MakingRoom, Phase.Breaking, Phase.PickingUp ->
                 if (++collectAttempts < MAX_COLLECT_ATTEMPTS) collect()
@@ -379,6 +393,7 @@ class EnderChestRestockTask @Ta5kBuilder constructor(
         private const val MAX_COLLECT_ATTEMPTS = 3
         /** How often it's opened again to put back what's used up and take more, see [nextRound]. */
         private const val MAX_ROUNDS = 4
+        private const val MAX_BEFORE_BREAKING_STEPS = 8
         private val COLLECT_PHASES = setOf(Phase.MakingRoom, Phase.Breaking, Phase.PickingUp)
     }
 }
