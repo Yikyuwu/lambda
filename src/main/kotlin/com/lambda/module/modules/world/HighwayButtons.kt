@@ -40,12 +40,12 @@ import net.minecraft.item.ItemStack
 import net.minecraft.registry.tag.ItemTags
 
 /**
- * Places buttons on the highway's floor so magma cubes, which need 3x3 blocks of floor, can't spawn on it. Once none are
+ * Places buttons down the middle of the highway.s floor against magma cubes spawning on it. Once none are
  * left, crafts as many as were carried at the start from a carried shulker of logs, or one the ender chest trip takes
  * and puts back afterwards.
  */
 class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c {
-    val enabled by c.setting("Place Buttons", false, "Places a button on every second floor block both ways, so no 3x3 of floor is left for a magma cube to spawn on")
+    val enabled by c.setting("Place Buttons", false, "Places a button on every second floor block down the middle of the highway, against magma cubes spawning on it")
     private val stoneButtons by c.setting("Stone Buttons", true, "Also places stone and polished blackstone buttons when carried. Only wooden ones are crafted") { enabled }
     private val restock by c.setting("Restock Buttons", true, "Once none are left, crafts as many as were carried at the start from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
 

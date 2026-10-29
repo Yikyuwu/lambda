@@ -914,16 +914,21 @@ object HighwayTools : Module(
     }
 
     /**
-     * Buttons on the floor in the hole's lowest layer where world x and z are both even, so every 3x3 of floor holds one
-     * and magma cubes can't spawn. Only where the slice has a floor or pavement below, not e.g. on a rim.
+     * Buttons on the floor down the highway's middle line, every second block along it (diagonally every second
+     * diagonal step), counted from the world grid so a restart keeps the same spots. Only where the slice has a floor
+     * or pavement below.
      */
     private fun withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
         if (button == null) structure
         else structure.mapValues { (pos, state) -> if (isButtonSpot(structure, pos, state)) button else state }
 
     private fun isButtonSpot(structure: Structure, pos: BlockPos, state: TargetState) =
-        state == TargetState.Air && pos.y == startPos.y && Math.floorMod(pos.x, 2) == 0 && Math.floorMod(pos.z, 2) == 0 &&
-            structure[pos.down()]?.isEmpty() == false
+        state == TargetState.Air && pos.y == startPos.y && onMiddleLine(pos) &&
+            Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, 2) == 0 && structure[pos.down()]?.isEmpty() == false
+
+    /** Whether [pos] is on the line [startPos] goes along, a whole number of steps of the octant from it. */
+    private fun onMiddleLine(pos: BlockPos) =
+        (pos.x - startPos.x) * octant.offsetZ == (pos.z - startPos.z) * octant.offsetX
 
     private fun generateSlice(): Structure {
         val structure = mutableMapOf<BlockPos, TargetState>()
