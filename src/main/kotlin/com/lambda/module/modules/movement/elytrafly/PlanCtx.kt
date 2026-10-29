@@ -24,7 +24,7 @@ import net.minecraft.util.math.Vec3d
 /**
  * The planner's mutable state, everything a search writes or reads as it goes besides the world and you: where it
  * looks from ([lookState], [simFrame], the line, see [startPos], [baseY] and [lowerLevels]), the plan and what
- * committing to it resets (what [PlanSnapshot] puts back), the memos and the caches of a pass (see [planning]), the
+ * committing to it resets (what [snapshot] takes), the memos and the caches of a pass (see [planning]), the
  * miss texts for the log and the world and you it reads (see [passWorldOverride] and [flyerOverride]). The fields of
  * the mode read and write the one in [ctx]: the game thread's own, or one swapped in for a search, see [withCtx].
  */
@@ -41,10 +41,12 @@ internal class PlanCtx {
 	var threadMiss: String = ""
 	val planOwners = LinkedHashSet<String>()
 	var hop: Hop? = null
-	var dodge: Vec3d? = null
-	var dodgeOffset: Double = 0.0
-	var dodgeSteer: Steer = Steer.GENTLE
-	var dodgeLean: Int = 0
+	/** The lane committed to, see [commitLane], one to [Vec3d.ZERO] swinging back onto the line, null none. */
+	var committedLane: Lane? = null
+	val dodge get() = committedLane?.target
+	val dodgeOffset get() = committedLane?.offset ?: 0.0
+	val dodgeSteer get() = committedLane?.steer ?: Steer.GENTLE
+	val dodgeLean get() = committedLane?.lean ?: 0
 	var dodgeEnd: Double = 0.0
 	var dodgeUpAt: Double? = null
 	var thread: Opening? = null
@@ -139,68 +141,109 @@ internal class PlanCtx {
 	var modeInputs: Any? = null
 
 	/**
-	 * A copy to search in apart, see [withCtx]: the plan, the line and where it looks from, the miss texts and the
-	 * world and you it reads as they are, the memos and the caches empty.
+	 * A copy of the plan and what goes with it, what [restore] puts back after a trial, see [ObstaclePassingMode.sandboxed]:
+	 * the plan ([hop], the lane, the opening, slowing down, the dip, landing) and the state committing to it resets with
+	 * it, e.g. [dodgeTicks] and [onLane], what the deciders remember about what's ahead (skipped, landed for, no lane yet,
+	 * the chooser's picks to look at again), the line's height, and the miss texts and last simulation's results for the
+	 * log. Not what's kept across trials on purpose: the memos and caches, the clocks and timings, slowing down for what's
+	 * next, see [slowAhead], the relook throttles and log dedupes.
 	 */
-	fun forSearch() = PlanCtx().also {
-		it.hopRejection = hopRejection
-		it.hopTooSlow = hopTooSlow
-		it.laneMissText = laneMissText
-		it.laneCarpetsText = laneCarpetsText
-		it.lastHopRun = lastHopRun
-		it.dipMiss = dipMiss
-		it.touchMiss = touchMiss
-		it.touchLaneText = touchLaneText
-		it.openingMiss = openingMiss
-		it.threadMiss = threadMiss
-		it.planOwners += planOwners
-		it.hop = hop
-		it.dodge = dodge
-		it.dodgeOffset = dodgeOffset
-		it.dodgeSteer = dodgeSteer
-		it.dodgeLean = dodgeLean
-		it.dodgeEnd = dodgeEnd
-		it.dodgeUpAt = dodgeUpAt
-		it.thread = thread
-		it.slowFor = slowFor
+	fun snapshot() = PlanCtx().also {
+		it.takeAround(this)
+		it.takePlan(this)
+	}
+
+	/**
+	 * Puts back what [snapshot] took. The plan itself only when it changed, compared field by field: true then, for
+	 * logging. One that's only equal is kept as it is.
+	 */
+	fun restore(snapshot: PlanCtx): Boolean {
+		takeAround(snapshot)
+		if (!planDiffers(snapshot)) return false
+		takePlan(snapshot)
+		return true
+	}
+
+	/** The plan itself, see [snapshot]. */
+	private fun takePlan(from: PlanCtx) {
+		hop = from.hop
+		committedLane = from.committedLane
+		dodgeEnd = from.dodgeEnd
+		dodgeUpAt = from.dodgeUpAt
+		thread = from.thread
+		slowFor = from.slowFor
+		dipAt = from.dipAt
+		dipLaneAt = from.dipLaneAt
+		brakeAt = from.brakeAt
+	}
+
+	private fun planDiffers(from: PlanCtx) =
+		hop !== from.hop || dodge != from.dodge || dodgeOffset != from.dodgeOffset || dodgeSteer != from.dodgeSteer || dodgeLean != from.dodgeLean ||
+			dodgeEnd != from.dodgeEnd || dodgeUpAt != from.dodgeUpAt || thread !== from.thread || slowFor != from.slowFor ||
+			dipAt != from.dipAt || dipLaneAt != from.dipLaneAt || brakeAt != from.brakeAt
+
+	/** What a [snapshot] carries besides the plan itself. */
+	private fun takeAround(from: PlanCtx) {
+		// Why not and how the last simulation went, for the log.
+		hopRejection = from.hopRejection
+		hopTooSlow = from.hopTooSlow
+		laneMissText = from.laneMissText
+		laneCarpetsText = from.laneCarpetsText
+		lastHopRun = from.lastHopRun
+		dipMiss = from.dipMiss
+		touchMiss = from.touchMiss
+		touchLaneText = from.touchLaneText
+		openingMiss = from.openingMiss
+		threadMiss = from.threadMiss
+		// Who committed to the plan, and what goes with it without being compared.
+		planOwners.clear()
+		planOwners += from.planOwners
+		slowJumpsFor = from.slowJumpsFor
+		touchSide = from.touchSide
+		touchHoleStart = from.touchHoleStart
+		// What committing to it resets with it, see [commitLane], [commitNoLane], [commitSwingBack] and [brake].
+		dodgeTicks = from.dodgeTicks
+		dodgeYaw = from.dodgeYaw
+		dodgeCarpets = from.dodgeCarpets
+		onLane = from.onLane
+		dodgeAfterMob = from.dodgeAfterMob
+		fitDodge = from.fitDodge
+		slowTo = from.slowTo
+		landing = from.landing
+		brakeCarpets = from.brakeCarpets
+		brakeY = from.brakeY
+		landedTicks = from.landedTicks
+		levelHoldY = from.levelHoldY
+		layerSpeedUp = from.layerSpeedUp
+		startPos = from.startPos
+		baseY = from.baseY
+		lowerLevels.clear()
+		lowerLevels += from.lowerLevels
+		// What the deciders remember about what's ahead.
+		skipAt = from.skipAt
+		skipHopAt = from.skipHopAt
+		restartFor = from.restartFor
+		restartedFor = from.restartedFor
+		noLaneAt = from.noLaneAt
+		noLaneDodge = from.noLaneDodge
+		noGapAt = from.noGapAt
+		layerHoleAgain = from.layerHoleAgain
+		chosenHole = from.chosenHole
+		chosenLayerAt = from.chosenLayerAt
+		chosenLine = from.chosenLine
+		chosenLane = from.chosenLane
+		chosenBlockAt = from.chosenBlockAt
+	}
+
+	/**
+	 * A copy to search in apart, see [withCtx]: what a [snapshot] carries, and the line and where it looks from, slowing
+	 * down for what's next, the near misses, the clocks, the world and you it reads as they are, the memos and the caches
+	 * empty.
+	 */
+	fun forSearch() = snapshot().also {
 		it.slowAhead = slowAhead
 		it.slowingAhead = slowingAhead
 		it.sprintHeldAhead = sprintHeldAhead
-		it.slowJumpsFor = slowJumpsFor
-		it.dipAt = dipAt
-		it.dipLaneAt = dipLaneAt
-		it.brakeAt = brakeAt
-		it.touchSide = touchSide
-		it.touchHoleStart = touchHoleStart
-		it.dodgeTicks = dodgeTicks
-		it.dodgeYaw = dodgeYaw
-		it.dodgeCarpets = dodgeCarpets
-		it.onLane = onLane
-		it.dodgeAfterMob = dodgeAfterMob
-		it.fitDodge = fitDodge
-		it.slowTo = slowTo
-		it.landing = landing
-		it.brakeCarpets = brakeCarpets
-		it.brakeY = brakeY
-		it.landedTicks = landedTicks
-		it.levelHoldY = levelHoldY
-		it.layerSpeedUp = layerSpeedUp
-		it.startPos = startPos
-		it.baseY = baseY
-		it.lowerLevels += lowerLevels
-		it.skipAt = skipAt
-		it.skipHopAt = skipHopAt
-		it.restartFor = restartFor
-		it.restartedFor = restartedFor
-		it.noLaneAt = noLaneAt
-		it.noLaneDodge = noLaneDodge
-		it.noGapAt = noGapAt
-		it.layerHoleAgain = layerHoleAgain
-		it.chosenHole = chosenHole
-		it.chosenLayerAt = chosenLayerAt
-		it.chosenLine = chosenLine
-		it.chosenLane = chosenLane
-		it.chosenBlockAt = chosenBlockAt
 		it.simFrame = simFrame
 		it.lookState = lookState
 		it.anyHeightTops = anyHeightTops
