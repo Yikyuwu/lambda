@@ -71,6 +71,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import net.minecraft.block.BlockState
 import net.minecraft.entity.ItemEntity
+import net.minecraft.item.ItemStack
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket
 import net.minecraft.network.packet.s2c.play.EntityPositionS2CPacket
@@ -349,9 +350,20 @@ class BuildTask private constructor(
                     return@let true
                 }
 
-                if (player.hotbarAndInventoryStacks.none { it.isEmpty }) {
+                val drop = itemDrop.stack
+                // A full inventory still takes it on a stack of it with room left.
+                val fits = player.hotbarAndInventoryStacks.any {
+                    it.isEmpty || ItemStack.areItemsAndComponentsEqual(it, drop) && it.count < it.maxCount
+                }
+                if (!fits) {
+                    // Junk isn't worth throwing other junk for, and a thrown stack of it would only be picked up again,
+                    // over and over with the build waiting.
+                    if (drop.item in inventoryConfig.disposables) {
+                        dropsToCollect.remove(itemDrop)
+                        return@let true
+                    }
                     val stackToThrow = player.currentScreenHandler.playerSlots.firstOrNull {
-                        it.stack.item in inventoryConfig.disposables
+                        it.stack.item in inventoryConfig.disposables && it.stack.item != drop.item
                     } ?: run {
                         failure("No item in inventory to throw but inventory is full and cant pick up item drop")
                         return@let true
