@@ -114,7 +114,7 @@ object HighwayTools : Module(
     tag = ModuleTag.WORLD,
 ) {
     private val height by setting("Height", 4, 2..10, 1)
-    private val width by setting("Width", 2, 1..30, 1)
+    private val width by setting("Width", 2, 1..30, 1, "Blocks across, along a diagonal too counted straight across, the way you count them standing in it")
     private val pavement by setting("Pavement", Material.None, "Material for the pavement")
     private val rimHeight by setting("Pavement Rim Height", 1, 0..6, 1) { pavement != Material.None }
     private val rim by setting("Rim Height", 0, 0..6, 1, "Rims of solid blocks like netherrack on both sides of the hole without a pavement, kept where they are and placed where missing, like walls. Only with a width of 3 or more, so a lane is left between them") { pavement == Material.None }
@@ -968,7 +968,7 @@ object HighwayTools : Module(
         val center = (width / 2.0).floorToInt()
 
         // Hole
-        structure += generateDirectionalTube(
+        structure += tube(
 	        orthogonal,
 	        width,
 	        height,
@@ -977,7 +977,7 @@ object HighwayTools : Module(
         ).associateWith { TargetState.Air }
 
         if (pavement != Material.None) {
-            structure += generateDirectionalTube(
+            structure += tube(
 	            orthogonal,
 	            width,
 	            1,
@@ -986,7 +986,7 @@ object HighwayTools : Module(
             ).associateWith { target(pavement, pavementMaterial) }
 
             // Left rim
-            structure += generateDirectionalTube(
+            structure += tube(
 	            orthogonal,
 	            1,
 	            rimHeight,
@@ -995,7 +995,7 @@ object HighwayTools : Module(
             ).associateWith { target(pavement, pavementMaterial) }
 
             // Right rim
-            structure += generateDirectionalTube(
+            structure += tube(
 	            orthogonal,
 	            1,
 	            rimHeight,
@@ -1005,7 +1005,7 @@ object HighwayTools : Module(
 
             if (cornerBlock == Corner.None && rimHeight > 0) {
                 // Support for the left rim
-                structure += generateDirectionalTube(
+                structure += tube(
 	                orthogonal,
 	                1,
 	                1,
@@ -1014,7 +1014,7 @@ object HighwayTools : Module(
                 ).associateWith { TargetState.Support(Direction.UP) }
 
                 // Support for the right rim
-                structure += generateDirectionalTube(
+                structure += tube(
 	                orthogonal,
 	                1,
 	                1,
@@ -1026,19 +1026,19 @@ object HighwayTools : Module(
 
         // Without a pavement the rims stand on the floor, the hole's sides up to their height.
         if (hasRims) listOf(-center + width - 1, -center).forEach { side ->
-            structure += generateDirectionalTube(orthogonal, 1, rim, side, 0).associateWith { target(Material.Solid, wallMaterial) }
+            structure += tube(orthogonal, 1, rim, side, 0).associateWith { target(Material.Solid, wallMaterial) }
         }
 
         // Above the rims only the hole's middle is dug to its full height. Paved, the railing is the rim; without a
         // pavement a block over the rim is left free for the railing paved there later.
         val railTop = if (pavement != Material.None) rimHeight else if (hasRims) rim else 0
         if (keepAboveRim && railTop > 0 && height - railTop - 1 > 0) listOf(-center + width - 1, -center).forEach { side ->
-            structure += generateDirectionalTube(orthogonal, 1, height - railTop - 1, side, railTop + 1)
+            structure += tube(orthogonal, 1, height - railTop - 1, side, railTop + 1)
                 .associateWith { target(Material.Solid, wallMaterial) }
         }
 
         if (ceiling != Material.None) {
-            structure += generateDirectionalTube(
+            structure += tube(
 	            orthogonal,
 	            width,
 	            1,
@@ -1060,7 +1060,7 @@ object HighwayTools : Module(
         }
 
         if (floor != Material.None) {
-            structure += generateDirectionalTube(
+            structure += tube(
 	            orthogonal,
 	            width,
 	            1,
@@ -1078,11 +1078,23 @@ object HighwayTools : Module(
     }
 
     /**
+     * The slice's part [width] blocks across from [offset], [height] high from [heightOffset]. Along an axis a row
+     * across the way. Along a diagonal a row along x, which along the way lines up to [width] blocks straight across,
+     * the way it's counted standing in it, not [width] diagonal steps, which came out 2 × [width] - 1 blocks wide.
+     */
+    private fun tube(orthogonal: EightWayDirection, width: Int, height: Int, offset: Int, heightOffset: Int): Set<BlockPos> {
+        if (orthogonal.offsetX == 0 || orthogonal.offsetZ == 0) return generateDirectionalTube(orthogonal, width, height, offset, heightOffset)
+        return (heightOffset until heightOffset + height).flatMapTo(mutableSetOf()) { y ->
+            (offset until offset + width).map { BlockPos(it * orthogonal.offsetX, y, 0) }
+        }
+    }
+
+    /**
      * The blocks right next to the hole on its right ([side] 1) or left (-1), from [elevation] up to the ceiling.
      * Along a diagonal the hole's sides are staircases, and a tube a block further out left a gap all along them.
      */
     private fun wall(orthogonal: EightWayDirection, center: Int, side: Int, elevation: Int): Set<BlockPos> {
-        val hole = generateDirectionalTube(orthogonal, width, 1, -center, 0)
+        val hole = tube(orthogonal, width, 1, -center, 0)
         fun across(pos: BlockPos) = pos.x * orthogonal.offsetX + pos.z * orthogonal.offsetZ
         val edge = if (side < 0) hole.minOf(::across) else hole.maxOf(::across)
         return hole
