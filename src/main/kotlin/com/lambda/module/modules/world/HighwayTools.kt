@@ -100,6 +100,7 @@ import net.minecraft.util.math.Direction
 import net.minecraft.util.math.EightWayDirection
 import net.minecraft.util.math.Vec3d
 import net.minecraft.world.World
+import net.minecraft.world.biome.BiomeKeys
 import java.util.WeakHashMap
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -236,6 +237,8 @@ object HighwayTools : Module(
     private const val FOOD_RETRY_TICKS = 600
     private const val JOIN_GRACE_TICKS = 40
     private const val BLOCKS_TARGET = 128
+    /** The nether biomes magma cubes don't spawn in, no buttons are placed there. Fortresses still spawn them anywhere. */
+    private val NO_MAGMA_CUBES = listOf(BiomeKeys.CRIMSON_FOREST, BiomeKeys.WARPED_FOREST, BiomeKeys.SOUL_SAND_VALLEY)
     private const val THROW_LOOK_TOLERANCE = 5.0
     private val UNSAFE_PASSABLE = listOf(Blocks.COBWEB, Blocks.SWEET_BERRY_BUSH, Blocks.POWDER_SNOW)
 
@@ -918,17 +921,19 @@ object HighwayTools : Module(
      * diagonal step), counted from the world grid so a restart keeps the same spots. Only where the slice has a floor
      * or pavement below.
      */
-    private fun withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
+    private fun SafeContext.withButtons(structure: Structure, button: TargetState.FloorButton?): Structure =
         if (button == null) structure
         else structure.mapValues { (pos, state) -> buttonTarget(structure, pos, state, button) }
 
     /**
-     * [button] on a button spot. Elsewhere on the floor a button is left as it is, e.g. one from a run started further
-     * across, whose middle line was another: wooden ones want an axe to break, and a digger carries none.
+     * [button] on a button spot, not in a biome magma cubes don't spawn in. Elsewhere on the floor a button is left as it
+     * is, e.g. one from a run started further across, whose middle line was another: wooden ones want an axe to break,
+     * and a digger carries none.
      */
-    private fun buttonTarget(structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton): TargetState {
+    private fun SafeContext.buttonTarget(structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton): TargetState {
         if (state != TargetState.Air || pos.y != startPos.y || structure[pos.down()]?.isEmpty() != false) return state
-        return if (onMiddleLine(pos) && Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, 2) == 0) button
+        return if (onMiddleLine(pos) && Math.floorMod(if (octant.offsetX != 0) pos.x else pos.z, 2) == 0 &&
+            NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
         else TargetState.FloorButton(button.accepts, placing = false)
     }
 
