@@ -212,7 +212,7 @@ abstract class StationTask<P : StationPhase>(
 
     protected fun enter(next: P, extraTicks: Int = 0) {
         // Which step it got stuck in, should it.
-        LOG.info("[$title] ${next.description}")
+        log(next.description)
         phase = next
         phaseTimeout = next.timeoutTicks?.plus(extraTicks) ?: Int.MAX_VALUE
         phaseTimer.reset()
@@ -327,19 +327,26 @@ abstract class StationTask<P : StationPhase>(
 
     /** Whether there's a free slot. Otherwise throws away a disposable stack, or fails if there's none. */
     protected fun SafeContext.hasFreeSlotOrThrow(whereIsShulker: () -> String): Boolean {
+        // A later item on the cursor is resynced again.
+        if (player.currentScreenHandler.cursorStack.isEmpty) cursorResynced = false
         if (player.hotbarAndInventorySlots.any { it.stack.isEmpty }) return true
         // Nothing is thrown from a slot with an item on the cursor, e.g. a totem left there.
         if (!player.currentScreenHandler.cursorStack.isEmpty) {
             clearCursor(whereIsShulker)
             return false
         }
-        cursorResynced = false
-        val junk = player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
+        val junk = junkSlot()
         if (junk == null) failure("Inventory is full and has nothing to throw away. ${whereIsShulker()}")
-        else LOG.info("[$title] throwing ${junk.stack.count}x ${junk.stack.name.string} to make room, sent ${submit { throwStack(junk.id) }}")
+        else log("throwing ${junk.stack.count}x ${junk.stack.name.string} to make room, sent ${submit { throwStack(junk.id) }}")
         return false
     }
 
+
+    /** An inventory slot with a disposable stack, thrown away to make room. */
+    protected fun SafeContext.junkSlot() =
+        player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
+
+    protected fun log(msg: String) = LOG.info("[$title] $msg")
 
     /**
      * Gets the item off the cursor with a full inventory: in place of a disposable stack, thrown away from the cursor
@@ -349,12 +356,12 @@ abstract class StationTask<P : StationPhase>(
         val cursor = player.currentScreenHandler.cursorStack
         if (!cursorResynced) {
             cursorResynced = submit { resyncInventory() }
-            LOG.info("[$title] ${cursor.count}x ${cursor.name.string} on the cursor, resyncing, sent $cursorResynced")
+            log("${cursor.count}x ${cursor.name.string} on the cursor, resyncing, sent $cursorResynced")
             return
         }
-        val junk = player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
+        val junk = junkSlot()
             ?: return failure("Inventory is full with ${cursor.name.string} on the cursor and has nothing to throw away. ${whereIsShulker()}")
-        LOG.info("[$title] putting ${cursor.count}x ${cursor.name.string} from the cursor in place of ${junk.stack.count}x ${junk.stack.name.string}, " +
+        log("putting ${cursor.count}x ${cursor.name.string} from the cursor in place of ${junk.stack.count}x ${junk.stack.name.string}, " +
             "thrown away, sent ${submit { pickup(junk.id); pickup(ScreenHandler.EMPTY_SPACE_SLOT_INDEX) }}")
     }
 
@@ -386,7 +393,7 @@ abstract class StationTask<P : StationPhase>(
 
     /** Logs why the phase failed, to find where it got stuck, then lets [stepFailed] recover. */
     protected fun SafeContext.phaseFailed(reason: String?) {
-        LOG.info("[$title] ${phase.description} failed: $reason")
+        log("${phase.description} failed: $reason")
         stepFailed(reason)
     }
 
