@@ -87,7 +87,11 @@ data class BreakInfo(
 
 	context(safeContext: SafeContext)
 	fun internalOnBreak() {
-		if (type != Rebreak) broken = true
+		// Once, a later update of the same block calls this again.
+		if (type != Rebreak && !broken) {
+			broken = true
+			request.onBreak?.invoke(safeContext, context.blockPos)
+		}
 		item?.let { item ->
 			request.onItemDrop?.invoke(safeContext, item)
 		}

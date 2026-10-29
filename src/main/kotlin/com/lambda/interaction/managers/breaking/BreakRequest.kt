@@ -60,6 +60,8 @@ data class BreakRequest private constructor(
 	var onStart: (SafeContext.(BlockPos) -> Unit)? = null
 	var onUpdate: (SafeContext.(BlockPos) -> Unit)? = null
 	var onStop: (SafeContext.(BlockPos) -> Unit)? = null
+	/** Once the block is broken for good, confirmed by the server unless confirmation is off. Not for a rebreak. */
+	var onBreak: (SafeContext.(BlockPos) -> Unit)? = null
 	var onCancel: (SafeContext.(BlockPos) -> Unit)? = null
 	var onItemDrop: (SafeContext.(ItemEntity) -> Unit)? = null
 	var onReBreakStart: (SafeContext.(BlockPos) -> Unit)? = null
@@ -94,6 +96,10 @@ data class BreakRequest private constructor(
 
 		fun onStop(callback: SafeContext.(BlockPos) -> Unit) {
 			request.onStop = callback
+		}
+
+		fun onBreak(callback: SafeContext.(BlockPos) -> Unit) {
+			request.onBreak = callback
 		}
 
 		fun onCancel(callback: SafeContext.(BlockPos) -> Unit) {

@@ -97,6 +97,7 @@ class BuildTask private constructor(
         get() = pendingInteractions.size >= buildConfig.maxPendingActions
 
     private var placements = 0
+    /** Breaks the server confirmed. */
     private var breaks = 0
 
     val actions get() = placements + breaks
@@ -314,7 +315,8 @@ class BuildTask private constructor(
                 when (result) {
                     is BreakResult.Break ->
                         allResults.breakRequest(pendingInteractions) {
-                            onStop { breaks++ }
+                            // Not when sent: one the server rejects isn't progress, see HighwayTools' unstuck.
+                            onBreak { breaks++ }
                             onItemDrop?.let { onItemDrop ->
                                 onItemDrop { onItemDrop(it) }
                             }

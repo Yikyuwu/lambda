@@ -40,18 +40,19 @@ import net.minecraft.item.ItemStack
 import net.minecraft.registry.tag.ItemTags
 
 /**
- * Places buttons down the middle of the highway's floor against magma cubes spawning on it. Once none are
- * left, crafts as many as were carried at the start from a carried shulker of logs, or one the ender chest trip takes
- * and puts back afterwards.
+ * Places buttons down the middle of the highway's floor against magma cubes spawning on it. Once on the last stack,
+ * crafts back up to as many as were carried at the start, at least two stacks, from a carried shulker of logs, or one the
+ * ender chest trip takes and puts back afterwards. Early, so a restock waits for a safe moment, e.g. a mob gone, instead
+ * of the highway going on without buttons.
  */
 class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c {
     val enabled by c.setting("Place Buttons", false, "Places buttons on the floor down the middle of the highway, against magma cubes spawning on it")
     val spacing by c.setting("Button Spacing", 1, 1..4, 1, "A button on every this many blocks along the middle, diagonally every this many diagonal steps") { enabled }
     private val stoneButtons by c.setting("Stone Buttons", true, "Also places stone and polished blackstone buttons when carried. Only wooden ones are crafted") { enabled }
-    private val restock by c.setting("Restock Buttons", true, "Once none are left, crafts as many as were carried at the start from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
+    private val restock by c.setting("Restock Buttons", true, "Once on the last stack, crafts back up to as many as were carried at the start, at least two stacks, from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
 
     private var task: Task<*>? = null
-    /** Buttons carried at the start, which a restock crafts back up to. */
+    /** Buttons carried at the start, at least two stacks, which a restock crafts back up to. */
     private var target = 0
     private var retryTicks = 0
     /** A restock failed, maybe leaving a shulker placed, so none until the highway is started again. */
@@ -72,6 +73,9 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     /** Not the offhand: the build only places what [TargetState.FloorButton] finds in the inventory. */
     private fun SafeContext.carried() = carriedCount(::isButton)
 
+    /** On the last stack, so a restock happens while there are still some to place. */
+    private fun SafeContext.isLow() = carried() <= STACK_SIZE
+
     private fun SafeContext.carriesLogShulker() = player.inventory.mainStacks.any(::isLogShulker)
 
     fun SafeContext.onStart() {
@@ -80,8 +84,8 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         warnedOut = false
         returnLogShulker = false
         craftedThisTrip = false
-        // At least a stack, so a restock isn't a whole shulker trip for a few buttons.
-        target = maxOf(carried(), STACK_SIZE)
+        // Above the last stack a restock starts on, so each one gains at least a stack and can't loop.
+        target = maxOf(carried(), 2 * STACK_SIZE)
         if (enabled && restock) LOG.info("[HighwayButtons] restocks up to $target buttons")
     }
 
@@ -96,21 +100,26 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
             // Ended without its callbacks, e.g. cancelled.
             end()
         }
-        if (!enabled || carried() > 0) {
+        if (!enabled || !isLow()) {
             warnedOut = false
             return
         }
         if (!restock || failed || retryTicks > 0 || c.isBusy) return
         val logShulker = carriesLogShulker()
         // Without either nothing can be crafted, so the highway goes on without buttons.
-        if (!logShulker && !(inventoryConfig.accessEnderChest && enderChests() >= MIN_ENDER_CHESTS)) {
-            if (!warnedOut) warn("Out of buttons and no shulker of logs to craft more, going on without them")
+        val noEnderChest = when {
+            !inventoryConfig.accessEnderChest -> "Access Ender Chest is off"
+            enderChests() < MIN_ENDER_CHESTS -> "fewer than $MIN_ENDER_CHESTS ender chests are carried"
+            else -> null
+        }
+        if (!logShulker && noEnderChest != null) {
+            if (!warnedOut) warn("${carried()} buttons left and no shulker of logs carried to craft more, and $noEnderChest, going on without a restock")
             warnedOut = true
             return
         }
         // Buttons are a bonus, the highway goes on without them until there's room.
         if (!hasRoom()) {
-            if (!warnedOut) warn("Out of buttons, but the inventory has no room to craft $target and too little junk to throw away, going on without them")
+            if (!warnedOut) warn("${carried()} buttons left, but the inventory has no room to craft $target and too little junk to throw away, going on without a restock")
             warnedOut = true
             retryTicks = RETRY_TICKS
             return
@@ -119,7 +128,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         if (!logShulker || waitsForPlayer() || !c.pauseFor(this@HighwayButtons)) return
         task = newTask().onCompletion {
             end()
-            if (carried() == 0) retryTicks = RETRY_TICKS
+            if (isLow()) retryTicks = RETRY_TICKS
         }.onFailure {
             logError("Restocking buttons failed: ${it.message}. Stopped HighwayTools so nothing gets left behind")
             failed = true
@@ -127,19 +136,19 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         }.run()
     }
 
-    /** A shulker of logs from the ender chest once out of buttons with none carried. */
+    /** A shulker of logs from the ender chest once on the last stack of buttons with none carried. */
     fun SafeContext.enderChestWant(): Want? {
         if (!enabled || !restock || failed) return null
         return Want(
             "a shulker of logs", 1, CraftButtonsTask::logsIn,
-            isLow = { carried() == 0 && !carriesLogShulker() },
-            isMet = { carried() > 0 || carriesLogShulker() },
+            isLow = { isLow() && !carriesLogShulker() },
+            isMet = { !isLow() || carriesLogShulker() },
         )
     }
 
     /** Crafting for the ender chest trip to run before it's broken, with the shulker of logs it just took. Null when not needed. */
     fun SafeContext.craftNow(): Task<*>? {
-        if (!enabled || !restock || failed || craftedThisTrip || carried() > 0 || !carriesLogShulker()) return null
+        if (!enabled || !restock || failed || craftedThisTrip || !isLow() || !carriesLogShulker()) return null
         craftedThisTrip = true
         return newTask().onSuccess { returnLogShulker = true }.also { task = it }
     }

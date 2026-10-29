@@ -353,9 +353,9 @@ abstract class StationTask<P : StationPhase>(
         return false
     }
 
-    /** An inventory slot with a disposable stack, thrown away to make room. */
-    protected fun SafeContext.junkSlot() =
-        player.hotbarAndInventorySlots.firstOrNull { it.stack.item in inventoryConfig.disposables }
+    /** One of [slots], by default the inventory's, with a disposable stack [keep] doesn't want, thrown away to make room. */
+    protected fun SafeContext.junkSlot(slots: List<Slot> = player.hotbarAndInventorySlots, keep: (ItemStack) -> Boolean = { false }) =
+        slots.firstOrNull { it.stack.item in inventoryConfig.disposables && !keep(it.stack) }
 
     protected fun log(msg: String) = LOG.info("[$title] $msg")
 
@@ -366,7 +366,7 @@ abstract class StationTask<P : StationPhase>(
     protected fun SafeContext.throwJunkIfFull(handler: ScreenHandler, what: String, keep: (ItemStack) -> Boolean = { false }): Boolean? {
         // A digger's inventory is usually full, and a quick move into it would silently do nothing.
         if (handler.playerSlots.any { it.stack.isEmpty }) return null
-        val junk = handler.playerSlots.firstOrNull { it.stack.item in inventoryConfig.disposables && !keep(it.stack) } ?: run {
+        val junk = junkSlot(handler.playerSlots, keep) ?: run {
             warn("Inventory is full and has nothing to throw away, can't take $what")
             return false
         }
