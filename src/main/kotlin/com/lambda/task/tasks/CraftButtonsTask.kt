@@ -37,6 +37,7 @@ import net.minecraft.screen.slot.Slot
  * needed, turn them into planks and the planks into buttons in the inventory's 2x2 grid, put the leftover logs and
  * planks back, then break the shulker and pick it back up. A log makes 4 planks and a plank one button, so at most 3
  * more than [target] are made. Only exact amounts go into the grid, so a shift-click on the output crafts no more.
+ * Exact amounts are made with a few half-stack right-clicks rather than one click per item, see [planFill].
  */
 class CraftButtonsTask @Ta5kBuilder constructor(
     private val isButton: (ItemStack) -> Boolean,
@@ -64,8 +65,11 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
     private var buttonsAtStart = 0
     private var crafted = false
-    /** How many of the item in the grid go in before it's crafted, 0 until something is put in. */
+    /** How many of [fillItem] the grid is being filled to before it's crafted, 0 while it's not being filled. */
     private var fill = 0
+    private var fillItem: ItemStack = ItemStack.EMPTY
+    /** The inventory slot an exact amount is being split off from over several requests, -1 if none. */
+    private var fillFrom = -1
     /**
      * Ticks waited with something in the grid but no output: the server shows what it crafts, and a shift-click shows
      * one craft until the server says it took all, which comes with the inventory it crafted into.
@@ -200,17 +204,22 @@ class CraftButtonsTask @Ta5kBuilder constructor(
         // Anything in the rest of the grid would spoil the recipe.
         GRID_SLOTS.drop(1).map(handler::getSlot).firstOrNull { !it.stack.isEmpty }?.let { return takeOut(it) }
 
-        if (!grid.stack.isEmpty && grid.stack.count < fill) return topUp(grid)
+        // Never crafted while filling, the grid may hold more than wanted halfway through.
+        if (fill > 0) {
+            if (grid.stack.count != fill) return fillGrid(grid)
+            fill = 0
+            fillFrom = -1
+        }
 
         if (!grid.stack.isEmpty) {
             val result = output.stack
             if (result.isEmpty && ++outputWait < OUTPUT_WAIT_TICKS) return
             // Nothing to craft, e.g. something else was in it, so it goes back into the inventory.
             if (result.isEmpty || !(isPlank(result) || isButton(result))) return takeOut(grid)
-            if (!hasRoomFor(result)) return makeRoomOrStop(result)
-            log("crafting ${result.name.string} from ${grid.stack.count}x ${grid.stack.name.string}")
-            act { quickMove(OUTPUT_SLOT) }
-            fill = 0
+            // A shift-click crafts all that's in the grid, so room is made for all of it while there's junk to throw.
+            if (!hasRoomFor(result, result.count * grid.stack.count)) junkSlot()?.let { return throwJunk(it) }
+            if (!hasRoomFor(result)) return craftFailed("No room for ${result.name.string} and nothing to throw away")
+            act("crafting ${result.name.string} from ${grid.stack.count}x ${grid.stack.name.string}") { quickMove(OUTPUT_SLOT) }
             return
         }
 
@@ -228,76 +237,100 @@ class CraftButtonsTask @Ta5kBuilder constructor(
         }
     }
 
-    /** Puts [amount] of [from] into the empty grid. */
+    /** Starts filling the empty grid with [amount] of what's in [from]. */
     private fun SafeContext.putInGrid(from: Slot, amount: Int) {
         fill = amount
+        fillItem = from.stack.copyWithCount(1)
+        fillFrom = -1
         log("putting $amount ${from.stack.name.string} in the grid")
-        moveToGrid(from, amount)
-    }
-
-    /** Adds the rest of [fill] from carried stacks of the same item. With none left, crafts what's there. */
-    private fun SafeContext.topUp(grid: Slot) {
-        val from = player.hotbarAndInventorySlots
-            .filter { ItemStack.areItemsAndComponentsEqual(it.stack, grid.stack) }
-            .minByOrNull { it.stack.count }
-            ?: run {
-                fill = grid.stack.count
-                return
-            }
-        moveToGrid(from, fill - grid.stack.count)
+        fillGrid(player.playerScreenHandler.getSlot(GRID_SLOT))
     }
 
     /**
-     * Moves [amount] of [from] into the grid: the whole stack in one go, else picked up, right-clicked in one by one and
-     * the rest put back, so the cursor ends empty.
+     * One request towards exactly [fill] in the grid: whole stacks that fit go in with two clicks, then the rest is split
+     * off a bigger stack with the fewest requests [planFill] finds. With nothing left to add, crafts what's there.
      */
-    private fun moveToGrid(from: Slot, amount: Int) {
-        if (amount >= from.stack.count) return act {
-            pickup(from.id)
-            pickup(GRID_SLOT)
+    private fun SafeContext.fillGrid(grid: Slot) {
+        val have = grid.stack.count
+        if (!grid.stack.isEmpty && !sameItem(grid.stack, fillItem)) return craftFailed("${grid.stack.name.string} is in the grid")
+        val ownSlot = fillFrom.takeIf { it >= 0 }?.let(player.playerScreenHandler::getSlot)
+            ?.takeIf { it.stack.isEmpty || sameItem(it.stack, fillItem) }
+        val carried = player.hotbarAndInventorySlots.filter { sameItem(it.stack, fillItem) }
+        if (ownSlot == null && have < fill) {
+            fillFrom = -1
+            carried.filter { it.stack.count <= fill - have }.maxByOrNull { it.stack.count }?.let { from ->
+                return act {
+                    pickup(from.id)
+                    pickup(GRID_SLOT)
+                }
+            }
+            if (carried.isEmpty()) {
+                fill = have
+                return
+            }
         }
+        // Too many in the grid only happens halfway through a split, unless that slot was filled with something else.
+        val sources = ownSlot?.let { listOf(it) }
+            ?: if (have < fill) carried else carried.filter { it.stack.count < it.stack.maxCount } + player.hotbarAndInventorySlots.filter { it.stack.isEmpty }
+        val clicksPerRequest = buildConfig.inventoryLimit.coerceIn(2, MAX_CLICKS_PER_REQUEST)
+        val (from, plan) = sources
+            .mapNotNull { slot -> planFill(slot.stack.count, have, fill, fillItem.maxCount, clicksPerRequest)?.let { slot to it } }
+            .minByOrNull { (_, plan) -> plan.requests * MAX_CLICKS_PER_REQUEST * 2 + plan.clicks }
+            ?: run {
+                // E.g. something took the split's slot, the carried stacks are looked at again.
+                if (ownSlot != null) fillFrom = -1
+                else craftFailed("Can't put exactly $fill ${fillItem.name.string} in the grid")
+                return
+            }
+        fillFrom = from.id
         act {
-            pickup(from.id)
-            repeat(amount.coerceAtMost(SINGLES_PER_REQUEST)) { pickup(GRID_SLOT, 1) }
-            pickup(from.id)
+            plan.first.forEach { pickup(if (it.grid) GRID_SLOT else from.id, if (it.right) 1 else 0) }
         }
     }
 
     /** Takes what's in a grid slot back into the inventory, making room first. */
     private fun SafeContext.takeOut(slot: Slot) {
         if (!hasRoomFor(slot.stack)) return makeRoomOrStop(slot.stack)
-        log("taking ${slot.stack.count}x ${slot.stack.name.string} back out of the grid")
-        act { quickMove(slot.id) }
+        act("taking ${slot.stack.count}x ${slot.stack.name.string} back out of the grid") { quickMove(slot.id) }
     }
 
     private fun SafeContext.filledGridSlot() = GRID_SLOTS.map(player.playerScreenHandler::getSlot).firstOrNull { !it.stack.isEmpty }
 
     private fun SafeContext.inGrid() = GRID_SLOTS.sumOf { player.playerScreenHandler.getSlot(it).stack.count }
 
-    /** Whether all of [stack] fits into the inventory, where a shift-click puts it. */
-    private fun SafeContext.hasRoomFor(stack: ItemStack) =
+    /** Whether [count] of [stack] fit into the inventory, where a shift-click puts them. */
+    private fun SafeContext.hasRoomFor(stack: ItemStack, count: Int = stack.count) =
         player.hotbarAndInventorySlots.sumOf {
             when {
                 it.stack.isEmpty -> stack.maxCount
                 canMerge(it.stack, stack) -> it.stack.maxCount - it.stack.count
                 else -> 0
             }
-        } >= stack.count
+        } >= count
 
     /** Throws away a junk stack, else stops crafting and puts the logs back, since nothing else may go. */
     private fun SafeContext.makeRoomOrStop(stack: ItemStack) {
         val junk = junkSlot() ?: return craftFailed("No room for ${stack.count}x ${stack.name.string} and nothing to throw away")
-        log("throwing ${junk.stack.count}x ${junk.stack.name.string} to make room")
-        act { throwStack(junk.id) }
+        throwJunk(junk)
     }
 
-    private fun act(request: InvRequestBuilder.() -> Unit) {
+    private fun throwJunk(junk: Slot) = act("throwing ${junk.stack.count}x ${junk.stack.name.string} to make room") { throwStack(junk.id) }
+
+    /**
+     * Submits [request], logging [message] once it's sent. A request the packet limit holds back is tried again next
+     * tick, nothing of it was sent.
+     */
+    private fun act(message: String? = null, request: InvRequestBuilder.() -> Unit) {
+        if (!submit(request)) return
+        message?.let(::log)
         outputWait = 0
-        if (submit(request)) progressed()
+        progressed()
     }
 
     /** Takes what's in the grid back out once, then goes on putting the leftovers back. */
     private fun SafeContext.craftFailed(reason: String) {
+        fill = 0
+        fillFrom = -1
         warn("$reason, stopped crafting buttons")
         if (clearing) return doneCrafting()
         clearing = true
@@ -375,8 +408,9 @@ class CraftButtonsTask @Ta5kBuilder constructor(
         private const val GRID_SLOT = 1
         private val GRID_SLOTS = 1..4
         const val PLANKS_PER_LOG = 4
-        /** Three right-clicks between picking up and putting back stay under the default limit of five inventory packets. */
-        private const val SINGLES_PER_REQUEST = 3
+        /** Clicks in one request, at most the inventory packet limit, which is five by default. */
+        private const val MAX_CLICKS_PER_REQUEST = 5
+        /** The server shows the output right after the grid changes, this only ends a wait for a recipe that isn't one. */
         private const val OUTPUT_WAIT_TICKS = 100
 
         fun isLog(stack: ItemStack) = stack.isIn(ItemTags.LOGS)
@@ -388,5 +422,82 @@ class CraftButtonsTask @Ta5kBuilder constructor(
 
         private fun canMerge(stack: ItemStack, other: ItemStack) =
             ItemStack.areItemsAndComponentsEqual(stack, other) && stack.count < stack.maxCount
+
+        private fun sameItem(stack: ItemStack, other: ItemStack) = ItemStack.areItemsAndComponentsEqual(stack, other)
+
+        /** A click in a [FillPlan]: left or right, on the source slot or the grid. */
+        data class FillClick(val grid: Boolean, val right: Boolean)
+
+        /** How to get the grid to an exact amount: [requests] requests of [clicks] clicks in all, [first] the next one. */
+        class FillPlan(val requests: Int, val clicks: Int, val first: List<FillClick>)
+
+        private val FILL_CLICKS = listOf(FillClick(false, false), FillClick(false, true), FillClick(true, false), FillClick(true, true))
+        private val fillPlans = HashMap<List<Int>, FillPlan?>()
+
+        /**
+         * The fewest requests, then clicks, moving items between a source slot holding [source] and the grid holding [grid]
+         * until the grid holds exactly [want], each request at most [maxClicks] clicks and ending with an empty cursor.
+         * A right-click on a slot picks up its bigger half and one with items on the cursor puts one down, so e.g. 27 of
+         * 64 take two requests rather than one click per item. The grid may hold more than [want] in between. Null if
+         * it can't be done, e.g. fewer than [want] in both.
+         */
+        fun planFill(source: Int, grid: Int, want: Int, max: Int, maxClicks: Int): FillPlan? =
+            fillPlans.getOrPut(listOf(source, grid, want, max, maxClicks)) { searchFill(source, grid, want, max, maxClicks) }
+
+        /** Dijkstra over what's in the grid, the source holds the rest, see [planFill]. */
+        private fun searchFill(source: Int, grid: Int, want: Int, max: Int, maxClicks: Int): FillPlan? {
+            val total = source + grid
+            if (want > total || want > max || source > max || grid > max) return null
+            val cost = IntArray(max + 1) { Int.MAX_VALUE }
+            val firstOf = arrayOfNulls<List<FillClick>>(max + 1)
+            val requestsOf = IntArray(max + 1)
+            val clicksOf = IntArray(max + 1)
+            val done = BooleanArray(max + 1)
+            cost[grid] = 0
+            firstOf[grid] = emptyList()
+            while (true) {
+                val g = (0..max).filter { !done[it] && cost[it] != Int.MAX_VALUE }.minByOrNull { cost[it] } ?: return null
+                if (g == want) return FillPlan(requestsOf[g], clicksOf[g], firstOf[g]!!)
+                done[g] = true
+                requestsFrom(total - g, g, max, maxClicks).forEach { (next, clicks) ->
+                    val requests = requestsOf[g] + 1
+                    val clicksSoFar = clicksOf[g] + clicks.size
+                    // Fewer requests first, each waits the move delay, then fewer clicks.
+                    val nextCost = requests * (maxClicks + 1) * 2 + clicksSoFar
+                    if (done[next] || nextCost >= cost[next]) return@forEach
+                    cost[next] = nextCost
+                    requestsOf[next] = requests
+                    clicksOf[next] = clicksSoFar
+                    firstOf[next] = firstOf[g]!!.ifEmpty { clicks }
+                }
+            }
+        }
+
+        /** What the grid can hold after one request from [source] in the source slot and [grid] in the grid, the shortest clicks to each. */
+        private fun requestsFrom(source: Int, grid: Int, max: Int, maxClicks: Int): Map<Int, List<FillClick>> {
+            val best = HashMap<Int, List<FillClick>>()
+            val path = ArrayList<FillClick>()
+            fun search(source: Int, grid: Int, cursor: Int) {
+                if (path.isNotEmpty() && cursor == 0) {
+                    if (best[grid].let { it == null || it.size > path.size }) best[grid] = path.toList()
+                    return
+                }
+                if (path.size == maxClicks) return
+                for (click in FILL_CLICKS) {
+                    val slot = if (click.grid) grid else source
+                    // As vanilla: an empty cursor picks up all or the bigger half, else all or one is put down, as fits.
+                    val moved = when {
+                        cursor == 0 -> if (click.right) (slot + 1) / 2 else slot
+                        else -> -minOf(if (click.right) 1 else cursor, max - slot)
+                    }
+                    if (moved == 0) continue
+                    path += click
+                    if (click.grid) search(source, grid - moved, cursor + moved) else search(source - moved, grid, cursor + moved)
+                    path.removeAt(path.lastIndex)
+                }
+            }
+            search(source, grid, 0)
+            return best
+        }
     }
 }
