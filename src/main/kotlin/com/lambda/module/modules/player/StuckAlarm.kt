@@ -18,6 +18,7 @@
 package com.lambda.module.modules.player
 
 import com.lambda.Lambda.mc
+import com.lambda.event.events.ChatEvent
 import com.lambda.event.events.TickEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
@@ -91,6 +92,9 @@ object StuckAlarm : Module(
 
     private const val TITLE = "Lambda - StuckAlarm"
 
+    /** What 2b2t says once you're through its queue. */
+    private const val CONNECTED = "Connected to the server."
+
     /** KDE's Ocean sounds are softer, so they're preferred when installed. */
     private val soundDirs = listOf("/usr/share/sounds/ocean/stereo", "/usr/share/sounds/freedesktop/stereo")
 
@@ -101,6 +105,11 @@ object StuckAlarm : Module(
     private var anchorTime = 0L
     private var lastAlarm = 0L
     private var alarming = false
+    /**
+     * Whether you've moved, or the server said you're through, since joining a world. Not before: in 2b2t's queue, and
+     * after its restarts in it again, you stand still in a world of its own until you're connected.
+     */
+    private var armed = false
 
     /** The last notification. A new one replaces it, so they don't pile up over a long session. */
     @Volatile private var notification: DesktopNotification? = null
@@ -109,23 +118,43 @@ object StuckAlarm : Module(
     private class DesktopNotification(val process: Process, val id: String?)
 
     init {
-        onEnable { reset() }
+        onEnable {
+            reset()
+            armed = true
+        }
         onDisable {
             reset()
             notification?.process?.destroy()
         }
 
         // Back from a disconnect, the time away isn't time stuck.
-        listen<WorldEvent.Join> { reset() }
+        listen<WorldEvent.Join> {
+            reset()
+            armed = false
+        }
+
+        listen<ChatEvent.Receive> {
+            if (it.message.string.trim() == CONNECTED) {
+                reset()
+                armed = true
+            }
+        }
 
         listen<TickEvent.Pre> {
-            // Waiting in the 2b2t queue you're a spectator who can't move, that's not being stuck.
             if (player.isSpectator) {
                 reset()
                 return@listen
             }
             val now = System.currentTimeMillis()
             val start = anchor
+            if (!armed) {
+                if (start != null && moved(start, player.pos)) armed = true
+                if (start == null || armed) {
+                    anchor = player.pos
+                    anchorTime = now
+                }
+                return@listen
+            }
 
             if (start == null || moved(start, player.pos)) {
                 if (alarming) warn("Moving again")
