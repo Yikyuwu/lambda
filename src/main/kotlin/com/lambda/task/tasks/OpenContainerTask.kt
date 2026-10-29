@@ -143,7 +143,7 @@ class OpenContainerTask @Ta5kBuilder constructor(
         private var opened = WeakReference<ScreenHandler>(null)
         private val opening: MutableSet<OpenContainerTask> = Collections.newSetFromMap(WeakHashMap())
 
-        /** Whether a task is opening a container, so nothing else should make the player sneak. */
+        /** Whether a task is opening a container, so nothing else should make the player sneak or turn it away, see RotationLock. */
         val isOpening: Boolean
             get() {
                 opening.removeIf { !it.isActive }
