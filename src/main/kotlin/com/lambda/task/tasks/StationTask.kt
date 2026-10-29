@@ -120,6 +120,8 @@ abstract class StationTask<P : StationPhase>(
     private var resumeInTicks = -1
     private var phaseTimeout = Int.MAX_VALUE
     private var resynced = false
+    /** Whether the inventory was resynced for the item on the cursor, see [clearCursor]. */
+    private var cursorResynced = false
     private val phaseTimer = TickTimer()
     private val settleTimer = TickTimer()
     /** The chat or game menu open before a container, shown again once it's closed. */
@@ -337,7 +339,14 @@ abstract class StationTask<P : StationPhase>(
 
     /** Whether there's a free slot. Otherwise throws away a disposable stack, or fails if there's none. */
     protected fun SafeContext.hasFreeSlotOrThrow(whereIsShulker: () -> String): Boolean {
+        // A later item on the cursor is resynced again.
+        if (player.currentScreenHandler.cursorStack.isEmpty) cursorResynced = false
         if (player.hotbarAndInventorySlots.any { it.stack.isEmpty }) return true
+        // Nothing is thrown from a slot with an item on the cursor, e.g. a totem left there.
+        if (!player.currentScreenHandler.cursorStack.isEmpty) {
+            clearCursor(whereIsShulker)
+            return false
+        }
         val junk = junkSlot()
         if (junk == null) failure("Inventory is full and has nothing to throw away. ${whereIsShulker()}")
         else log("throwing ${junk.stack.count}x ${junk.stack.name.string} to make room, sent ${submit { throwStack(junk.id) }}")
@@ -363,6 +372,23 @@ abstract class StationTask<P : StationPhase>(
         }
         submit { throwStack(junk.id) }
         return true
+    }
+
+    /**
+     * Gets the item off the cursor with a full inventory: in place of a disposable stack, thrown away from the cursor
+     * then. Resynced first, it's often only on the client's cursor, the server's empty.
+     */
+    private fun SafeContext.clearCursor(whereIsShulker: () -> String) {
+        val cursor = player.currentScreenHandler.cursorStack
+        if (!cursorResynced) {
+            cursorResynced = submit { resyncInventory() }
+            log("${cursor.count}x ${cursor.name.string} on the cursor, resyncing, sent $cursorResynced")
+            return
+        }
+        val junk = junkSlot()
+            ?: return failure("Inventory is full with ${cursor.name.string} on the cursor and has nothing to throw away. ${whereIsShulker()}")
+        log("putting ${cursor.count}x ${cursor.name.string} from the cursor in place of ${junk.stack.count}x ${junk.stack.name.string}, " +
+            "thrown away, sent ${submit { pickup(junk.id); pickup(ScreenHandler.EMPTY_SPACE_SLOT_INDEX) }}")
     }
 
     /**

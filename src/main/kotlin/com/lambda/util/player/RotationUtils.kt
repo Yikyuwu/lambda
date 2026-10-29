@@ -46,6 +46,7 @@ import net.minecraft.util.math.Vec3d
 import org.joml.Math.toRadians
 import java.util.*
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -68,9 +69,17 @@ object RotationUtils {
 		return Rotation(yaw, pitch)
 	}
 
+	/**
+	 * Right between two directions, e.g. looking along a diagonal highway, the slightest difference flips which one it is,
+	 * and placing never settles on one. There it turns to [direction] as well.
+	 */
 	fun SafeContext.lookInDirection(direction: PlaceDirection) =
-		if (!direction.isInArea(player.rotation)) direction.snapToArea(RotationManager.activeRotation)
+		if (!direction.isInArea(player.rotation) || player.rotation.isNearDiagonal) direction.snapToArea(RotationManager.activeRotation)
 		else player.rotation
+
+	private const val DIAGONAL_MARGIN = 0.5
+
+	private val Rotation.isNearDiagonal get() = abs(((yaw % 90.0) + 90.0) % 90.0 - 45.0) < DIAGONAL_MARGIN
 
 	fun AutomatedSafeContext.lookAtHit(hit: HitResult) =
 		when (hit) {

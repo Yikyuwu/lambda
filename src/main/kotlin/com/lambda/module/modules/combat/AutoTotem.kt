@@ -70,8 +70,12 @@ object AutoTotem : Module(
 	                .takeIf { it.isNotEmpty() }
 	                ?.let { totems ->
 		                val cursor = player.currentScreenHandler.cursorStack
+		                // Only the player's own inventory, hotbar or offhand: not the 2x2 grid, result, armor or a container.
 		                val targetSlot = player.currentScreenHandler.slots
-			                .findLast { !cursor.isEmpty && it.canInsert(cursor) }
+			                .findLast {
+				                !cursor.isEmpty && it.inventory === player.inventory && it.index !in 36..39
+					                && it.stack.isEmpty && it.canInsert(cursor)
+			                }
 
 						inventoryRequest {
 							targetSlot?.let { pickup(it.id, 0) }
