@@ -419,7 +419,8 @@ abstract class StationTask<P : StationPhase>(
 
     /** Logs why the phase failed, to find where it got stuck, then lets [stepFailed] recover. */
     protected fun SafeContext.phaseFailed(reason: String?) {
-        log("${phase.description} failed: $reason")
+        // The step says what it waited on, e.g. why a container didn't open.
+        log("${phase.description} failed: $reason${step?.let { " (${it.name})" } ?: ""}")
         stepFailed(reason)
     }
 

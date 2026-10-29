@@ -150,6 +150,11 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     fun SafeContext.craftNow(): Task<*>? {
         if (!enabled || !restock || failed || craftedThisTrip || !isLow() || !carriesLogShulker()) return null
         craftedThisTrip = true
+        // Like a restock on its own. The shulker is kept and crafted from once there's room.
+        if (!hasRoom()) {
+            warn("${carried()} buttons left, but the inventory has no room to craft $target and too little junk to throw away, keeping the shulker of logs for later")
+            return null
+        }
         return newTask().onSuccess { returnLogShulker = true }.also { task = it }
     }
 

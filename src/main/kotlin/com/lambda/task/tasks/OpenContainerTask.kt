@@ -46,13 +46,28 @@ class OpenContainerTask @Ta5kBuilder constructor(
     private val waitForSlotLoad: Boolean = true,
     private val sides: Set<Direction> = Direction.entries.toSet()
 ) : Task<ScreenHandler>(), Automated by automated {
-    override val name get() = "${containerState.description()} at ${blockPos.toShortString()}"
+    override val name get() = "${containerState.description()} at ${blockPos.toShortString()}, $waits"
 
     private var screenHandler: ScreenHandler? = null
     private var containerState = State.Scoping
     private var pathed = false
 
     private val retryTimer = TickTimer()
+    /** What it waited on so far, so a timeout says why the container didn't open. */
+    private val waits = Waits()
+
+    /** Ticks spent on each reason it couldn't click the container yet, and the clicks and screens it got. */
+    private class Waits {
+        var noHit = 0
+        var baritone = 0
+        var rotating = 0
+        var sneaking = 0
+        var clicks = 0
+        var screens = 0
+
+        override fun toString() =
+            "$clicks clicks, $screens screens, waited $noHit ticks for sight, $baritone for Baritone, $rotating rotating, $sneaking sneaking"
+    }
 
     enum class State {
         Pathing,
@@ -80,6 +95,7 @@ class OpenContainerTask @Ta5kBuilder constructor(
         listen<InventoryEvent.Open> {
             if (containerState != State.Opening) return@listen
 
+            waits.screens++
             screenHandler = it.screenHandler
             opened = WeakReference(it.screenHandler)
             containerState = State.SlotLoading
@@ -116,18 +132,33 @@ class OpenContainerTask @Ta5kBuilder constructor(
 
             val checkedHit = runSafeAutomated { lookAtBlock(blockPos, sides) }
                 ?: run {
+                    waits.noHit++
                     containerState = State.Pathing
                     pathed = true
                     if (!BaritoneHandler.isActive) BaritoneHandler.setGoalAndPath(GoalNear(blockPos, 3))
                     return@listen
                 }
             stopPathing()
-            if (interactConfig.rotate && !rotationRequest { rotation(checkedHit.rotation) }.submit().done) return@listen
+            // While Baritone walks, a rotation counts as done only once the camera looks there, so it never would be.
+            // The container is in sight, so nothing needs to walk now.
+            if (interactConfig.rotate && BaritoneHandler.isActive) {
+                waits.baritone++
+                BaritoneHandler.cancel()
+                return@listen
+            }
+            if (interactConfig.rotate && !rotationRequest { rotation(checkedHit.rotation) }.submit().done) {
+                waits.rotating++
+                return@listen
+            }
             // Sneaking with an item in hand would use it on the container instead of opening it.
-            if (player.isSneaking) return@listen
+            if (player.isSneaking) {
+                waits.sneaking++
+                return@listen
+            }
 
             interaction.interactBlock(player, Hand.MAIN_HAND, checkedHit.hit.blockResult ?: return@listen)
             player.swingHand(Hand.MAIN_HAND)
+            waits.clicks++
 
             containerState = State.Opening
         }

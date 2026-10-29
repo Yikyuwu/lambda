@@ -178,9 +178,9 @@ class PlaceContainerTask @Ta5kBuilder constructor(
             !ChestBlock.isChestBlocked(world, blockPos)
         }
         in shulkerBoxes -> {
+            // The space its lid opens into, as ShulkerBoxBlock checks it. The box is already at the block.
             val box = ShulkerEntity
-                .calculateBoundingBox(0.5f, direction, 0.0f, blockPos.toBottomCenterPos())
-                .offset(blockPos)
+                .calculateBoundingBox(1.0f, direction, 0.0f, 0.5f, blockPos.toBottomCenterPos())
                 .contract(1.0E-6)
 
             world.isSpaceEmpty(box)

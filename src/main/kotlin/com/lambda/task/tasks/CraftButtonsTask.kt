@@ -116,24 +116,57 @@ class CraftButtonsTask @Ta5kBuilder constructor(
         placeShulker(shulker)
     }
 
-    /** Logs still to take: a log makes 4 planks, a plank one button, and carried planks and logs count. */
-    private fun SafeContext.logsNeeded(): Int {
-        val planksNeeded = missing() - carriedCount(::isPlank)
-        return (Math.ceilDiv(planksNeeded, PLANKS_PER_LOG) - carriedCount(::isLog)).coerceAtLeast(0)
-    }
+    /** Logs to carry for [target]: a log makes 4 planks, a plank one button, and carried planks count. */
+    private fun SafeContext.logsWanted() =
+        Math.ceilDiv(missing() - carriedCount(::isPlank), PLANKS_PER_LOG).coerceAtLeast(0)
 
-    /** Takes whole stacks of logs, throwing away junk to make room. */
+    /** Logs still to take, carried ones count. */
+    private fun SafeContext.logsNeeded() = (logsWanted() - carriedCount(::isLog)).coerceAtLeast(0)
+
+    /**
+     * Takes about the logs needed, throwing away junk to make room. A stack twice as big as needed is halved into the
+     * inventory, and half a carried stack goes back while what's left is still enough, so fewer than needed are left over.
+     * Halves since a right-click takes half, picking up a stack and putting back all but a few logs takes a click per log.
+     */
     private fun SafeContext.take(handler: ScreenHandler): Boolean {
-        val needed = logsNeeded()
-        if (needed <= 0) return false
+        val needed = logsWanted() - carriedCount(::isLog)
+        if (needed <= 0) return putBackHalf(handler, excess = -needed)
         val logs = handler.containerSlots.filter { isLog(it.stack) }
         // The smallest that's enough, so fewer leftovers go back.
         val from = logs.filter { it.stack.count >= needed }.minByOrNull { it.stack.count }
             ?: logs.maxByOrNull { it.stack.count }
             ?: return false
         throwJunkIfFull(handler, "logs")?.let { return it }
-        log("taking ${from.stack.count}x ${from.stack.name.string}")
+        val empty = handler.playerSlots.firstOrNull { it.stack.isEmpty }
+        if (from.stack.count >= 2 * needed && empty != null) {
+            log("taking half of ${from.stack.count}x ${from.stack.name.string}, $needed needed")
+            submit {
+                pickup(from.id, 1)
+                pickup(empty.id)
+            }
+            return true
+        }
+        log("taking ${from.stack.count}x ${from.stack.name.string}, $needed needed")
         submit { quickMove(from.id) }
+        return true
+    }
+
+    /** Puts half of a carried stack of logs back while [excess] more than needed are carried. False once none fits. */
+    private fun SafeContext.putBackHalf(handler: ScreenHandler, excess: Int): Boolean {
+        // A right-click picks up the bigger half.
+        val from = handler.playerSlots
+            .filter { isLog(it.stack) && Math.ceilDiv(it.stack.count, 2) <= excess }
+            .maxByOrNull { it.stack.count }
+            ?: return false
+        val half = Math.ceilDiv(from.stack.count, 2)
+        val to = handler.containerSlots.firstOrNull {
+            ItemStack.areItemsAndComponentsEqual(it.stack, from.stack) && it.stack.maxCount - it.stack.count >= half
+        } ?: handler.containerSlots.firstOrNull { it.stack.isEmpty } ?: return false
+        log("putting back $half of ${from.stack.count}x ${from.stack.name.string}, $excess more than needed")
+        submit {
+            pickup(from.id, 1)
+            pickup(to.id)
+        }
         return true
     }
 
