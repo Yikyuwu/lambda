@@ -237,7 +237,10 @@ object HighwayTools : Module(
     private const val FOOD_RETRY_TICKS = 600
     private const val JOIN_GRACE_TICKS = 40
     private const val BLOCKS_TARGET = 128
-    /** The nether biomes magma cubes don't spawn in, no buttons are placed there. Fortresses still spawn them anywhere. */
+    /**
+     * The nether biomes magma cubes don't spawn in, no buttons are placed there. A fortress spawns them in any biome, but
+     * only inside its pieces, and those stay below y 100, under the highways at 120.
+     */
     private val NO_MAGMA_CUBES = listOf(BiomeKeys.CRIMSON_FOREST, BiomeKeys.WARPED_FOREST, BiomeKeys.SOUL_SAND_VALLEY)
     private const val THROW_LOOK_TOLERANCE = 5.0
     private val UNSAFE_PASSABLE = listOf(Blocks.COBWEB, Blocks.SWEET_BERRY_BUSH, Blocks.POWDER_SNOW)
