@@ -96,6 +96,28 @@ internal fun halfWidth(direction: Vec3d) = 0.3 * (abs(direction.x) + abs(directi
 internal fun tilted(d: Vec3d, across: Vec3d, lean: Int) = d.add(across.multiply(lean * Math.tan(Math.toRadians(THREAD_TILT))))
 
 /**
+ * The side across [dir] the box swings out to with the heading tilted [lean] across it, 1 to the right, -1 to the left,
+ * 0 to either. Each tick's move goes along the axis the heading goes farther along first, see [swingBlocked], and that
+ * leg takes the box off the line to one side. Diagonally the tilt picks the axis, so it's the side tilted to; off the
+ * diagonal the line's own larger axis goes first whichever way it's tilted, and the box swings out to that side, maybe
+ * the one tilted away from. Either when tilted as little as [THREAD_TILT] and as much as [THREAD_MAX_TILT] don't agree
+ * on it. Along an axis it doesn't swing out, [lean] as it is.
+ */
+internal fun swingSide(dir: Vec3d, lean: Int): Int {
+	val d = forward(dir)
+	if (lean == 0 || abs(d.x * d.z) < 1e-3) return lean
+	val across = across(d)
+	fun side(degrees: Double): Int {
+		val heading = d.add(across.multiply(lean * Math.tan(Math.toRadians(degrees))))
+		val xFirst = abs(heading.x) >= abs(heading.z)
+		// The first leg's move across the way: along x it's d.x · across.x = -d.x · d.z, along z d.z · across.z.
+		return if ((if (xFirst) -d.x * d.z else d.x * d.z) > 0) 1 else -1
+	}
+	val least = side(THREAD_TILT)
+	return if (side(THREAD_MAX_TILT) == least) least else 0
+}
+
+/**
  * The spots across the way, offsets from the line along [dir] through [origin], that gliding along it at [speed] from
  * anywhere between [from] and [to] along it a tick's move runs into one of [boxes] from, with the first move along x
  * when [xFirst], see [passage]. Each an interval, a block, grown by half the box, is in the way of the spots across

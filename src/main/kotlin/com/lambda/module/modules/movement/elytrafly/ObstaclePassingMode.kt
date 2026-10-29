@@ -130,6 +130,7 @@ abstract class ObstaclePassingMode(
 
 	// The fields of [PlanCtx] as the mode reads and writes them, in the one [ctx] is now.
 	var startPos: Vec3d get() = ctx.startPos; set(value) { ctx.startPos = value }
+	private var lineDir: Vec3d? get() = ctx.lineDir; set(value) { ctx.lineDir = value }
 	/**
 	 * The level below the one bounced on: the floor you started on, the line goes up onto a layer of blocks [STEP_HEIGHT]
 	 * high on it, or of carpets, and back down. Up on a layer onto one more on it, the layer left is it, see [setLevel].
@@ -669,7 +670,8 @@ abstract class ObstaclePassingMode(
 			planWorld = System.identityHashCode(world)
 			startPos = floorBelow()
 			baseY = startPos.y
-			if (passerConfig.passObstacles) centerLine()
+			recenteredAt = 0
+			if (passerConfig.passObstacles) setUpLine()
 			failedPasses = 0
 			passCooldown = 0
 			lastGoal = null
@@ -1065,6 +1067,9 @@ abstract class ObstaclePassingMode(
 		dodge?.let { lane -> if (onLayer && planGap(closestLinePoint, snappedDir, lane)) return false }
 		if (dodge != null && steerDodge(closestLinePoint, snappedDir)) return false
 		if (isBraking) return false
+		// Only with nothing planned or flown, which the line moved over would leave on the old one.
+		if (player.isGliding && hop == null && dodge == null && thread == null && !landing && dipAt == null && !inDip && !onLayer &&
+			slowFor == null && slowAhead == null && recenterLine(snappedDir)) closestLinePoint = playerPos.findClosestPointOnLine(snappedDir)
 		// Far ahead while gliding, for time to steer. Close by on the ground below, for walking around it.
 		if (passerConfig.dodge && player.isGliding) {
 			if (onLayer && dodge == null && planGap(closestLinePoint, snappedDir)) return false
@@ -4959,15 +4964,16 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * How many carpets lie ahead along [dir] as far as it looks while gliding, across your width and swing at [speed], only
-	 * to the side of [lean] when tilted, and how far ahead the first is. Anything else that low in the way counts as one too, a layer of them to bounce on as none.
+	 * to the side it swings out to when tilted [lean], see [swingSide], and how far ahead the first is. Anything else that low in the way counts as one too, a layer of them to bounce on as none.
 	 */
 	context(safeContext: SafeContext)
 	private fun Vec3d.carpetsAhead(dir: Vec3d, speed: Double, lean: Int): Pair<Int, Double?> {
 		val across = across(dir)
 		// As far as the box swings out touching down, like the look-ahead on the lane later. Tilted, only to that side.
 		val sweep = with(safeContext) { sweep(dir, speed) }
-		val low = -halfWidth(dir) - if (lean > 0) 0.0 else sweep
-		val high = halfWidth(dir) + if (lean < 0) 0.0 else sweep
+		val side = swingSide(dir, lean)
+		val low = -halfWidth(dir) - if (side > 0) 0.0 else sweep
+		val high = halfWidth(dir) + if (side < 0) 0.0 else sweep
 		val count = ceil((high - low) / RAY_SPACING).toInt()
 		val rays = (0..count).map { add(across.multiply(low + (high - low) * it / count)).add(0.0, CARPET_RAY, 0.0) }
 		// Past one, diagonally its corner reaches farther along.
@@ -5041,19 +5047,124 @@ abstract class ObstaclePassingMode(
 	}
 
 	/**
-	 * Moves the line over to the middle of the highway you start in, for the most room to either side, as the box
-	 * swings out across it at speed. Between the nearest walls at your feet across the way you face.
+	 * The line's direction and where it starts: along the highway you start in, see [findLineDir], else the way you
+	 * face snapped to a step, down its middle, see [centerLine]. With no step it follows where you go, as before.
 	 */
-	private fun SafeContext.centerLine() {
-		val dir = lockYawToStep(Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw))
+	private fun SafeContext.setUpLine() {
+		lineDir = null
+		val look = lockYawToStep(Vec3d.fromPolar(0f, RotationManager.movementYaw ?: player.yaw))
+		if (searchConfig.directionStep <= 0.0) {
+			centerLine(look)
+			return
+		}
+		// Your look itself when it's that step, the line moved over along it as before.
+		val dir = findLineDir(look)?.takeUnless { it.dotProduct(look.normalize()) > 1 - SAME_LINE_DIR } ?: look
+		lineDir = dir.normalize()
+		centerLine(dir)
+	}
+
+	/**
+	 * The way the highway you start in really goes, for a line along [look] snapped to a step that's off it: a tenth of
+	 * a degree drifts two blocks per thousand into its wall, see [recenterLine], a look a step off flies into it. Its
+	 * middle [LINE_FIND_STEP] apart up to [LINE_FIND_DISTANCE] ahead, each found across from the last one's, so a look
+	 * off by a lot still follows it, and the line through them fitted robustly, a block in the way at a spot doesn't bend
+	 * it. Within [LINE_FIND_DEGREES] of that the nearest step or diagonal or the ray from 0,0 through you, the closer one
+	 * (the 2b2t highways all start at spawn), else that line itself. Null with none found, e.g. in the open, too short or
+	 * unloaded.
+	 */
+	private fun SafeContext.findLineDir(look: Vec3d): Vec3d? {
+		val y = startPos.y
+		fun free(at: Vec3d) = passWorld.vanillaSpaceEmpty(glideBox(at, y + searchConfig.minObstacleHeight, y + GLIDE_SIZE), you = false)
+		// How far from [at] the box goes [side] before a wall, to a sixteenth, null with none in [LINE_FIND_HALF].
+		fun reach(at: Vec3d, side: Vec3d): Double? {
+			var lo = 0.0
+			while (free(at.add(side.multiply(lo + 1)))) if (++lo >= LINE_FIND_HALF) return null
+			var hi = lo + 1
+			repeat(4) { val mid = (lo + hi) / 2; if (free(at.add(side.multiply(mid)))) lo = mid else hi = mid }
+			return lo
+		}
+		val middles = ArrayList<Vec3d>()
+		var heading = forward(look)
+		var at = Vec3d(startPos.x, y, startPos.z)
+		var misses = 0
+		var along = 0.0
+		var why = "blocked or in the open"
+		while (along < LINE_FIND_DISTANCE && misses <= LINE_FIND_MISSES) {
+			along += LINE_FIND_STEP
+			if (!passWorld.isLoaded(at)) { why = "unloaded"; break }
+			val side = across(heading)
+			// Into a wall when looked along off it, or a block in the way: the nearest free spot across from it.
+			val spot = generateSequence(0.0) { it + 0.5 }.takeWhile { it <= LINE_FIND_HALF }
+				.flatMap { sequenceOf(it, -it) }.map { at.add(side.multiply(it)) }.firstOrNull { free(it) }
+			val right = spot?.let { reach(it, side) }
+			val left = spot?.let { reach(it, side.negate()) }
+			if (spot == null || right == null || left == null) {
+				misses++
+				at = at.add(heading.multiply(LINE_FIND_STEP))
+				continue
+			}
+			misses = 0
+			val middle = spot.add(side.multiply((right - left) / 2))
+			middles += middle
+			if (middles.size > LINE_FIND_TRACK) heading = forward(middle.subtract(middles[middles.size - 1 - LINE_FIND_TRACK]))
+			at = middle.add(heading.multiply(LINE_FIND_STEP))
+		}
+		fun keepLook(reason: String) = null.also { ElytraFly.debug { "Highway's way not found ($reason), flying the look at %.2f°".format(degreesOf(look)) } }
+		if (middles.size < 2) return keepLook(why)
+		// Theil-Sen: the median of the slopes between middles far enough apart, across the way from the first to the last.
+		val first = middles.first()
+		val way = forward(middles.last().subtract(first))
+		val side = across(way)
+		val t = middles.map { it.subtract(first).dotProduct(way) }
+		val u = middles.map { it.subtract(first).dotProduct(side) }
+		if (t.last() < LINE_FIND_MIN_LENGTH) return keepLook("only %.0f long, $why".format(t.last()))
+		val slopes = ArrayList<Double>()
+		for (i in t.indices) for (j in i + 1 until t.size) if (t[j] - t[i] >= LINE_FIND_PAIR_GAP) slopes += (u[j] - u[i]) / (t[j] - t[i])
+		if (slopes.isEmpty()) return keepLook("too few spots")
+		val slope = slopes.sorted()[slopes.size / 2]
+		val offset = t.indices.map { u[it] - slope * t[it] }.sorted()[t.size / 2]
+		// Not straight, e.g. turning or open on a side at most spots.
+		val inliers = t.indices.count { abs(u[it] - slope * t[it] - offset) < LINE_FIND_FIT }
+		if (inliers < middles.size * LINE_FIND_INLIERS) return keepLook("not straight, $inliers of ${middles.size} spots on a line")
+		val measured = way.add(side.multiply(slope)).normalize()
+		val degrees = degreesOf(measured)
+		val steps = listOf(searchConfig.directionStep, 45.0).map { step -> (degrees / step).roundToInt() * step }
+		val step = steps.minBy { degreesApart(it, degrees) }
+		val origin = Vec3d(player.x, 0.0, player.z).let { if (it.dotProduct(measured) < 0) it.negate() else it }
+		val stepFits = degreesApart(step, degrees) <= LINE_FIND_DEGREES
+		val originFits = origin.horizontalLength() > LINE_FIND_ORIGIN_MIN && degreesApart(degreesOf(origin), degrees) <= LINE_FIND_DEGREES
+		// Both fitting, the closer one: a highway from spawn between steps (5:12 is 22.62°, a tenth off 22.5) drifts off
+		// the step, but one dug along a step through spawn is the step, the ray through you is only off by where across it
+		// you are.
+		val originCloser = originFits && (!stepFits || degreesApart(degreesOf(origin), step) > LINE_FIND_ORIGIN_ON_STEP &&
+			degreesApart(degreesOf(origin), degrees) < degreesApart(step, degrees))
+		val (chosen, how) = when {
+			originCloser -> origin.normalize() to "from 0,0 through you"
+			stepFits -> stepDir(step) to "the nearest step"
+			else -> measured to "as measured"
+		}
+		ElytraFly.debug {
+			"Highway goes %.2f° over %.0f (${middles.size} spots, $inliers on a line), look %.2f°, flying %.2f° $how"
+				.format(degrees, t.last(), degreesOf(look), degreesOf(chosen))
+		}
+		return chosen
+	}
+
+	/**
+	 * Moves the line over to the middle of the highway, for the most room to either side, as the box swings out across
+	 * it at speed. Between the nearest walls across [dir] at your feet as you start, or, [from] there on, where you've
+	 * drifted to off it along the way, see [recenterLine]: only across, how far along you are stays. Whether it moved.
+	 */
+	private fun SafeContext.centerLine(dir: Vec3d, from: Vec3d? = null): Boolean {
+		val origin = from ?: startPos
 		val across = across(dir)
 		val step = laneStep(dir)
 		fun free(at: Vec3d) = passWorld.vanillaSpaceEmpty(glideBox(at, at.y + searchConfig.minObstacleHeight, at.y + GLIDE_SIZE), you = false)
-		fun free(along: Double, lane: Int) = free(startPos.add(dir.multiply(along)).add(across.multiply(lane * step)))
-		if (!free(0.0, 0)) return
+		fun free(along: Double, lane: Int) = free(origin.add(dir.multiply(along)).add(across.multiply(lane * step)))
+		if (!free(0.0, 0)) return false
 		// The walls at a few spots ahead, the middle one found each side. A block lying beside you at one of them isn't
 		// the wall, it'd move the line next to the real one across. Not where there's a wall on that side at most of them.
-		val spots = (0 until CENTER_SPOTS).map { it * CENTER_SPOT_STEP }.filter { passWorld.isLoaded(startPos.add(dir.multiply(it))) && free(it, 0) }
+		val spots = (0 until CENTER_SPOTS).map { it * CENTER_SPOT_STEP }.filter { passWorld.isLoaded(origin.add(dir.multiply(it))) && free(it, 0) }
 		fun wall(side: Int) = spots.mapNotNull { along -> (1..MAX_CENTER_LANES).firstOrNull { !free(along, side * it) } }
 			.takeIf { it.size * 2 > spots.size }?.sorted()?.let { it[it.size / 2] }
 		val right = wall(1)
@@ -5066,16 +5177,34 @@ abstract class ObstaclePassingMode(
 		val shift = if (!straight) middle.coerceIn(-range, range) else {
 			// Which way across points along its axis, and where across it the middle is.
 			val axis = across.x + across.z
-			val at = startPos.add(across.multiply(middle)).let { if (abs(across.x) > 0.5) it.x else it.z }
+			val at = origin.add(across.multiply(middle)).let { if (abs(across.x) > 0.5) it.x else it.z }
 			val toRow = middle + (floor(at) + 0.5 - at) * axis
 			// Too far off where you started, the row next to it back that way.
 			if (abs(toRow) > range) toRow - sign(toRow) else toRow
 		}
-		if (abs(shift) < if (straight) 0.01 else 0.1) return
-		val center = startPos.add(across.multiply(shift))
-		if (!center.hasFloor() || !free(center)) return
-		startPos = center.subtract(dir.multiply(CENTER_BACKOFF))
-		ElytraFly.debug { "Moved the line ${across.multiply(shift).describe(dir)}, to the middle of the highway" }
+		if (abs(shift) < if (from != null) CENTER_DRIFT else if (straight) 0.01 else 0.1) return false
+		val center = origin.add(across.multiply(shift))
+		if (!center.hasFloor() || !free(center)) return false
+		startPos = if (from != null) startPos.add(across.multiply(shift)) else center.subtract(dir.multiply(CENTER_BACKOFF))
+		ElytraFly.debug { "Moved the line ${across.multiply(shift).describe(dir)}, to the middle of the highway${if (from != null) " (drifted)" else ""}" }
+		return true
+	}
+
+	/** When the line was last looked at for drifting off the highway's middle, see [recenterLine]. */
+	private var recenteredAt = 0
+
+	/**
+	 * Moves the line back to the highway's middle every [CENTER_DRIFT_TICKS], when it's drifted off it by
+	 * [CENTER_DRIFT]: one along a step a hair off the highway's way runs into its wall in a few thousand blocks, see
+	 * [findLineDir]. Not along an axis or a diagonal, the highways there are dug along it exactly. Whether it moved.
+	 */
+	private fun SafeContext.recenterLine(dir: Vec3d): Boolean {
+		if (flightTicks - recenteredAt < CENTER_DRIFT_TICKS) return false
+		recenteredAt = flightTicks
+		if (abs(dir.x) < 1e-6 || abs(dir.z) < 1e-6 || abs(abs(dir.x) - abs(dir.z)) < 1e-6) return false
+		if (!centerLine(dir, startPos.add(dir.multiply(progress(player.pos))))) return false
+		forgetChooser()
+		return true
 	}
 
 	/**
@@ -6661,12 +6790,14 @@ abstract class ObstaclePassingMode(
 		}
 		// The box at [along] on [lane], and where it swings out to on the tick on to [toAlong] on [toLane]: a move goes
 		// along one axis and then the other, diagonally the box first goes half a tick's way off to one side, see [sweep].
-		// Tilted toward [side] only to that side, see [leanYaw], else to either.
+		// Tilted toward [side] only to the side it swings out to then, see [leanYaw] and [swingSide], else to either.
+		val swingSides = IntArray(3) { swingSide(dir, it - 1) }
 		fun clearAt(along: Double, lane: Double, held: Double, side: Int = 0, toAlong: Double = along + steerSpeed, toLane: Double = lane): Boolean {
 			val from = point(along, lane)
 			val to = point(toAlong, toLane)
+			val swing = swingSides[side + 1]
 			fun cornerClear(corner: Vec3d) =
-				corner.subtract(from).dotProduct(across).let { off -> side != 0 && (abs(off) < 1e-6 || sign(off) != side.toDouble()) } ||
+				corner.subtract(from).dotProduct(across).let { off -> swing != 0 && (abs(off) < 1e-6 || sign(off) != swing.toDouble()) } ||
 					boxClear(corner, along, held)
 			return boxClear(from, along, held) && cornerClear(Vec3d(to.x, from.y, from.z)) && cornerClear(Vec3d(from.x, from.y, to.z))
 		}
@@ -7632,13 +7763,14 @@ abstract class ObstaclePassingMode(
 		fun free(box: Box) = passWorld.spaceEmpty(box) && avoid.none { it.intersects(box) }
 		val lineY = linePoint.y
 		// As far out along each axis as the box swings across the way, it's in the way where the swing hits it. Tilted
-		// [lean], only to that side: half as far each way, moved over that way by as much. Diagonally the box reaches as far
+		// [lean], only to the side it swings out to, see [swingSide]: half as far each way, moved over that way by as much. Diagonally the box reaches as far
 		// across only right at each spot looked at: in between them it's looked at half a step back too, not padded out
 		// across, that reached farther than the rays finding the lane free, into a railing's corners beside it.
 		val between = halfStepSwing(dir)
 		val halfSteps = swings && between > 1e-9
-		val swing = if (!swings) between else sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (lean == 0) 1 else 2)
-		val shift = across(dir).multiply(lean * sweep(dir) / 2)
+		val side = swingSide(dir, lean)
+		val swing = if (!swings) between else sweep(dir) / (abs(dir.x) + abs(dir.z)) * dir.horizontalLength() / (if (side == 0) 1 else 2)
+		val shift = across(dir).multiply(side * sweep(dir) / 2)
 		fun box(along: Double, feetY: Double, height: Double = GLIDE_SIZE) = linePoint.add(dir.multiply(along)).add(shift).let {
 			glideBox(it, feetY, feetY + height)
 		}
@@ -9077,7 +9209,7 @@ abstract class ObstaclePassingMode(
 
 	/**
 	 * How far ahead [obstacleDistance] is, and the block there. [extra] wider to either side, and with the heading
-	 * tilted [lean] across the way, the box only swings out that side. Swinging as far as at [speed], by default yours,
+	 * tilted [lean] across the way, the box only swings out to one side, see [swingSide]. Swinging as far as at [speed], by default yours,
 	 * [held] with the sprint off, see [swingClears].
 	 */
 	context(safeContext: SafeContext)
@@ -9097,8 +9229,10 @@ abstract class ObstaclePassingMode(
 		val diagonal = abs(direction.x * direction.z) > 1e-3 * direction.horizontalLengthSquared()
 		// Which blocks the swing rays hit the moves clear, each looked at once.
 		val cleared = HashMap<Long, Boolean>()
-		val low = -halfWidth - if (lean > 0) 0.0 else sweep
-		val high = halfWidth + if (lean < 0) 0.0 else sweep
+		// Tilted, only to the side the box swings out to then, see [swingSide].
+		val side = swingSide(direction, lean)
+		val low = -halfWidth - if (side > 0) 0.0 else sweep
+		val high = halfWidth + if (side < 0) 0.0 else sweep
 		val rays = ceil((high - low) / RAY_SPACING).toInt()
 		val offsets = (0..rays).map { across.multiply(low + (high - low) * it / rays) }
 		// Up to the top of the gliding box, as high as it may fly, see [roofInTheWay].
@@ -9586,8 +9720,25 @@ abstract class ObstaclePassingMode(
 		ctx.searchDir?.let { return it }
 		// Across only, the line may be on the floor below you or a layer up, which would shorten it.
 		val travelDiff = Vec3d(player.x - startPos.x, 0.0, player.z - startPos.z).normalize()
-		return lockYawToStep(travelDiff)
+		val travel = lockYawToStep(travelDiff)
+		// Fixed for the flight, see [setUpLine]. Where you went snapped to the same step is that one but for the last bit
+		// of its length, taken as before so a flight along a step flies as it did; off it by over half a step, or along a
+		// highway between steps, it'd turn the line.
+		val line = lineDir ?: return travel
+		return if (travel.dotProduct(line) > 1 - SAME_LINE_DIR) travel else line
 	}
+
+	/** The way [degrees] from +x toward +z goes, a block long, as [lockYawToStep] turns a step into one. */
+	private fun stepDir(degrees: Double): Vec3d {
+		val yaw = Math.toRadians((degrees % 360.0 + 360.0) % 360.0)
+		return Vec3d(cos(yaw), 0.0, sin(yaw))
+	}
+
+	/** How far [a] and [b] are apart in degrees, either way round. */
+	private fun degreesApart(a: Double, b: Double) = abs(((a - b) % 360.0 + 540.0) % 360.0 - 180.0)
+
+	/** The degrees from +x toward +z [v] goes, like [lockYawToStep] measures them. */
+	private fun degreesOf(v: Vec3d) = Math.toDegrees(atan2(v.z, v.x))
 
 	private fun lockYawToStep(vector: Vec3d): Vec3d {
 		// No step, no snapping. Dividing by it would round NaN, which throws.

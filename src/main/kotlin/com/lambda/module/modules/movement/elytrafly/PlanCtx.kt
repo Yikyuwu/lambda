@@ -74,6 +74,8 @@ internal class PlanCtx {
 	var levelHoldY: Double? = null
 	var layerSpeedUp: Boolean = false
 	var startPos: Vec3d = Vec3d.ZERO
+	/** The line's direction, fixed for the flight, see [ObstaclePassingMode.getSnappedDir], null following where you went. */
+	var lineDir: Vec3d? = null
 	var baseY: Double = 0.0
 	val lowerLevels = ArrayDeque<Double>()
 	var skipAt: Double? = null
@@ -216,6 +218,7 @@ internal class PlanCtx {
 		levelHoldY = from.levelHoldY
 		layerSpeedUp = from.layerSpeedUp
 		startPos = from.startPos
+		lineDir = from.lineDir
 		baseY = from.baseY
 		lowerLevels.clear()
 		lowerLevels += from.lowerLevels

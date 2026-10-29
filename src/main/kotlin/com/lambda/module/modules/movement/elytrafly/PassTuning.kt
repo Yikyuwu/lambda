@@ -707,6 +707,32 @@ internal const val CENTER_SPOTS = 8
 internal const val CENTER_SPOT_STEP = 2.0
 /** The line starts this far behind you, so its direction from the start stays the one you fly in once it's moved over. */
 internal const val CENTER_BACKOFF = 16.0
+/** How often the line's looked at for drifting off the highway's middle, in ticks, and how far off it moves it back. */
+internal const val CENTER_DRIFT_TICKS = 40
+internal const val CENTER_DRIFT = 0.5
+/** Two directions closer than this (1 - their dot) are the same line, steps are at least a tenth of a degree apart. */
+internal const val SAME_LINE_DIR = 1e-9
+/** How far ahead the highway's way is followed as you start, and how far apart its middle is looked for. */
+internal const val LINE_FIND_DISTANCE = 144.0
+internal const val LINE_FIND_STEP = 2.0
+/** How far to either side its walls are looked for, farther it's in the open. */
+internal const val LINE_FIND_HALF = 8.0
+/** How many spots in a row without its middle, e.g. a layer across it, blocked or open, it's followed on past. */
+internal const val LINE_FIND_MISSES = 12
+/** How many middles back the way on is followed from, a block in the way at one only turns it a little. */
+internal const val LINE_FIND_TRACK = 6
+/** How long it must be followed for, and how far apart the middles a slope is taken between. */
+internal const val LINE_FIND_MIN_LENGTH = 48.0
+internal const val LINE_FIND_PAIR_GAP = 8.0
+/** How far off the line fitted a middle may be and still be on it, and how many must be. */
+internal const val LINE_FIND_FIT = 0.75
+internal const val LINE_FIND_INLIERS = 0.6
+/** How close in degrees a step or the ray from 0,0 must be to the way measured to fly it instead. */
+internal const val LINE_FIND_DEGREES = 1.0
+/** How far from 0,0 the ray from it through you is taken, closer its way is too rough. */
+internal const val LINE_FIND_ORIGIN_MIN = 256.0
+/** How close to a step the ray from 0,0 through you is taken for that step, the highway dug along it, see [findLineDir]. */
+internal const val LINE_FIND_ORIGIN_ON_STEP = 0.05
 /**
  * How far above the floor carpets are looked for, below their 0.0625. Bounced on like the floor, but coming down
  * right before one its edge stops you dead, and the server sees that sooner than the client. So they're dodged.
