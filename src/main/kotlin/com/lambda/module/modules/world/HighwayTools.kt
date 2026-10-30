@@ -748,8 +748,8 @@ object HighwayTools : Module(
             .takeWhile { (i, pos) -> canWalkTo(pos, index + i + 1) }
             .lastOrNull()?.let { return it.value }
         if (!done(index)) return null
-        // All that's left is out of reach, e.g. a top block far ahead on a diagonal: a step closer.
-        return steps.firstOrNull()?.takeIf { onlyOutOfReach() }
+        // All that's left is out of reach ahead, e.g. a top block far ahead on a diagonal: a step closer.
+        return steps.firstOrNull()?.takeIf { onlyOutOfReachAhead(index) }
     }
 
     /** The blocks of the slice at [index] still to break, null while something there is still to place. */
@@ -767,10 +767,14 @@ object HighwayTools : Module(
         }
     }
 
-    /** Whether the build has nothing it can reach left to do, only blocks out of reach. */
-    private fun onlyOutOfReach() =
+    /**
+     * Whether the build has nothing it can reach left to do, only blocks out of reach ahead of the slice at [index]. One
+     * behind isn't got closer to by a step forward.
+     */
+    private fun onlyOutOfReachAhead(index: Int) =
         (runningTask as? BuildTask)?.takeUnless { it.isWorking }?.nextResult
-            ?.let { (it as? Dependent)?.lastDependency ?: it } is GenericResult.OutOfReach
+            ?.let { (it as? Dependent)?.lastDependency ?: it }
+            ?.let { it is GenericResult.OutOfReach && highwayIndex(it.pos) > index } == true
 
     private fun stopCruising() {
         if (cruiseTarget == null) return
