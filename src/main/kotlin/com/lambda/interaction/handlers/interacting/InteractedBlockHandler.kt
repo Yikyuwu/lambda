@@ -49,7 +49,8 @@ object InteractedBlockHandler : PostActionHandler<InteractInfo>() {
             pendingActions
                 .firstOrNull { it.context.blockPos == event.pos }
                 ?.let { pending ->
-                    if (!pending.context.expectedState.matches(event.newState)) {
+                    // What the build doesn't care about, e.g. which way a floor button faces, which the server decides by its own yaw.
+                    if (!pending.context.expectedState.matches(event.newState, pending.context.preProcessingInfo.ignore)) {
                         if (pending.context.cachedState.matches(event.newState, pending.context.preProcessingInfo.ignore)) {
                             pending.context.cachedState = event.newState
                             return@listen
