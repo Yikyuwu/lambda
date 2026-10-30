@@ -27,7 +27,7 @@ import net.minecraft.block.BlockState
 import net.minecraft.block.FallingBlock
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
-import java.awt.Color
+import com.lambda.interaction.construction.simulation.result.PlannedBlock
 import kotlin.math.sqrt
 
 data class BreakContext(
@@ -40,9 +40,6 @@ data class BreakContext(
     override var cachedState: BlockState,
     private val automated: Automated
 ) : BuildContext(), Automated by automated {
-    private val baseColor = Color(222, 0, 0, 25)
-    private val sideColor = Color(222, 0, 0, 100)
-
     override val blockPos: BlockPos = hitResult.blockPos
     override val expectedState = cachedState.emptyState
     override val sortDistance = runSafe {
@@ -61,7 +58,7 @@ data class BreakContext(
 
     override fun RenderBuilder.render() {
         box(blockPos) {
-            colors(baseColor, sideColor)
+            colors(PlannedBlock.BREAK_FILL, PlannedBlock.BREAK_OUTLINE)
         }
     }
 

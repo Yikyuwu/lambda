@@ -25,7 +25,7 @@ import com.lambda.interaction.managers.rotating.RotationRequest
 import net.minecraft.block.BlockState
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
-import java.awt.Color
+import com.lambda.interaction.construction.simulation.result.PlannedBlock
 
 data class InteractContext(
     override val hitResult: BlockHitResult,
@@ -39,15 +39,12 @@ data class InteractContext(
     val currentDirIsValid: Boolean = false,
     private val automated: Automated
 ) : BuildContext(), Automated by automated {
-    private val baseColor = Color(35, 188, 254, 50)
-    private val sideColor = Color(35, 188, 254, 100)
-
     override val sorter get() = interactConfig.sorter
 
     /** The whole block it places or interacts with, like [BreakContext] does for breaks. */
     override fun RenderBuilder.render() {
         box(blockPos) {
-            colors(baseColor, sideColor)
+            colors(PlannedBlock.PLACE_FILL, PlannedBlock.PLACE_OUTLINE)
         }
     }
 

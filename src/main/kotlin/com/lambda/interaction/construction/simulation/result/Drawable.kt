@@ -18,10 +18,28 @@
 package com.lambda.interaction.construction.simulation.result
 
 import com.lambda.graphics.mc.RenderBuilder
+import net.minecraft.util.math.BlockPos
+import java.awt.Color
 
 /**
  * Represents a [BuildResult] that can be rendered in-game.
  */
 interface Drawable {
     fun RenderBuilder.render()
+}
+
+/** A block the build still has to break, in red, or place a block at, in blue, drawn whole. */
+class PlannedBlock(private val pos: BlockPos, private val breaking: Boolean) : Drawable {
+    override fun RenderBuilder.render() {
+        box(pos) {
+            if (breaking) colors(BREAK_FILL, BREAK_OUTLINE) else colors(PLACE_FILL, PLACE_OUTLINE)
+        }
+    }
+
+    companion object {
+        val BREAK_FILL = Color(222, 0, 0, 25)
+        val BREAK_OUTLINE = Color(222, 0, 0, 100)
+        val PLACE_FILL = Color(35, 188, 254, 50)
+        val PLACE_OUTLINE = Color(35, 188, 254, 100)
+    }
 }

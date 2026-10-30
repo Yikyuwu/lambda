@@ -38,6 +38,7 @@ import com.lambda.interaction.construction.simulation.result.BuildResult
 import com.lambda.interaction.construction.simulation.result.Contextual
 import com.lambda.interaction.construction.simulation.result.Dependent
 import com.lambda.interaction.construction.simulation.result.Drawable
+import com.lambda.interaction.construction.simulation.result.PlannedBlock
 import com.lambda.interaction.construction.simulation.result.Navigable
 import com.lambda.interaction.construction.simulation.result.Resolvable
 import com.lambda.interaction.construction.simulation.result.results.BreakResult
@@ -258,9 +259,16 @@ class BuildTask private constructor(
 
     private fun AutomatedSafeContext.processResults() {
         Client.drawables = results
-            .filterIsInstance<Drawable>()
+            .mapNotNull { result ->
+                when (val final = (result as? Dependent)?.lastDependency ?: result) {
+                    // Most of what's still to do, drawn like what's in reach: red to break, blue to place.
+                    is GenericResult.OutOfReach, is GenericResult.NotVisible ->
+                        PlannedBlock(final.pos, !blockState(final.pos).isReplaceable)
+                    is Drawable -> final
+                    else -> null
+                }
+            }
             .plus(pendingInteractions.toList())
-            .toList()
         Client.drawablesOwner = this@BuildTask
 
         val bestResult = viableResults.firstOrNull() ?: return
