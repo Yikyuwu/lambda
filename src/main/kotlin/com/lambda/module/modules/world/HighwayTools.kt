@@ -40,6 +40,7 @@ import com.lambda.interaction.construction.blueprint.PropagatingBlueprint.Compan
 import com.lambda.interaction.construction.simulation.result.Contextual
 import com.lambda.interaction.construction.simulation.result.Dependent
 import com.lambda.interaction.construction.simulation.result.results.GenericResult
+import com.lambda.interaction.construction.simulation.result.results.InteractResult
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.SpleefGuard
@@ -87,6 +88,7 @@ import com.lambda.util.extension.moveY
 import com.lambda.util.extension.playerSlots
 import com.lambda.util.math.MathUtils.floorToInt
 import com.lambda.util.math.rotateClockwise
+import com.lambda.util.player.MovementUtils.jumping
 import com.lambda.util.player.MovementUtils.octant
 import com.lambda.util.player.MovementUtils.sneaking
 import com.lambda.util.player.RotationUtils.lookAt
@@ -153,6 +155,7 @@ object HighwayTools : Module(
         ),
         description = "The items to throw away",
     ) { throwJunk }
+    private val sprintJump by setting("Sprint Jump", true, "Sprint-jumps on the way to built highway ahead, faster than sprinting. Only where every jump lands on built floor with room above, not while placing")
     private val provokeEndermen by setting("Provoke Endermen", false, "Anger endermen in the way, then back off so they teleport away. Off while Kill Mobs is on")
     private val backOffDistance by setting("Back Off Distance", 3, 1..6, 1, "How far to back off from a provoked enderman", " blocks") { provokeEndermen }
     @Group(ENDER_CHEST_GROUP) private val restockPickaxes by setting("Restock Pickaxe Shulkers", true, "Takes a shulker with fresh tools from the ender chest once no carried one has any. Needs Restock Tools") { inventoryConfig.accessEnderChest }
@@ -239,6 +242,9 @@ object HighwayTools : Module(
     private const val WALK_START_TICKS = 40
     private const val TICKS_PER_BLOCK = 20
     private const val CRUISE_LOOKAHEAD = 6
+    /** How far the cruise target has to be for a sprint jump, a little more than one covers. */
+    private const val SPRINT_JUMP_DISTANCE = 4.5
+    private val CORNERS = listOf(-0.3 to -0.3, -0.3 to 0.3, 0.3 to -0.3, 0.3 to 0.3)
     private const val RETARGET_DISTANCE = 1.5
     private const val MAX_WAIT_FACTOR = 3
     private const val CRUISE_STALL_TICKS = 20
@@ -428,6 +434,7 @@ object HighwayTools : Module(
         listen<MovementEvent.InputUpdate> {
             if (mode is Mode.Walking) it.input.sneaking = true
             aura.crouch(it.input)
+            if (sprintJump && canSprintJump()) it.input.jumping = true
         }
 
         // A walk or stare that paused the build can't finish any more.
@@ -875,6 +882,31 @@ object HighwayTools : Module(
     private fun stopAndResume() {
         mode = Mode.Idle
         resume(this)
+    }
+
+    /**
+     * Whether a jump now, while sprinting to [cruiseTarget], lands before it: far enough away, the build placing nothing,
+     * and the way there over built floor with room for the head at the top of the jump, so nothing to fall into or bump.
+     */
+    private fun SafeContext.canSprintJump(): Boolean {
+        val target = cruiseTarget ?: return false
+        if (mode != Mode.Idle || !BaritoneHandler.isActive || !player.isOnGround || !player.isSprinting ||
+            player.isSneaking || player.isUsingItem || player.isTouchingWater || player.isInLava) return false
+        val task = runningTask as? BuildTask ?: return false
+        if (task.isWorking || task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } is InteractResult) return false
+        val end = Vec3d.ofBottomCenter(target)
+        val way = end.subtract(player.pos).let { Vec3d(it.x, 0.0, it.z) }
+        if (way.length() < SPRINT_JUMP_DISTANCE) return false
+        val dir = way.normalize()
+        val y = player.blockPos.y
+        // The player's corners along the way, every quarter block.
+        return (0..(way.length() / 0.25).toInt()).all { i ->
+            val at = player.pos.add(dir.multiply(i * 0.25))
+            CORNERS.all { (dx, dz) ->
+                val pos = BlockPos.ofFloored(at.x + dx, y.toDouble(), at.z + dz)
+                canStandAt(pos) && (2..3).all { up -> isPassable(pos.up(up)) && !blockState(pos.up(up)).hasFluid }
+            }
+        }
     }
 
     /** Room for the player, solid ground below and nothing to step into that hurts or holds you. */
