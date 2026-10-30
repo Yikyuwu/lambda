@@ -776,9 +776,10 @@ object HighwayTools : Module(
         val index = highwayIndex(player.blockPos)
         val end = index + doneDistance
         if (distance in 0..end) return false
-        if (!isLoaded(highwayPos(end))) return false
+        // Every block loaded, not just the middle: one in a chunk that isn't reads as air, e.g. beside the far end.
         return (minOf(slices.firstOrNull() ?: index, index)..end).all { s ->
-            sliceDone(slice, s, button, spots, if (s <= index) { _ -> true } else { _ -> false }) { task.isPending(it) }
+            slice.move(highwayPos(s)).keys.all { isLoaded(it) } &&
+                sliceDone(slice, s, button, spots, if (s <= index) { _ -> true } else { _ -> false }) { task.isPending(it) }
         }
     }
 
