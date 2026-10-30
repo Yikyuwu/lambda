@@ -111,6 +111,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         failed = false
         retryTicks = 0
         warnedOut = false
+        warnedMob = false
         returnLogShulker = false
         craftedThisTrip = false
         if (enabled && restock) LOG.info("[HighwayButtons] restocks up to $target buttons")

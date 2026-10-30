@@ -942,6 +942,7 @@ object HighwayTools : Module(
         nextSlice = 0
         released.clear()
         lastEye = null
+        buttonHoldTicks = 0
         val blueprint = propagatingBlueprint { structure ->
             // The build finished all of them, or [rollSlices] dropped the done ones. Not past button spots still waiting,
             // those are placed first, going back to them if they're out of reach.
