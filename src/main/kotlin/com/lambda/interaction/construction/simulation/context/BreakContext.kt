@@ -19,6 +19,7 @@ package com.lambda.interaction.construction.simulation.context
 
 import com.lambda.context.Automated
 import com.lambda.graphics.mc.RenderBuilder
+import com.lambda.interaction.construction.simulation.result.PlannedBlock
 import com.lambda.interaction.managers.rotating.RotationRequest
 import com.lambda.interaction.material.StackSelection
 import com.lambda.threading.runSafe
@@ -27,7 +28,6 @@ import net.minecraft.block.BlockState
 import net.minecraft.block.FallingBlock
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
-import com.lambda.interaction.construction.simulation.result.PlannedBlock
 import kotlin.math.sqrt
 
 data class BreakContext(

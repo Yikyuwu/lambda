@@ -20,12 +20,12 @@ package com.lambda.interaction.construction.simulation.context
 import com.lambda.context.Automated
 import com.lambda.graphics.mc.RenderBuilder
 import com.lambda.interaction.construction.simulation.processing.PreProcessingInfo
+import com.lambda.interaction.construction.simulation.result.PlannedBlock
 import com.lambda.interaction.managers.interacting.InteractRequest
 import com.lambda.interaction.managers.rotating.RotationRequest
 import net.minecraft.block.BlockState
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
-import com.lambda.interaction.construction.simulation.result.PlannedBlock
 
 data class InteractContext(
     override val hitResult: BlockHitResult,
