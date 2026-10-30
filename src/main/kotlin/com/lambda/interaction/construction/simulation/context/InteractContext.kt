@@ -25,7 +25,6 @@ import com.lambda.interaction.managers.rotating.RotationRequest
 import net.minecraft.block.BlockState
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
-import net.minecraft.util.math.Box
 import java.awt.Color
 
 data class InteractContext(
@@ -45,14 +44,9 @@ data class InteractContext(
 
     override val sorter get() = interactConfig.sorter
 
+    /** The whole block it places or interacts with, like [BreakContext] does for breaks. */
     override fun RenderBuilder.render() {
-        val box = with(hitResult.pos) {
-            Box(
-                x - 0.05, y - 0.05, z - 0.05,
-                x + 0.05, y + 0.05, z + 0.05,
-            ).offset(hitResult.side.doubleVector.multiply(0.05))
-        }
-        box(box) {
+        box(blockPos) {
             colors(baseColor, sideColor)
         }
     }

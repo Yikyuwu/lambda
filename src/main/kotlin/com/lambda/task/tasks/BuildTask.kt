@@ -261,6 +261,7 @@ class BuildTask private constructor(
             .filterIsInstance<Drawable>()
             .plus(pendingInteractions.toList())
             .toList()
+        Client.drawablesOwner = this@BuildTask
 
         val bestResult = viableResults.firstOrNull() ?: return
         handleResult(bestResult, viableResults)

@@ -23,6 +23,7 @@ import com.lambda.graphics.mc.renderer.TickedRenderer.Companion.tickedRenderer
 import com.lambda.interaction.construction.simulation.result.Drawable
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
+import com.lambda.task.Task
 import java.awt.Color
 
 object Client : Module(
@@ -50,10 +51,13 @@ object Client : Module(
 
 	@Volatile
 	var drawables = listOf<Drawable>()
+	/** The build task [drawables] are from. They're only drawn while it runs, so none are left behind once it ends or pauses. */
+	@Volatile
+	var drawablesOwner: Task<*>? = null
 
 	init {
 		tickedRenderer("Client Ticked Renderer") {
-			if (buildTaskRenders) drawables.forEach { with(it) { render() } }
+			if (buildTaskRenders && drawablesOwner?.state == Task.State.Running) drawables.forEach { with(it) { render() } }
 		}
 	}
 }
