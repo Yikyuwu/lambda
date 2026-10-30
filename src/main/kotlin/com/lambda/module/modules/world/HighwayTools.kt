@@ -142,7 +142,7 @@ object HighwayTools : Module(
     private val distance by setting("Distance", -1, -1..1000000, 1, "Distance to build the highway/tunnel (negative for infinite)")
     private val sliceSize by setting("Slice Size", 5, 1..5, 1, "Number of slices to build at once")
     private val stopWhenDone by setting("Stop When Done", false, "Turns off once the highway ahead is already built, nothing to dig or place, e.g. to find where it ended while AFK. Buttons missing ahead don't count")
-    private val doneDistance by setting("Done Distance", 16, 4..64, 1, "How far ahead has to be built already, all of it loaded, so a short stretch through open space doesn't stop it", " blocks") { stopWhenDone }
+    private val doneDistance by setting("Done Distance", 16, 4..16, 1, "How far ahead has to be built already, all of it loaded, so a short stretch through open space doesn't stop it", " blocks") { stopWhenDone }
     private val keepMoving by setting("Keep Moving", true, "Walk on while the slices ahead are done instead of stopping after each one. Needs Pathing")
     private val unstuckStep by setting("Unstuck Step", true, "Step forward crouched when the build makes no progress, e.g. after being knocked out of reach")
     private val unstuckDelay by setting("Unstuck Delay", 5, 2..60, 1, "Time without progress before stepping", " s") { unstuckStep }
