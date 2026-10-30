@@ -37,6 +37,8 @@ import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.construction.blueprint.Blueprint.Companion.emptyStructure
 import com.lambda.interaction.construction.blueprint.PropagatingBlueprint
 import com.lambda.interaction.construction.blueprint.PropagatingBlueprint.Companion.propagatingBlueprint
+import com.lambda.interaction.construction.simulation.result.Contextual
+import com.lambda.interaction.construction.simulation.result.Dependent
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.SpleefGuard
@@ -90,6 +92,7 @@ import com.lambda.util.player.RotationUtils.lookAt
 import com.lambda.util.world.StructureUtils.generateDirectionalTube
 import net.minecraft.block.Block
 import net.minecraft.block.Blocks
+import net.minecraft.block.ButtonBlock
 import net.minecraft.entity.Entity
 import net.minecraft.entity.EntityPose
 import net.minecraft.entity.mob.EndermanEntity
@@ -180,6 +183,10 @@ object HighwayTools : Module(
     private var rolling = false
     /** Whether the blueprint places buttons, null without them, to build it anew once that changes, see [rollSlices]. */
     private var blueprintPlacing: Boolean? = null
+    /** Button spots let go to be placed, the others wait to be placed several at once, see [releaseButtons]. */
+    private val released = mutableSetOf<BlockPos>()
+    private var lastEye: Vec3d? = null
+    private var buttonHoldTicks = 0
     /** Who paused the build with [pauseFor]. Only they resume it. */
     private var pausedBy: Any? = null
 
@@ -241,6 +248,15 @@ object HighwayTools : Module(
     private const val THROW_COOLDOWN_TICKS = 5
     private const val DEBUG_INTERVAL_TICKS = 100
     private const val SHULKER_SWAP_DELAY = 5
+    /** Button spots in reach that are placed together at most, fewer with fewer interactions per tick. */
+    private const val BUTTON_BATCH = 6
+    /** How close to the reach a button spot getting further away is let go, so it's placed before it's out of reach. */
+    private const val BUTTON_LEAVE_MARGIN = 1.0
+    /** How close to the reach a let go spot stops the walk until it's placed. */
+    private const val BUTTON_HOLD_MARGIN = 0.5
+    private const val BUTTON_REACH_MARGIN = 0.1
+    /** How long a let go spot stops the walk at most, e.g. while a mob stands on it. */
+    private const val MAX_BUTTON_HOLD_TICKS = 10
     private const val ENDER_CHEST_GROUP = "Ender Chest"
     private const val FOOD_GROUP = "Food"
     private const val TOOL_RESTOCK_GROUP = "Tool Restock"
@@ -281,7 +297,7 @@ object HighwayTools : Module(
 			.withEdits {
 				buildConfig.apply {
 					editTypedSettings(::pathing, ::spleefEntities) { defaultValue(true) }
-					::blockReach.editSetting { defaultValue(3.99) }
+					::blockReach.editSetting { defaultValue(4.0) }
 				}
 				grimPacing(breaksPerTick = 8, interactionsPerTick = 2)
 				breakConfig.apply {
@@ -381,7 +397,8 @@ object HighwayTools : Module(
             if (running) rollSlices(task)
             if (running && throwJunk) throwOutJunk()
             if (running && provokeEndermen && !aura.enabled) blockingEnderman()?.let { return@listen provoke(it) }
-            if (running && keepMoving && buildConfig.pathing) cruise() else stopCruising()
+            val holdForButtons = running && releaseButtons(task)
+            if (running && keepMoving && buildConfig.pathing && !holdForButtons) cruise() else stopCruising()
             if (running && inventoryLoaded && restockFood) restockFoodFromShulker()
             if (running && inventoryLoaded && inventoryConfig.accessEnderChest) restockFromEnderChest()
             // Not once a missing ender chest stopped it.
@@ -694,7 +711,8 @@ object HighwayTools : Module(
         val button = with(buttons) { floorButton() }
         val index = highwayIndex(player.blockPos)
         val spots = spawnSpots()
-        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots)
+        // Walks past button spots still waiting, they're let go before they're out of reach, see [releaseButtons].
+        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots, { it in released })
 
         if (!done(index)) return null
         return safeSteps(forward = true, CRUISE_LOOKAHEAD)
@@ -862,9 +880,12 @@ object HighwayTools : Module(
     private fun buildHighway() {
         slices.clear()
         nextSlice = 0
-        val blueprint = propagatingBlueprint {
-            // The build finished all of them, or [rollSlices] dropped the done ones.
-            if (!rolling) slices.clear()
+        released.clear()
+        lastEye = null
+        val blueprint = propagatingBlueprint { structure ->
+            // The build finished all of them, or [rollSlices] dropped the done ones. Not past button spots still waiting,
+            // those are placed first, going back to them if they're out of reach.
+            if (!rolling && !releaseLeftButtons(structure)) slices.clear()
             while (slices.size < sliceSize && (distance < 0 || nextSlice < distance)) slices.addLast(nextSlice++)
             if (slices.isEmpty()) {
                 this@HighwayTools.info("Highway built")
@@ -874,7 +895,7 @@ object HighwayTools : Module(
             val slice = slice()
             val button = with(buttons) { floorButton() }
             blueprintPlacing = button?.placing
-            withButtons(fitToBorder(slices.fold(emptyStructure()) { structure, i -> structure + slice.move(highwayPos(i)) }), button, spawnSpots())
+            withButtons(fitToBorder(slices.fold(emptyStructure()) { built, i -> built + slice.move(highwayPos(i)) }), button, spawnSpots())
         }
         this.blueprint = blueprint
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
@@ -886,13 +907,14 @@ object HighwayTools : Module(
      * Swaps the done slices at the front for new ones ahead, so the build keeps going instead of waiting for all of them.
      * Only once the server confirmed them, a block it puts back would be left behind otherwise. Once buttons run out or
      * are restocked the slices are built anew too, else the blueprint and [sliceDone] disagree and none counts as done.
+     * A slice with a button spot still waiting isn't dropped, the spot would be left without one.
      */
     private fun SafeContext.rollSlices(task: BuildTask) {
         val slice = slice()
         val button = with(buttons) { floorButton() }
         val spots = spawnSpots()
         var dropped = false
-        while (slices.isNotEmpty() && sliceDone(slice, slices.first(), button, spots) { task.isPending(it) }) {
+        while (slices.isNotEmpty() && sliceDone(slice, slices.first(), button, spots, { true }) { task.isPending(it) }) {
             slices.removeFirst()
             dropped = true
         }
@@ -902,12 +924,14 @@ object HighwayTools : Module(
         rolling = false
     }
 
+    /** Whether the slice at [index] is built, with buttons on the spots [due], others may still wait for theirs. */
     private fun SafeContext.sliceDone(
-        slice: Structure, index: Int, button: TargetState.FloorButton?, spots: Set<BlockPos>, pending: (BlockPos) -> Boolean = { false },
+        slice: Structure, index: Int, button: TargetState.FloorButton?, spots: Set<BlockPos>, due: (BlockPos) -> Boolean,
+        pending: (BlockPos) -> Boolean = { false },
     ): Boolean {
         val structure = fitToBorder(slice.move(highwayPos(index)))
         return structure.all { (pos, state) ->
-            val target = if (button != null) buttonTarget(structure, pos, state, button, spots) else state
+            val target = if (button != null) buttonTarget(structure, pos, state, button, spots, due) else state
             target.matches(blockState(pos), pos) && !pending(pos)
         }
     }
@@ -950,24 +974,84 @@ object HighwayTools : Module(
         return fitted + seal.associateWith { TargetState.Solid(emptySet()) }
     }
 
-    /** Buttons on the floor where a magma cube could spawn, see [spawnSpots]. */
+    /** Buttons on the floor where a magma cube could spawn, see [spawnSpots], each placed once [released]. */
     private fun SafeContext.withButtons(structure: Structure, button: TargetState.FloorButton?, spots: Set<BlockPos>): Structure =
         if (button == null) structure
-        else structure.mapValues { (pos, state) -> buttonTarget(structure, pos, state, button, spots) }
+        else structure.mapValues { (pos, state) -> buttonTarget(structure, pos, state, button, spots) { it in released } }
 
     /**
-     * [button] on one of the [spots], not in a biome magma cubes don't spawn in. Elsewhere on the floor a button is left
-     * as it is, e.g. one placed by an earlier run: wooden ones want an axe to break, and a digger carries none.
+     * [button] on one of the [spots], placed once [due], not in a biome magma cubes don't spawn in. Elsewhere on the floor
+     * a button is left as it is, e.g. one placed by an earlier run: wooden ones want an axe to break, and a digger carries none.
      */
     private fun SafeContext.buttonTarget(
         structure: Structure, pos: BlockPos, state: TargetState, button: TargetState.FloorButton, spots: Set<BlockPos>,
+        due: (BlockPos) -> Boolean,
     ): TargetState {
         if (state != TargetState.Air || structure[pos.down()]?.isEmpty() != false) return state
         val origin = highwayPos(sliceAt(pos.subtract(startPos)))
         val spot = spotPos.set(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z) in spots
-        return if (spot && NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button
+        return if (spot && NO_MAGMA_CUBES.none { world.getBiome(pos).matchesKey(it) }) button.until { due(pos) }
         else TargetState.FloorButton(button.accepts, placing = false)
     }
+
+    /** The button spots of [structure] that wait for a button, see [buttonTarget]. */
+    private fun SafeContext.waitingButtons(structure: Structure) = structure.entries.asSequence()
+        .filter { (pos, state) -> state is TargetState.FloorButton && state.placing && blockState(pos).isAir }
+        .map { it.key }
+
+    /**
+     * Lets the button spots in reach that wait be placed, all in one go, so the hotbar is swapped to buttons and back once
+     * instead of for each: once [BUTTON_BATCH] or interactions per tick wait, once one getting further away is about to
+     * be out of reach, or while the build has nothing else to do in reach. One that's still left behind keeps its slice,
+     * see [rollSlices], until [releaseLeftButtons] lets it go. Returns whether to stop walking until those let go are
+     * placed, one of them is about to be out of reach.
+     */
+    private fun SafeContext.releaseButtons(task: BuildTask): Boolean {
+        val structure = blueprint?.structure.orEmpty()
+        released.retainAll { (structure[it] as? TargetState.FloorButton)?.placing == true && blockState(it).block !is ButtonBlock }
+        val eye = player.eyePos
+        val lastEye = lastEye ?: eye
+        this@HighwayTools.lastEye = eye
+        val reach = buildConfig.blockReach
+        val waiting = mutableListOf<BlockPos>()
+        var leaving = false
+        var hold = false
+        waitingButtons(structure).filter { !task.isPending(it) }.forEach { pos ->
+            val distance = buttonDistance(pos, eye)
+            if (distance > reach - BUTTON_REACH_MARGIN) return@forEach
+            if (pos in released) {
+                if (distance > reach - BUTTON_HOLD_MARGIN) hold = true
+                return@forEach
+            }
+            waiting += pos
+            if (distance > reach - BUTTON_LEAVE_MARGIN && distance > buttonDistance(pos, lastEye)) leaving = true
+        }
+        buttonHoldTicks = if (hold) buttonHoldTicks + 1 else 0
+        if (waiting.isNotEmpty()) {
+            val idle = task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } !is Contextual
+            val batch = minOf(interactConfig.interactionsPerTick, buildConfig.maxPendingActions, BUTTON_BATCH).coerceAtLeast(1)
+            if (leaving || idle || waiting.size >= batch) {
+                released += waiting
+                if (debugLog) LOG.info(
+                    "[HighwayTools] placing ${waiting.size} button(s), " +
+                        if (leaving) "one is getting out of reach" else if (idle) "nothing else to do" else "$batch waiting"
+                )
+            }
+        }
+        return hold && buttonHoldTicks <= MAX_BUTTON_HOLD_TICKS
+    }
+
+    /** Lets every button spot of the done [structure] that still waits be placed. Whether there was one. */
+    private fun SafeContext.releaseLeftButtons(structure: Structure): Boolean {
+        val left = waitingButtons(structure).filter { it !in released }.toList()
+        released += left
+        if (left.isNotEmpty() && debugLog) LOG.info("[HighwayTools] placing ${left.size} button(s) left before going on")
+        return left.isNotEmpty()
+    }
+
+    /** From [eye] to the nearest point of the top of the block below [pos], which a floor button is placed against. */
+    private fun buttonDistance(pos: BlockPos, eye: Vec3d) =
+        eye.distanceTo(Vec3d(eye.x.coerceIn(pos.x.toDouble(), pos.x + 1.0), pos.y.toDouble(), eye.z.coerceIn(pos.z.toDouble(), pos.z + 1.0)))
 
     /**
      * The open blocks of the [slice], relative to it, a magma cube can spawn in once dug, on the floor or e.g. on a rim with

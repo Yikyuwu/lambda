@@ -193,9 +193,18 @@ sealed class TargetState : StateMatcher {
      * A button placed on the top of the block below, e.g. so mobs can't spawn there. Any button there will do, of any
      * kind, facing or face, wooden ones want an axe to break. The one placed is one [accepts] in the inventory, not the
      * offhand, like HighwayButtons counts them. While [placing] is off, e.g. with none left, air does too, so placed ones
-     * aren't broken.
+     * aren't broken. Air also does until [due], so buttons can be held back and placed several at once.
      */
-    class FloorButton(val accepts: (ItemStack) -> Boolean, val placing: Boolean) : TargetState() {
+    class FloorButton(
+        val accepts: (ItemStack) -> Boolean,
+        val placing: Boolean,
+        private val due: () -> Boolean = { true },
+    ) : TargetState() {
+        private val active get() = placing && due()
+
+        /** This button on one spot, placed only once [due]. */
+        fun until(due: () -> Boolean) = FloorButton(accepts, placing, due)
+
         override fun toString() = "Floor button"
 
         context(safeContext: SafeContext)
@@ -203,19 +212,19 @@ sealed class TargetState : StateMatcher {
             state: BlockState,
             pos: BlockPos,
             ignoredProperties: Collection<Property<*>>
-        ) = state.block is ButtonBlock || !placing && state.isAir
+        ) = state.block is ButtonBlock || state.isAir && !active
 
         context(automatedSafeContext: AutomatedSafeContext)
         override fun getStack(pos: BlockPos): ItemStack =
-            if (!placing) ItemStack.EMPTY
+            if (!active) ItemStack.EMPTY
             else automatedSafeContext.player.inventory.mainStacks.firstOrNull { accepts(it) && it.item is BlockItem }
                 ?: ItemStack(Items.OAK_BUTTON)
 
         context(automatedSafeContext: AutomatedSafeContext)
         override fun getState(pos: BlockPos): BlockState =
-            if (!placing) Blocks.AIR.defaultState
+            if (!active) Blocks.AIR.defaultState
             else getStack(pos).item.block.defaultState.with(Properties.BLOCK_FACE, BlockFace.FLOOR)
 
-        override fun isEmpty() = !placing
+        override fun isEmpty() = !active
     }
 }
