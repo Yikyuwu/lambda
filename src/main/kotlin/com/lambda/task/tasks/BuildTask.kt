@@ -50,6 +50,7 @@ import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.breaking.BrokenBlockHandler
 import com.lambda.interaction.handlers.interacting.InteractedBlockHandler
+import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakContexts
 import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakRequest
 import com.lambda.interaction.managers.interacting.InteractRequest.Companion.interactRequest
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
@@ -327,11 +328,7 @@ class BuildTask private constructor(
                 if (atMaxPendingInteractions) return
                 when (result) {
                     is BreakResult.Break -> {
-                        val sorted = allResults
-                            .map { if (it is Dependent) it.lastDependency else it }
-                            .filterIsInstance<BreakResult.Break>()
-                            .sorted()
-                            .map { it.context }
+                        val sorted = allResults.breakContexts()
                         val contexts = actionOrder?.let { order -> sorted.sortedBy { order(this, it.blockPos) } } ?: sorted
                         breakRequest(contexts.toSet(), pendingInteractions) {
                             // Not when sent: one the server rejects isn't progress, see HighwayTools' unstuck.
