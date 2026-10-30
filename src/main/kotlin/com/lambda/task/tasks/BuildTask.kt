@@ -108,6 +108,8 @@ class BuildTask private constructor(
     /** Whether the build may path to blocks out of reach, off while the owner walks the player itself. */
     var allowPathing: () -> Boolean = { true }
     private val canPath get() = buildConfig.pathing && allowPathing()
+    /** Breaks taken lowest first by this, the break sorter's order among equals, e.g. HighwayTools' slices front to back. */
+    var breakOrder: ((BlockPos) -> Int)? = null
 
     private val dropsToCollect = mutableSetOf<ItemEntity>()
     var eatTask: Task<*>? = null
@@ -313,14 +315,21 @@ class BuildTask private constructor(
             is Contextual -> {
                 if (atMaxPendingInteractions) return
                 when (result) {
-                    is BreakResult.Break ->
-                        allResults.breakRequest(pendingInteractions) {
+                    is BreakResult.Break -> {
+                        val sorted = allResults
+                            .map { if (it is Dependent) it.lastDependency else it }
+                            .filterIsInstance<BreakResult.Break>()
+                            .sorted()
+                            .map { it.context }
+                        val contexts = breakOrder?.let { order -> sorted.sortedBy { order(it.blockPos) } } ?: sorted
+                        breakRequest(contexts.toSet(), pendingInteractions) {
                             // Not when sent: one the server rejects isn't progress, see HighwayTools' unstuck.
                             onBreak { breaks++ }
                             onItemDrop?.let { onItemDrop ->
                                 onItemDrop { onItemDrop(it) }
                             }
-                        }?.submit()
+                        }.submit()
+                    }
 
                     is InteractResult.Interact -> {
 	                    allResults.interactRequest(pendingInteractions, false) {
