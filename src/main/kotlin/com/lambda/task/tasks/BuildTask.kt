@@ -34,7 +34,6 @@ import com.lambda.interaction.construction.blueprint.TickingBlueprint
 import com.lambda.interaction.construction.simulation.BuildGoal
 import com.lambda.interaction.construction.simulation.Simulation.Companion.simulation
 import com.lambda.interaction.construction.simulation.context.BuildContext
-import com.lambda.interaction.construction.simulation.context.InteractContext
 import com.lambda.interaction.construction.simulation.result.BuildResult
 import com.lambda.interaction.construction.simulation.result.Contextual
 import com.lambda.interaction.construction.simulation.result.Dependent
@@ -50,9 +49,7 @@ import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.breaking.BrokenBlockHandler
 import com.lambda.interaction.handlers.interacting.InteractedBlockHandler
-import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakContexts
 import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakRequest
-import com.lambda.interaction.managers.interacting.InteractRequest.Companion.interactContexts
 import com.lambda.interaction.managers.interacting.InteractRequest.Companion.interactRequest
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
 import com.lambda.module.modules.client.Client
@@ -111,11 +108,6 @@ class BuildTask private constructor(
     /** Whether the build may path to blocks out of reach, off while the owner walks the player itself. */
     var allowPathing: () -> Boolean = { true }
     private val canPath get() = buildConfig.pathing && allowPathing()
-    /**
-     * Actions taken lowest first by this, breaks and placements alike, the sorters' order among equals, e.g. HighwayTools'
-     * slices behind you first. Stopping a fluid comes first still.
-     */
-    var actionOrder: (SafeContext.(BlockPos) -> Int)? = null
 
     private val dropsToCollect = mutableSetOf<ItemEntity>()
     var eatTask: Task<*>? = null
@@ -273,21 +265,7 @@ class BuildTask private constructor(
         // Filtered and sorted once here, not again for each look at them.
         val viable = viableResults.toList()
         val bestResult = viable.firstOrNull() ?: return
-        handleResult(ordered(bestResult, viable), viable.asSequence())
-    }
-
-    /**
-     * The first of the lowest of [viable] by [actionOrder], unless [first] stops a fluid. A dependent one goes by what it
-     * waits on, the way [handleResult] takes it, else one behind waiting on a break first was passed over for those ahead.
-     */
-    private fun SafeContext.ordered(first: BuildResult, viable: List<BuildResult>): BuildResult {
-        val order = actionOrder ?: return first
-        fun contextOf(result: BuildResult) = (((result as? Dependent)?.lastDependency ?: result) as? Contextual)?.context
-        val firstContext = contextOf(first) ?: return first
-        if (firstContext is InteractContext && !firstContext.cachedState.fluidState.isEmpty) return first
-        return viable
-            .mapNotNull { result -> contextOf(result)?.let { result to order(this, it.blockPos) } }
-            .minByOrNull { it.second }?.first ?: first
+        handleResult(bestResult, viable.asSequence())
     }
 
     /**
@@ -337,27 +315,19 @@ class BuildTask private constructor(
             is Contextual -> {
                 if (atMaxPendingInteractions) return
                 when (result) {
-                    is BreakResult.Break -> {
-                        val sorted = allResults.breakContexts()
-                        val contexts = actionOrder?.let { order -> sorted.sortedBy { order(this, it.blockPos) } } ?: sorted
-                        breakRequest(contexts.toSet(), pendingInteractions) {
+                    is BreakResult.Break ->
+                        allResults.breakRequest(pendingInteractions) {
                             // Not when sent: one the server rejects isn't progress, see HighwayTools' unstuck.
                             onBreak { breaks++ }
                             onItemDrop?.let { onItemDrop ->
                                 onItemDrop { onItemDrop(it) }
                             }
-                        }.submit()
-                    }
+                        }?.submit()
 
                     is InteractResult.Interact -> {
-                        val sorted = allResults.interactContexts()
-                        // Placed in the order the request lists them, so by [actionOrder] too. Stopping a fluid still first.
-                        val contexts = actionOrder?.let { order ->
-                            sorted.sortedBy { if (it.cachedState.fluidState.isEmpty) order(this, it.blockPos) else Int.MIN_VALUE }
-                        } ?: sorted
-                        interactRequest(contexts.toSet(), pendingInteractions, false) {
+                        allResults.interactRequest(pendingInteractions, false) {
                             onPlace { placements++ }
-                        }.submit()
+                        }?.submit()
                     }
                 }
             }

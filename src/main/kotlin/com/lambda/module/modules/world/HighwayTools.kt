@@ -731,30 +731,16 @@ object HighwayTools : Module(
         fun leftAt(s: Int) = if (s in left) left[s] else leftToBreak(slice, s, button, spots, due(s)).also { left[s] = it }
         fun done(i: Int) = (distance < 0 || i < distance) && leftAt(i)?.isEmpty() == true
 
-        val reachSq = buildConfig.blockReach * buildConfig.blockReach
-        val eyeHeight = player.standingEyeHeight.toDouble()
-        // Nothing gets left behind walking to [pos] at slice [i]: each slice up to it is built, or has only blocks left
-        // to break, all in reach from there. So it walks on through a tunnel dug before while the sides are broken.
-        // Every slice from the blueprint's first on, also ones it doesn't hold yet, all from where the walk ends.
-        fun canWalkTo(pos: BlockPos, i: Int): Boolean {
-            val eye = Vec3d.ofBottomCenter(pos).add(0.0, eyeHeight, 0.0)
-            return ((slices.firstOrNull() ?: index)..i).all { s ->
-                if (distance >= 0 && s >= distance) return@all false
-                val blocks = leftAt(s)
-                    ?: return@all false.also { cruiseStop = "step ${i - index}: slice ${s - index} has something to place" }
-                val far = blocks.filter { eye.squaredDistanceTo(Vec3d.ofCenter(it)) > reachSq }
-                far.isEmpty().also {
-                    if (!it) cruiseStop = "step ${i - index}: slice ${s - index} has ${far.size} out of reach, e.g. " +
-                        far.first().subtract(highwayPos(s)).toShortString()
-                }
-            }
+        // Nothing gets left behind: on only through slices already built, from the blueprint's first on. Walking on while
+        // blocks were still to break there, nearest first, left the top row behind and dug slower.
+        fun canWalkTo(i: Int) = (minOf(slices.firstOrNull() ?: index, index)..i).all { s ->
+            done(s).also { if (!it) cruiseStop = "step ${i - index}: slice ${s - index} isn't built yet" }
         }
 
         val steps = safeSteps(forward = true, CRUISE_LOOKAHEAD)
         cruiseStop = if (steps.size < CRUISE_LOOKAHEAD) "step ${steps.size + 1} not standable" else "lookahead"
-        // Up to the slice you're on too, its sides may still be broken while walking on.
         steps.withIndex()
-            .takeWhile { (i, pos) -> canWalkTo(pos, index + i + 1) }
+            .takeWhile { (i, _) -> canWalkTo(index + i + 1) }
             .lastOrNull()?.let { return it.value }
         if (!done(index)) return null
         // All that's left is out of reach ahead, e.g. a top block far ahead on a diagonal: a step closer.
@@ -990,12 +976,7 @@ object HighwayTools : Module(
         }
         this.blueprint = blueprint
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
-            .apply {
-                allowPathing = { cruiseTarget == null }
-                // The slice you're on and those behind first, from the back, placements too: walking on, the nearest first
-                // left the top row behind out of reach. Ahead all alike, the item in hand first, so placing still batches.
-                actionOrder = { pos -> minOf(highwayIndex(pos), highwayIndex(player.blockPos) + 1) }
-            }
+            .apply { allowPathing = { cruiseTarget == null } }
             .run()
     }
 
