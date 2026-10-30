@@ -151,13 +151,17 @@ data class BreakRequest private constructor(
 			pendingInteractions: MutableCollection<BuildContext>,
 			nowOrNothing: Boolean = false,
 			builder: (BreakRequestBuilder.() -> Unit)? = null
-		) = map { if (it is Dependent) it.lastDependency else it }
-			.filterIsInstance<BreakResult.Break>()
-			.sorted()
-			.map { it.context }
+		) = breakContexts()
 			.toSet()
 			.takeIf { it.isNotEmpty() }
 			?.let { automated.breakRequest(it, pendingInteractions, nowOrNothing, builder) }
+
+		/** The contexts of the breaks among these results, or their last dependencies, best first. */
+		fun Sequence<BuildResult>.breakContexts() =
+			map { if (it is Dependent) it.lastDependency else it }
+				.filterIsInstance<BreakResult.Break>()
+				.sorted()
+				.map { it.context }
 
 		@BreakRequestDsl
 		@JvmName("breakRequest4")

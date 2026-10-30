@@ -87,13 +87,17 @@ data class InteractRequest private constructor(
 			pendingInteractions: MutableCollection<BuildContext>,
 			nowOrNothing: Boolean = false,
 			builder: (PlaceRequestBuilder.() -> Unit)? = null
-		) = map { if (it is Dependent) it.lastDependency else it }
-			.filterIsInstance<InteractResult.Interact>()
-			.sorted()
-			.map { it.context }
+		) = interactContexts()
 			.toSet()
 			.takeIf { it.isNotEmpty() }
 			?.let { automated.interactRequest(it, pendingInteractions, nowOrNothing, builder) }
+
+		/** The contexts of the placements among these results, or their last dependencies, best first. */
+		fun Sequence<BuildResult>.interactContexts() =
+			map { if (it is Dependent) it.lastDependency else it }
+				.filterIsInstance<InteractResult.Interact>()
+				.sorted()
+				.map { it.context }
 
 		@PlaceRequestDsl
 		@JvmName("interactRequest3")

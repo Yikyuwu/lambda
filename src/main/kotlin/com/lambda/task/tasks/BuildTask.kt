@@ -50,7 +50,9 @@ import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.breaking.BrokenBlockHandler
 import com.lambda.interaction.handlers.interacting.InteractedBlockHandler
+import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakContexts
 import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakRequest
+import com.lambda.interaction.managers.interacting.InteractRequest.Companion.interactContexts
 import com.lambda.interaction.managers.interacting.InteractRequest.Companion.interactRequest
 import com.lambda.interaction.managers.inventory.InventoryRequest.Companion.inventoryRequest
 import com.lambda.module.modules.client.Client
@@ -268,20 +270,22 @@ class BuildTask private constructor(
             .plus(pendingInteractions.toList())
             .toList()
 
-        val bestResult = viableResults.firstOrNull() ?: return
-        handleResult(ordered(bestResult), viableResults)
+        // Filtered and sorted once here, not again for each look at them.
+        val viable = viableResults.toList()
+        val bestResult = viable.firstOrNull() ?: return
+        handleResult(ordered(bestResult, viable), viable.asSequence())
     }
 
     /**
-     * The first of the lowest by [actionOrder], unless [first] stops a fluid. A dependent one goes by what it waits on,
-     * the way [handleResult] takes it, else one behind waiting on a break first was passed over for those ahead.
+     * The first of the lowest of [viable] by [actionOrder], unless [first] stops a fluid. A dependent one goes by what it
+     * waits on, the way [handleResult] takes it, else one behind waiting on a break first was passed over for those ahead.
      */
-    private fun SafeContext.ordered(first: BuildResult): BuildResult {
+    private fun SafeContext.ordered(first: BuildResult, viable: List<BuildResult>): BuildResult {
         val order = actionOrder ?: return first
         fun contextOf(result: BuildResult) = (((result as? Dependent)?.lastDependency ?: result) as? Contextual)?.context
         val firstContext = contextOf(first) ?: return first
         if (firstContext is InteractContext && !firstContext.cachedState.fluidState.isEmpty) return first
-        return viableResults
+        return viable
             .mapNotNull { result -> contextOf(result)?.let { result to order(this, it.blockPos) } }
             .minByOrNull { it.second }?.first ?: first
     }
@@ -334,11 +338,7 @@ class BuildTask private constructor(
                 if (atMaxPendingInteractions) return
                 when (result) {
                     is BreakResult.Break -> {
-                        val sorted = allResults
-                            .map { if (it is Dependent) it.lastDependency else it }
-                            .filterIsInstance<BreakResult.Break>()
-                            .sorted()
-                            .map { it.context }
+                        val sorted = allResults.breakContexts()
                         val contexts = actionOrder?.let { order -> sorted.sortedBy { order(this, it.blockPos) } } ?: sorted
                         breakRequest(contexts.toSet(), pendingInteractions) {
                             // Not when sent: one the server rejects isn't progress, see HighwayTools' unstuck.
@@ -350,11 +350,7 @@ class BuildTask private constructor(
                     }
 
                     is InteractResult.Interact -> {
-                        val sorted = allResults
-                            .map { if (it is Dependent) it.lastDependency else it }
-                            .filterIsInstance<InteractResult.Interact>()
-                            .sorted()
-                            .map { it.context }
+                        val sorted = allResults.interactContexts()
                         // Placed in the order the request lists them, so by [actionOrder] too. Stopping a fluid still first.
                         val contexts = actionOrder?.let { order ->
                             sorted.sortedBy { if (it.cachedState.fluidState.isEmpty) order(this, it.blockPos) else Int.MIN_VALUE }
