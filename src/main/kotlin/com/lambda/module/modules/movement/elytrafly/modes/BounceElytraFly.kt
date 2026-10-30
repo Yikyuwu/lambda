@@ -190,6 +190,9 @@ class BounceElytraFly(
 	 * bounce pushed it on, and looking straight down the whole way up, the dive back from it took it to the floor again.
 	 */
 	private var chunkGlideY: Double? = null
+
+	/** Still going up last tick, the glide is held only from the top of a bounce on. */
+	private var wasRising = false
 	private var hitRoof = false
 
 	private val flightPaused
@@ -247,7 +250,10 @@ class BounceElytraFly(
 				val hold = hopPitch()
 				// From the top of the bounce on, the server takes the rise like a jump until there, see below.
 				if (!(slowingForChunks || coasting) || player.isOnGround || !player.isGliding || hold != null) chunkGlideY = null
-				else if (chunkGlideY == null && player.velocity.y <= 0) chunkGlideY = min(player.y, ceilingY())
+				// Only at the top: taken on the way down, it held wherever that was, even skimming the floor, and there the
+				// server ended the glide again and again (on 2b2t, set back after starting it again in the air).
+				else if (chunkGlideY == null && player.velocity.y <= 0 && wasRising) chunkGlideY = min(player.y, ceilingY())
+				wasRising = player.velocity.y > 0
 				val glideY = chunkGlideY
 				val target = when {
 					// Straight down the wings don't lift, so you land soonest and don't speed up on the way.
@@ -457,6 +463,7 @@ class BounceElytraFly(
 			pacer.reset()
 			hitRoof = false
 			chunkGlideY = null
+			wasRising = false
 			// The floor below when started in the air, else packets would be held back up there.
 			groundY = startPos.y
 			queuedTicks = 0
