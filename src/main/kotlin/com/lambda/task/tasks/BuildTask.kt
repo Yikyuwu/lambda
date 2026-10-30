@@ -350,9 +350,18 @@ class BuildTask private constructor(
                     }
 
                     is InteractResult.Interact -> {
-	                    allResults.interactRequest(pendingInteractions, false) {
-		                    onPlace { placements++ }
-	                    }?.submit()
+                        val sorted = allResults
+                            .map { if (it is Dependent) it.lastDependency else it }
+                            .filterIsInstance<InteractResult.Interact>()
+                            .sorted()
+                            .map { it.context }
+                        // Placed in the order the request lists them, so by [actionOrder] too. Stopping a fluid still first.
+                        val contexts = actionOrder?.let { order ->
+                            sorted.sortedBy { if (it.cachedState.fluidState.isEmpty) order(this, it.blockPos) else Int.MIN_VALUE }
+                        } ?: sorted
+                        interactRequest(contexts.toSet(), pendingInteractions, false) {
+                            onPlace { placements++ }
+                        }.submit()
                     }
                 }
             }
