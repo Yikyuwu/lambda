@@ -37,7 +37,6 @@ import com.lambda.event.listener.UnsafeListener.Companion.listenUnsafe
 import com.lambda.interaction.construction.blueprint.Blueprint.Companion.emptyStructure
 import com.lambda.interaction.construction.blueprint.PropagatingBlueprint
 import com.lambda.interaction.construction.blueprint.PropagatingBlueprint.Companion.propagatingBlueprint
-import com.lambda.interaction.construction.simulation.result.Contextual
 import com.lambda.interaction.construction.simulation.result.Dependent
 import com.lambda.interaction.construction.simulation.result.results.GenericResult
 import com.lambda.interaction.construction.verify.TargetState
@@ -1094,7 +1093,7 @@ object HighwayTools : Module(
     /**
      * Lets the button spots in reach that wait be placed, all in one go, so the hotbar is swapped to buttons and back once
      * instead of for each: once [BUTTON_BATCH] or interactions per tick wait, once one getting further away is about to
-     * be out of reach, or while the build has nothing else to do in reach. One that's still left behind keeps its slice,
+     * be out of reach, or once nothing else in reach is left to build. One that's still left behind keeps its slice,
      * see [rollSlices], until [releaseLeftButtons] lets it go. Returns whether to stop walking until those let go are
      * placed, one of them is about to be out of reach.
      */
@@ -1120,7 +1119,13 @@ object HighwayTools : Module(
         }
         buttonHoldTicks = if (hold) buttonHoldTicks + 1 else 0
         if (waiting.isNotEmpty()) {
-            val idle = task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } !is Contextual
+            // Not while a block in reach is still to be built: in an open stretch the next one often waits a tick for the
+            // one it's placed against, and a button let go then swaps the hotbar between each of them.
+            val reachSq = reach * reach
+            val idle = !task.isWorking && structure.none { (pos, state) ->
+                state !is TargetState.FloorButton && eye.squaredDistanceTo(Vec3d.ofCenter(pos)) <= reachSq &&
+                    !state.matches(blockState(pos), pos)
+            }
             val batch = minOf(interactConfig.interactionsPerTick, buildConfig.maxPendingActions, BUTTON_BATCH).coerceAtLeast(1)
             if (leaving || idle || waiting.size >= batch) {
                 released += waiting
