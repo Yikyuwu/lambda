@@ -714,21 +714,26 @@ object HighwayTools : Module(
         val button = with(buttons) { floorButton() }
         val index = highwayIndex(player.blockPos)
         val spots = spawnSpots()
-        // Walks past button spots still waiting, they're let go before they're out of reach, see [releaseButtons].
-        fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots, { it in released })
+        // Walks past button spots still waiting, they're let go before they're out of reach, see [releaseButtons]. Not
+        // past those of a slice the blueprint doesn't hold yet, nothing lets them go.
+        fun due(s: Int): (BlockPos) -> Boolean = if (s in slices) { pos -> pos in released } else { _ -> true }
+        // Each slice looked at once, every step checks the reach to the same blocks.
+        val left = HashMap<Int, List<BlockPos>?>()
+        fun leftAt(s: Int) = if (s in left) left[s] else leftToBreak(slice, s, button, spots, due(s)).also { left[s] = it }
+        fun done(i: Int) = (distance < 0 || i < distance) && leftAt(i)?.isEmpty() == true
 
         val reachSq = buildConfig.blockReach * buildConfig.blockReach
         val eyeHeight = player.standingEyeHeight.toDouble()
         // Nothing gets left behind walking to [pos] at slice [i]: each slice up to it is built, or has only blocks left
         // to break, all in reach from there. So it walks on through a tunnel dug before while the sides are broken.
+        // Every slice from the blueprint's first on, also ones it doesn't hold yet, all from where the walk ends.
         fun canWalkTo(pos: BlockPos, i: Int): Boolean {
             val eye = Vec3d.ofBottomCenter(pos).add(0.0, eyeHeight, 0.0)
-            return slices.filter { it <= i }.all { s ->
-                if (done(s)) return@all true
+            return ((slices.firstOrNull() ?: index)..i).all { s ->
                 if (distance >= 0 && s >= distance) return@all false
-                val left = leftToBreak(slice, s, button, spots)
+                val blocks = leftAt(s)
                     ?: return@all false.also { cruiseStop = "step ${i - index}: slice ${s - index} has something to place" }
-                val far = left.filter { eye.squaredDistanceTo(Vec3d.ofCenter(it)) > reachSq }
+                val far = blocks.filter { eye.squaredDistanceTo(Vec3d.ofCenter(it)) > reachSq }
                 far.isEmpty().also {
                     if (!it) cruiseStop = "step ${i - index}: slice ${s - index} has ${far.size} out of reach, e.g. " +
                         far.first().subtract(highwayPos(s)).toShortString()
@@ -740,7 +745,7 @@ object HighwayTools : Module(
         cruiseStop = if (steps.size < CRUISE_LOOKAHEAD) "step ${steps.size + 1} not standable" else "lookahead"
         // Up to the slice you're on too, its sides may still be broken while walking on.
         steps.withIndex()
-            .takeWhile { (i, pos) -> done(index) && done(index + i + 1) || canWalkTo(pos, index + i + 1) }
+            .takeWhile { (i, pos) -> canWalkTo(pos, index + i + 1) }
             .lastOrNull()?.let { return it.value }
         if (!done(index)) return null
         // All that's left is out of reach, e.g. a top block far ahead on a diagonal: a step closer.
@@ -749,11 +754,11 @@ object HighwayTools : Module(
 
     /** The blocks of the slice at [index] still to break, null while something there is still to place. */
     private fun SafeContext.leftToBreak(
-        slice: Structure, index: Int, button: TargetState.FloorButton?, spots: Set<BlockPos>,
+        slice: Structure, index: Int, button: TargetState.FloorButton?, spots: Set<BlockPos>, due: (BlockPos) -> Boolean,
     ): List<BlockPos>? {
         val structure = fitToBorder(slice.move(highwayPos(index)))
         return structure.mapNotNull { (pos, state) ->
-            val target = if (button != null) buttonTarget(structure, pos, state, button, spots) { it in released } else state
+            val target = if (button != null) buttonTarget(structure, pos, state, button, spots, due) else state
             when {
                 target.matches(blockState(pos), pos) -> null
                 target.isEmpty() -> pos
