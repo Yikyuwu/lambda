@@ -34,6 +34,7 @@ import com.lambda.interaction.construction.blueprint.TickingBlueprint
 import com.lambda.interaction.construction.simulation.BuildGoal
 import com.lambda.interaction.construction.simulation.Simulation.Companion.simulation
 import com.lambda.interaction.construction.simulation.context.BuildContext
+import com.lambda.interaction.construction.simulation.context.InteractContext
 import com.lambda.interaction.construction.simulation.result.BuildResult
 import com.lambda.interaction.construction.simulation.result.Contextual
 import com.lambda.interaction.construction.simulation.result.Dependent
@@ -108,8 +109,11 @@ class BuildTask private constructor(
     /** Whether the build may path to blocks out of reach, off while the owner walks the player itself. */
     var allowPathing: () -> Boolean = { true }
     private val canPath get() = buildConfig.pathing && allowPathing()
-    /** Breaks taken lowest first by this, the break sorter's order among equals, e.g. HighwayTools' slices front to back. */
-    var breakOrder: ((BlockPos) -> Int)? = null
+    /**
+     * Actions taken lowest first by this, breaks and placements alike, the sorters' order among equals, e.g. HighwayTools'
+     * slices from the back. Stopping a fluid comes first still.
+     */
+    var actionOrder: ((BlockPos) -> Int)? = null
 
     private val dropsToCollect = mutableSetOf<ItemEntity>()
     var eatTask: Task<*>? = null
@@ -265,7 +269,14 @@ class BuildTask private constructor(
             .toList()
 
         val bestResult = viableResults.firstOrNull() ?: return
-        handleResult(bestResult, viableResults)
+        handleResult(ordered(bestResult), viableResults)
+    }
+
+    /** The first of the lowest by [actionOrder], unless [first] stops a fluid. */
+    private fun ordered(first: BuildResult): BuildResult {
+        val order = actionOrder ?: return first
+        if (first !is Contextual || first.context.let { it is InteractContext && !it.cachedState.fluidState.isEmpty }) return first
+        return viableResults.filter { it is Contextual }.minByOrNull { order((it as Contextual).context.blockPos) } ?: first
     }
 
     /**
@@ -321,7 +332,7 @@ class BuildTask private constructor(
                             .filterIsInstance<BreakResult.Break>()
                             .sorted()
                             .map { it.context }
-                        val contexts = breakOrder?.let { order -> sorted.sortedBy { order(it.blockPos) } } ?: sorted
+                        val contexts = actionOrder?.let { order -> sorted.sortedBy { order(it.blockPos) } } ?: sorted
                         breakRequest(contexts.toSet(), pendingInteractions) {
                             // Not when sent: one the server rejects isn't progress, see HighwayTools' unstuck.
                             onBreak { breaks++ }
