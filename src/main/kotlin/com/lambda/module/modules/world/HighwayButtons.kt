@@ -41,18 +41,17 @@ import net.minecraft.registry.tag.ItemTags
 
 /**
  * Places buttons on the highway's floor where magma cubes could spawn. Once on the last stack,
- * crafts back up to as many as were carried at the start, at least two stacks, from a carried shulker of logs, or one the
- * ender chest trip takes and puts back afterwards. Early, so a restock waits for a safe moment, e.g. a mob gone, instead
+ * crafts back up to [stacks] stacks from a carried shulker of logs, or one the ender chest trip takes and puts back
+ * afterwards. Early, so a restock waits for a safe moment, e.g. a mob gone, instead
  * of the highway going on without buttons.
  */
 class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c {
     val enabled by c.setting("Place Buttons", false, "Places a button on every floor block a magma cube could spawn on, where 3 x 3 blocks around it and 3 up are open. Narrower highways need none")
     private val stoneButtons by c.setting("Stone Buttons", true, "Also places stone and polished blackstone buttons when carried. Only wooden ones are crafted") { enabled }
-    private val restock by c.setting("Restock Buttons", true, "Once on the last stack, crafts back up to as many as were carried at the start, at least two stacks, from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
+    private val restock by c.setting("Restock Buttons", true, "Once on the last stack, crafts back up to Button Stacks from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
+    private val stacks by c.setting("Button Stacks", 4, 1..16, 1, "Stacks of buttons a restock crafts up to, as far as the inventory has room") { enabled && restock }
 
     private var task: Task<*>? = null
-    /** Buttons carried at the start, at least two stacks, which a restock crafts back up to. */
-    private var target = 0
     private var retryTicks = 0
     /** A restock failed, maybe leaving a shulker placed, so none until the highway is started again. */
     var failed = false
@@ -72,8 +71,16 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     /** Not the offhand: the build only places what [TargetState.FloorButton] finds in the inventory. */
     private fun SafeContext.carried() = carriedCount(::isButton)
 
-    /** On the last stack, so a restock happens while there are still some to place. */
-    private fun SafeContext.isLow() = carried() <= STACK_SIZE
+    /** What a restock crafts up to. */
+    private val target get() = stacks * STACK_SIZE
+
+    /**
+     * On the last stack, so a restock happens while there are still some to place. With one stack set, at half of it,
+     * so each restock gains some and can't loop.
+     */
+    private val lowAt get() = minOf(STACK_SIZE, target / 2)
+
+    private fun SafeContext.isLow() = carried() <= lowAt
 
     private fun SafeContext.carriesLogShulker() = player.inventory.mainStacks.any(::isLogShulker)
 
@@ -83,8 +90,6 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         warnedOut = false
         returnLogShulker = false
         craftedThisTrip = false
-        // Above the last stack a restock starts on, so each one gains at least a stack and can't loop.
-        target = maxOf(carried(), 2 * STACK_SIZE)
         if (enabled && restock) LOG.info("[HighwayButtons] restocks up to $target buttons")
     }
 
@@ -118,7 +123,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         }
         // Buttons are a bonus, the highway goes on without them until there's room.
         if (!hasRoom()) {
-            if (!warnedOut) warn("${carried()} buttons left, but the inventory has no room to craft $target and too little junk to throw away, going on without a restock")
+            if (!warnedOut) warn("${carried()} buttons left, but the inventory has no room to craft more and too little junk to throw away, going on without a restock")
             warnedOut = true
             retryTicks = RETRY_TICKS
             return
@@ -151,7 +156,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         craftedThisTrip = true
         // Like a restock on its own. The shulker is kept and crafted from once there's room.
         if (!hasRoom()) {
-            warn("${carried()} buttons left, but the inventory has no room to craft $target and too little junk to throw away, keeping the shulker of logs for later")
+            warn("${carried()} buttons left, but the inventory has no room to craft more and too little junk to throw away, keeping the shulker of logs for later")
             return null
         }
         return newTask().onSuccess { returnLogShulker = true }.also { task = it }
@@ -180,22 +185,25 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     }
 
     /**
-     * Whether there's room to craft back up to [target]: a slot per stack of buttons, which the planks take before,
-     * and [ROOM_MARGIN] for the leftover logs, a grid slot's worth and the shulker. Junk counts, it's thrown away.
+     * Buttons a restock crafts up to: [target], or fewer when the inventory has no room for all of it. A slot per new
+     * stack of buttons, which the planks take before, and [ROOM_MARGIN] for the leftover logs, a grid slot's worth and
+     * the shulker. Junk counts, it's thrown away.
      */
-    private fun SafeContext.hasRoom(): Boolean {
-        val needed = Math.ceilDiv(target - carried(), STACK_SIZE) + ROOM_MARGIN
+    private fun SafeContext.craftTarget(): Int {
         val free = player.inventory.mainStacks.count { it.isEmpty || it.item in inventoryConfig.disposables }
-        return free >= needed
+        return minOf(target, carried() + (free - ROOM_MARGIN).coerceAtLeast(0) * STACK_SIZE)
     }
+
+    /** Whether a restock gets off the last stack, see [isLow]. */
+    private fun SafeContext.hasRoom() = craftTarget() > lowAt
 
     private fun SafeContext.enderChests() = carriedCount(EnderChestRestockTask::isEnderChest)
 
     /** The task says in chat what it crafts. */
-    private fun newTask(): Task<*> =
+    private fun SafeContext.newTask(): Task<*> =
         CraftButtonsTask(
             isButton = ::isButton,
-            target = target,
+            target = craftTarget(),
             swapDelay = SWAP_DELAY,
             automated = this@HighwayButtons,
             // The aura goes first, the restock carries on once the mob is dead.
