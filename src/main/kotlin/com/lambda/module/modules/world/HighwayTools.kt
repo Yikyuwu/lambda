@@ -204,6 +204,8 @@ object HighwayTools : Module(
     private var jumps = 0
     private var jumpBlocker: String? = null
     private val jumpBlockers = mutableMapOf<String, Int>()
+    /** Why the last cruise target wasn't further, for the debug log. */
+    private var cruiseStop = ""
     private var waitTicks = 0
     private var throwCooldown = 0
     private var cruiseGoalTicks = 0
@@ -739,12 +741,20 @@ object HighwayTools : Module(
         fun canWalkTo(pos: BlockPos, i: Int): Boolean {
             val eye = Vec3d.ofBottomCenter(pos).add(0.0, eyeHeight, 0.0)
             return slices.filter { it <= i }.all { s ->
-                done(s) || (distance < 0 || s < distance) &&
-                    leftToBreak(slice, s, button, spots)?.all { eye.squaredDistanceTo(Vec3d.ofCenter(it)) <= reachSq } == true
+                if (done(s)) return@all true
+                if (distance >= 0 && s >= distance) return@all false
+                val left = leftToBreak(slice, s, button, spots)
+                    ?: return@all false.also { cruiseStop = "step ${i - index}: slice ${s - index} has something to place" }
+                val far = left.filter { eye.squaredDistanceTo(Vec3d.ofCenter(it)) > reachSq }
+                far.isEmpty().also {
+                    if (!it) cruiseStop = "step ${i - index}: slice ${s - index} has ${far.size} out of reach, e.g. " +
+                        far.first().subtract(highwayPos(s)).toShortString()
+                }
             }
         }
 
         val steps = safeSteps(forward = true, CRUISE_LOOKAHEAD)
+        cruiseStop = if (steps.size < CRUISE_LOOKAHEAD) "step ${steps.size + 1} not standable" else "lookahead"
         // Up to the slice you're on too, its sides may still be broken while walking on.
         steps.withIndex()
             .takeWhile { (i, pos) -> done(index) && done(index + i + 1) || canWalkTo(pos, index + i + 1) }
@@ -815,6 +825,7 @@ object HighwayTools : Module(
                 (player.inventory.mainStacks + player.offHandStack).filter(::isFood).groupBy { it.item.name.string }
                     .map { (name, stacks) -> "${stacks.sumOf { it.count }} $name" } +
                 ", food shulker ${carriesFoodShulker()}, next ${task.nextResult?.name ?: "none"}" +
+                ", cruise target ${cruiseTarget?.let { "%.1f".format(Vec3d.ofBottomCenter(it).subtract(player.pos).horizontalLength()) } ?: "-"} away, stopped by $cruiseStop" +
                 if (sprintJump) ", $jumps sprint jumps, ticks ${jumpBlockers.entries.sortedByDescending { it.value }.joinToString { "${it.key} ${it.value}" }}" else ""
         )
         jumps = 0
