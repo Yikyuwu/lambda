@@ -76,6 +76,7 @@ import com.lambda.interaction.managers.interacting.InteractManager
 import com.lambda.interaction.managers.rotating.RotationRequest
 import com.lambda.interaction.material.StackSelection
 import com.lambda.interaction.material.StackSelection.Companion.select
+import com.lambda.module.modules.client.Client.verboseDebug
 import com.lambda.threading.runGameScheduled
 import com.lambda.threading.runSafe
 import com.lambda.threading.runSafeAutomated
@@ -866,6 +867,9 @@ object BreakManager : Manager<BreakRequest>(
 			}
 		}
 
+		if (verboseDebug) info.sentWith = "sent holding ${player.inventory.getStack(HotbarManager.serverSlot).item} " +
+			"(predicted with ${info.swapStack.item}), ${if (player.isOnGround) "on" else "off"} ground, " +
+			"%.2f from the eye".format(player.eyePos.distanceTo(ctx.blockPos.toCenterPos()))
 		if (isGrim) info.stopBreakPacket()
 		info.startBreakPacket()
 		if (oldGrim) info.startBreakPacket(OLD_GRIM_Y_OFFSET)

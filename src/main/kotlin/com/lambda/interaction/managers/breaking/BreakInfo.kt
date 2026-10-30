@@ -66,6 +66,8 @@ data class BreakInfo(
 	var breakingTicks = 0
 	var soundsCooldown = 0f
 	var vanillaInstantBreakable = false
+	/** What the break was sent with, for the timeout warning: the item in hand on the server, ground and distance. */
+	var sentWith = ""
 	val rebreakable get() = !vanillaInstantBreakable && type == Primary
 	var bypassedDelay = breakConfig.breakMode != BreakMode.OldGrim
 

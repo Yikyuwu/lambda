@@ -62,7 +62,7 @@ object BrokenBlockHandler : PostActionHandler<BreakInfo>() {
 			if (!loaded) return@runSafe
 
 			if (!info.broken) {
-				val message = "${info.type} ${info::class.simpleName} at ${info.context.blockPos.toShortString()} timed out with cached state ${info.context.cachedState}"
+				val message = "${info.type} ${info::class.simpleName} at ${info.context.blockPos.toShortString()} timed out with cached state ${info.context.cachedState}, ${info.sentWith}"
 				if (verboseDebug) this@BrokenBlockHandler.warn(message)
 			} else if (!Client.ignoreItemDropWarnings) {
 				val message = "${info.type} ${info::class.simpleName}'s item drop at ${info.context.blockPos.toShortString()} timed out"
