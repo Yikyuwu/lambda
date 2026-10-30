@@ -31,6 +31,7 @@ import com.lambda.interaction.handlers.packet.PacketType
 import com.lambda.interaction.managers.breaking.BreakInfo
 import com.lambda.interaction.managers.breaking.BreakManager
 import com.lambda.interaction.managers.breaking.BreakManager.calcBreakDelta
+import com.lambda.interaction.managers.breaking.BreakManager.serverBreakDelta
 import com.lambda.interaction.managers.breaking.BreakRequest
 import com.lambda.threading.runSafeAutomated
 import com.lambda.util.player.PlayerUtils.swingHand
@@ -116,7 +117,7 @@ object RebreakHandler {
 
 		reBreak.updateInfo(ctx, request)
 
-		val breakDelta = reBreak.calcBreakDelta()
+		val breakDelta = reBreak.serverBreakDelta()
 		val breakTicks = reBreak.breakingTicks - breakConfig.fudgeFactor
 		return@runSafeAutomated if (breakTicks * breakDelta >= reBreak.getBreakThreshold()) {
 			if (!PacketLimitHandler.canSendPackets(1, PacketType.PlayerAction)) return@runSafeAutomated RebreakResult.Ignored

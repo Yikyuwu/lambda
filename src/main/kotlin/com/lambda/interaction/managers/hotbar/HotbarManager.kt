@@ -58,6 +58,12 @@ object HotbarManager : Manager<HotbarRequest>(
 	private var previousStack: ItemStack? = null
 	private var swappedTicks = 0
 
+	/**
+	 * The item in the server's slot at the end of the last tick. The server applies a held item's attributes, like
+	 * Efficiency's mining efficiency, on the player's tick, so for actions sent before its next tick it still has these.
+	 */
+	var attributeStack: ItemStack? = null; private set
+
 	private var swapsThisTick = 0
 	private var maxSwapsThisTick = 0
 	private var swapDelay = 0
@@ -73,6 +79,7 @@ object HotbarManager : Manager<HotbarRequest>(
 			if (previousStack != currentStack) swappedTicks = 1
 			else swappedTicks++
 			previousStack = currentStack
+			attributeStack = player.inventory.getStack(serverSlot)
 
 			val activeInfo = activeRequest ?: return@listen
 			if (activeInfo.slot != activeSlot) return@listen

@@ -70,6 +70,7 @@ import com.lambda.interaction.managers.breaking.BreakManager.simulateAbandoned
 import com.lambda.interaction.managers.breaking.BreakManager.updateBreakProgress
 import com.lambda.interaction.managers.breaking.BreakManager.updatePreProcessing
 import com.lambda.interaction.managers.breaking.SwapInfo.Companion.getSwapInfo
+import com.lambda.interaction.managers.hotbar.HotbarManager
 import com.lambda.interaction.managers.hotbar.HotbarRequest
 import com.lambda.interaction.managers.interacting.InteractManager
 import com.lambda.interaction.managers.rotating.RotationRequest
@@ -737,7 +738,7 @@ object BreakManager : Manager<BreakRequest>(
 				info.bypassedDelay = true
 			}
 
-			val breakDelta = info.calcBreakDelta()
+			val breakDelta = info.serverBreakDelta()
 			val progress = breakDelta * (info.breakingTicks - breakConfig.fudgeFactor)
 
 			if (breakConfig.sounds) {
@@ -830,7 +831,7 @@ object BreakManager : Manager<BreakRequest>(
 		}
 		if (info.breaking) return false
 
-		val progress = info.calcBreakDelta()
+		val progress = info.serverBreakDelta()
 		val instantBreakable = progress >= info.getBreakThreshold()
 
 		var packetCount = 1
@@ -903,6 +904,17 @@ object BreakManager : Manager<BreakRequest>(
 //        }
 		delta
 	}
+
+	/**
+	 * The block-breaking delta the server works with for packets sent now. Right after a swap it still counts the
+	 * Efficiency of the item held before (see [HotbarManager.attributeStack]), so a block that's only instant with the
+	 * new tool's Efficiency isn't sent as an instant break, the server wouldn't break it and the block comes back.
+	 * Only the swap tick is affected, from the next tick on the server has the new item's attributes.
+	 */
+	context(automatedSafeContext: AutomatedSafeContext)
+	fun BreakInfo.serverBreakDelta(
+		item: ItemStack = automatedSafeContext.player.mainHandStack
+	) = context.cachedState.calcItemBlockBreakingDelta(context.blockPos, item, HotbarManager.attributeStack ?: item)
 
 	/**
 	 * @return if the [ItemEntity] matches the [BreakInfo]'s expected item drop.

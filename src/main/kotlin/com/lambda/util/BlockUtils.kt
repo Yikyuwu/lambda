@@ -299,29 +299,35 @@ object BlockUtils {
         return (ticksNeeded <= 1 && ticksNeeded != 0f) || gamemode.isCreative
     }
 
+    /**
+     * [efficiencyStack] is the item whose Efficiency the server counts, see [getItemBlockBreakingSpeed].
+     */
     context(safeContext: SafeContext)
-    fun BlockState.calcItemBlockBreakingDelta(blockPos: BlockPos, stack: ItemStack): Float =
+    fun BlockState.calcItemBlockBreakingDelta(blockPos: BlockPos, stack: ItemStack, efficiencyStack: ItemStack = stack): Float =
         with(safeContext) {
             val hardness = getHardness(world, blockPos)
             return if (hardness == -1.0f) 0.0f else {
                 val harvestMultiplier = if (stack.canHarvest(this@calcItemBlockBreakingDelta)) 30 else 100
-                player.getItemBlockBreakingSpeed(this@calcItemBlockBreakingDelta, stack) / hardness / harvestMultiplier
+                player.getItemBlockBreakingSpeed(this@calcItemBlockBreakingDelta, stack, efficiencyStack) / hardness / harvestMultiplier
             }
         }
 
     fun ItemStack.canHarvest(state: BlockState) =
         !state.isToolRequired || isSuitableFor(state)
 
+    /**
+     * Efficiency reaches the server as the mining efficiency attribute, which it only takes from the held item on the
+     * player's tick. Right after a swap it still has the one of the item held before, [efficiencyStack]; the lower
+     * of the two is counted so a swap can only slow the prediction down.
+     */
     fun PlayerEntity.getItemBlockBreakingSpeed(
         state: BlockState,
-        item: ItemStack
+        item: ItemStack,
+        efficiencyStack: ItemStack = item
     ): Float {
         var speedMultiplier = item.getMiningSpeedMultiplier(state)
         if (speedMultiplier > 1.0f) {
-            speedMultiplier += item.getEnchantment(Enchantments.EFFICIENCY).let {
-                if (it > 0) (it * it) + 1
-                else 0
-            }
+            speedMultiplier += minOf(item.efficiencyBonus, efficiencyStack.efficiencyBonus)
         }
 
         if (StatusEffectUtil.hasHaste(this)) {
@@ -353,6 +359,9 @@ object BlockUtils {
 
         return speedMultiplier
     }
+
+    private val ItemStack.efficiencyBonus
+        get() = getEnchantment(Enchantments.EFFICIENCY).let { if (it > 0) (it * it) + 1 else 0 }
 
     val BlockState.isEmpty get() = isAir || matches(emptyState)
     val BlockState.isNotEmpty get() = !isEmpty
