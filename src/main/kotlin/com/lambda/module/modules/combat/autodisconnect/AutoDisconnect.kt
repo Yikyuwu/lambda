@@ -363,8 +363,9 @@ object AutoDisconnect : Module(
         }
     }
 
+    /** To the nearest point of the block's column, so a distance of 0 means standing in it. */
     private fun SafeContext.horizontalDistanceTo(pos: BlockPos) =
-        hypot(player.x - (pos.x + 0.5), player.z - (pos.z + 0.5))
+        hypot(player.x - player.x.coerceIn(pos.x.toDouble(), pos.x + 1.0), player.z - player.z.coerceIn(pos.z.toDouble(), pos.z + 1.0))
 
     fun consumeDetails(): DisconnectDetails? {
         val details = disconnectDetails
