@@ -82,10 +82,12 @@ import net.minecraft.registry.Registries
 import net.minecraft.sound.SoundEvents
 import net.minecraft.text.Text
 import net.minecraft.util.Identifier
+import net.minecraft.util.math.BlockPos
 import net.minecraft.world.GameMode
 import java.awt.Color
 import java.time.Instant
 import java.util.*
+import kotlin.math.hypot
 
 @Suppress("unused")
 object AutoDisconnect : Module(
@@ -136,6 +138,7 @@ object AutoDisconnect : Module(
     private const val PLAYERS_GROUP = "Players Settings"
     private const val ARMOR_GROUP = "Armor Settings"
     private const val ENTITY_GROUP = "Entity Settings"
+    private const val POSITION_GROUP = "Position Settings"
 
     @Tab(TRIGGERS_TAB) private val health by setting("Health", true, "Disconnect from the server when health is below the set limit.")
     @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val minimumHealth by setting("Min Health", 10, 1..36, 1, "Set the minimum health threshold for disconnection.", unit = " half-hearts") { health }
@@ -176,6 +179,11 @@ object AutoDisconnect : Module(
     @Tab(TRIGGERS_TAB) @Group(ENTITY_GROUP) private val selectedEntities by setting("Entities", setOf(Registries.ENTITY_TYPE.getId(EntityType.TNT_MINECART).path), Registries.ENTITY_TYPE.ids.map { it.path }.sorted(), "Select specific entities.") { entities }
     @Tab(TRIGGERS_TAB) @Group(ENTITY_GROUP) private val entityRange by setting("Entity Range", 10.0, 0.0..100.0, 1.0, "The range to check for entities.", unit = " blocks") { entities }
     @Tab(TRIGGERS_TAB) @Group(ENTITY_GROUP) private val entitiesSmart by setting("Smart Toggle", true, "Stop re-triggering on entities until none of the selected types are within range.") { entities }
+
+    @Tab(TRIGGERS_TAB) private val position by setting("Position", false, "Disconnect when you get close to a set position, e.g. to stop at a spot far down a highway.")
+    @Tab(TRIGGERS_TAB) @Group(POSITION_GROUP) private val targetPos by setting("Target Position", BlockPos.ORIGIN, "The position to disconnect near. Only X and Z count, the distance is measured flat.") { position }
+    @Tab(TRIGGERS_TAB) @Group(POSITION_GROUP) private val positionDistance by setting("Position Distance", 100, 0..10000, 1, "How close to the target position you get before disconnecting.", unit = " blocks") { position }
+    @Tab(TRIGGERS_TAB) @Group(POSITION_GROUP) private val positionSmart by setting("Smart Toggle", true, "Stop re-triggering on the position until you're farther away than the distance again.") { position }
 
     // ToDo: Only those DamageTypes are reported by the server. why?
     @Tab(TRIGGERS_TAB) private val damage by setting("Damage", false, "Disconnect when taking damage of a selected type.")
@@ -354,6 +362,9 @@ object AutoDisconnect : Module(
             )
         }
     }
+
+    private fun SafeContext.horizontalDistanceTo(pos: BlockPos) =
+        hypot(player.x - (pos.x + 0.5), player.z - (pos.z + 0.5))
 
     fun consumeDetails(): DisconnectDetails? {
         val details = disconnectDetails
@@ -895,6 +906,18 @@ object AutoDisconnect : Module(
                     literal("!")
                 }
             }
+        }),
+        Position("Position", { position }, { positionSmart }, {
+            val distance = horizontalDistanceTo(targetPos)
+            if (distance <= positionDistance) {
+                buildText {
+                    literal("Got within ")
+                    highlighted("${distance.format()} blocks")
+                    literal(" of ")
+                    highlighted("${targetPos.x} ${targetPos.z}")
+                    literal("!")
+                }
+            } else null
         });
 
         /**
