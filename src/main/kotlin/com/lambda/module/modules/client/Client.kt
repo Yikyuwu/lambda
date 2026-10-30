@@ -57,7 +57,14 @@ object Client : Module(
 
 	init {
 		tickedRenderer("Client Ticked Renderer") {
-			if (buildTaskRenders && drawablesOwner?.state == Task.State.Running) drawables.forEach { with(it) { render() } }
+			val owner = drawablesOwner ?: return@tickedRenderer
+			if (owner.state == Task.State.Running) {
+				if (buildTaskRenders) drawables.forEach { with(it) { render() } }
+			} else if (!owner.isActive) {
+				// Let go of an ended build, or it and its whole structure stay alive.
+				drawables = emptyList()
+				drawablesOwner = null
+			}
 		}
 	}
 }
