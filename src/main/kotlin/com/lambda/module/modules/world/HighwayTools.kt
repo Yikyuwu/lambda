@@ -992,9 +992,9 @@ object HighwayTools : Module(
         runningTask = blueprint.build(collectDrops = buildConfig.collectDrops, lifeMaintenance = true)
             .apply {
                 allowPathing = { cruiseTarget == null }
-                // Slice by slice, the top row too, walking on the nearest first left the tops behind out of reach. Placing
-                // too: with the blocks in hand every placement in reach and the digging it needs went first, the tops last.
-                actionOrder = ::highwayIndex
+                // The slice you're on and those behind first, from the back, placements too: walking on, the nearest first
+                // left the top row behind out of reach. Ahead all alike, the item in hand first, so placing still batches.
+                actionOrder = { pos -> minOf(highwayIndex(pos), highwayIndex(player.blockPos) + 1) }
             }
             .run()
     }
