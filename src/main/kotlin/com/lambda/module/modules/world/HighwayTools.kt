@@ -722,13 +722,41 @@ object HighwayTools : Module(
         // Walks past button spots still waiting, they're let go before they're out of reach, see [releaseButtons].
         fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots, { it in released })
 
-        if (!done(index)) return null
+        val reachSq = buildConfig.blockReach * buildConfig.blockReach
+        val eyeHeight = player.standingEyeHeight.toDouble()
+        // Nothing gets left behind walking to [pos] at slice [i]: each slice up to it is built, or has only blocks left
+        // to break, all in reach from there. So it walks on through a tunnel dug before while the sides are broken.
+        fun canWalkTo(pos: BlockPos, i: Int): Boolean {
+            val eye = Vec3d.ofBottomCenter(pos).add(0.0, eyeHeight, 0.0)
+            return slices.filter { it <= i }.all { s ->
+                done(s) || (distance < 0 || s < distance) &&
+                    leftToBreak(slice, s, button, spots)?.all { eye.squaredDistanceTo(Vec3d.ofCenter(it)) <= reachSq } == true
+            }
+        }
+
         val steps = safeSteps(forward = true, CRUISE_LOOKAHEAD)
-        return steps.withIndex()
-            .takeWhile { (i, _) -> done(index + i + 1) }
-            .lastOrNull()?.value
-            // All that's left is out of reach, e.g. a top block far ahead on a diagonal: a step closer.
-            ?: steps.firstOrNull()?.takeIf { onlyOutOfReach() }
+        // Up to the slice you're on too, its sides may still be broken while walking on.
+        steps.withIndex()
+            .takeWhile { (i, pos) -> done(index) && done(index + i + 1) || canWalkTo(pos, index + i + 1) }
+            .lastOrNull()?.let { return it.value }
+        if (!done(index)) return null
+        // All that's left is out of reach, e.g. a top block far ahead on a diagonal: a step closer.
+        return steps.firstOrNull()?.takeIf { onlyOutOfReach() }
+    }
+
+    /** The blocks of the slice at [index] still to break, null while something there is still to place. */
+    private fun SafeContext.leftToBreak(
+        slice: Structure, index: Int, button: TargetState.FloorButton?, spots: Set<BlockPos>,
+    ): List<BlockPos>? {
+        val structure = fitToBorder(slice.move(highwayPos(index)))
+        return structure.mapNotNull { (pos, state) ->
+            val target = if (button != null) buttonTarget(structure, pos, state, button, spots) { it in released } else state
+            when {
+                target.matches(blockState(pos), pos) -> null
+                target.isEmpty() -> pos
+                else -> return null
+            }
+        }
     }
 
     /** Whether the build has nothing it can reach left to do, only blocks out of reach. */
@@ -844,11 +872,15 @@ object HighwayTools : Module(
         walkAlong(steps)
     }
 
-    /** The blocks up to [distance] ahead or behind, until the first one that isn't safe to stand on. */
+    /**
+     * The blocks on the highway's middle up to [distance] ahead or behind, until the first one that isn't safe to stand
+     * on. On the middle, not beside you, so a walk that went off it, e.g. to a mob, goes back to it.
+     */
     private fun SafeContext.safeSteps(forward: Boolean, distance: Int): List<BlockPos> {
         val sign = if (forward) 1 else -1
+        val index = highwayIndex(player.blockPos)
         return (1..distance)
-            .map { player.blockPos.offset(octant, it * sign) }
+            .map { highwayPos(index + it * sign).withY(player.blockPos.y) }
             .takeWhile { canStandAt(it) }
     }
 
@@ -893,7 +925,7 @@ object HighwayTools : Module(
         if (mode != Mode.Idle || !BaritoneHandler.isActive || !player.isOnGround || !player.isSprinting ||
             player.isSneaking || player.isUsingItem || player.isTouchingWater || player.isInLava) return false
         val task = runningTask as? BuildTask ?: return false
-        if (task.isWorking || task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } is InteractResult) return false
+        if (task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } is InteractResult) return false
         val end = Vec3d.ofBottomCenter(target)
         val way = end.subtract(player.pos).let { Vec3d(it.x, 0.0, it.z) }
         if (way.length() < SPRINT_JUMP_DISTANCE) return false
