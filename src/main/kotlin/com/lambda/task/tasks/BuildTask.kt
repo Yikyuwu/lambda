@@ -272,11 +272,18 @@ class BuildTask private constructor(
         handleResult(ordered(bestResult), viableResults)
     }
 
-    /** The first of the lowest by [actionOrder], unless [first] stops a fluid. */
+    /**
+     * The first of the lowest by [actionOrder], unless [first] stops a fluid. A dependent one goes by what it waits on,
+     * the way [handleResult] takes it, else one behind waiting on a break first was passed over for those ahead.
+     */
     private fun SafeContext.ordered(first: BuildResult): BuildResult {
         val order = actionOrder ?: return first
-        if (first !is Contextual || first.context.let { it is InteractContext && !it.cachedState.fluidState.isEmpty }) return first
-        return viableResults.filter { it is Contextual }.minByOrNull { order(this, (it as Contextual).context.blockPos) } ?: first
+        fun contextOf(result: BuildResult) = (((result as? Dependent)?.lastDependency ?: result) as? Contextual)?.context
+        val firstContext = contextOf(first) ?: return first
+        if (firstContext is InteractContext && !firstContext.cachedState.fluidState.isEmpty) return first
+        return viableResults
+            .mapNotNull { result -> contextOf(result)?.let { result to order(this, it.blockPos) } }
+            .minByOrNull { it.second }?.first ?: first
     }
 
     /**
