@@ -40,7 +40,7 @@ import net.minecraft.item.ItemStack
 import net.minecraft.registry.tag.ItemTags
 
 /**
- * Places buttons on the highway's floor where magma cubes could spawn. Once on the last stack,
+ * Places buttons on the highway's floor where magma cubes could spawn. At [restockAt] stacks left,
  * crafts back up to [stacks] stacks from a carried shulker of logs, or one the ender chest trip takes and puts back
  * afterwards. Early, so a restock waits for a safe moment, e.g. a mob gone, instead
  * of the highway going on without buttons.
@@ -48,8 +48,9 @@ import net.minecraft.registry.tag.ItemTags
 class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c {
     val enabled by c.setting("Place Buttons", false, "Places a button on every floor block a magma cube could spawn on, where 3 x 3 blocks around it and 3 up are open. Narrower highways need none")
     private val stoneButtons by c.setting("Stone Buttons", true, "Also places stone and polished blackstone buttons when carried. Only wooden ones are crafted") { enabled }
-    private val restock by c.setting("Restock Buttons", true, "Once on the last stack, crafts back up to Button Stacks from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
+    private val restock by c.setting("Restock Buttons", true, "At Restock At stacks left, crafts back up to Button Stacks from a shulker of logs, taken from the ender chest and put back if none is carried") { enabled }
     private val stacks by c.setting("Button Stacks", 4, 1..16, 1, "Stacks of buttons a restock crafts up to, as far as the inventory has room") { enabled && restock }
+    private val restockAt by c.setting("Restock At", 1, 1..12, 1, "Stacks of buttons left at which a restock starts, at most a stack below Button Stacks", " stacks") { enabled && restock }
 
     private var task: Task<*>? = null
     private var retryTicks = 0
@@ -75,10 +76,10 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     private val target get() = stacks * STACK_SIZE
 
     /**
-     * On the last stack, so a restock happens while there are still some to place. With one stack set, at half of it,
-     * so each restock gains some and can't loop.
+     * At [restockAt] stacks, so a restock happens while there are still some to place. At most a stack below [target],
+     * half of it with one stack set, so each restock gains some and can't loop.
      */
-    private val lowAt get() = minOf(STACK_SIZE, target / 2)
+    private val lowAt get() = minOf(restockAt * STACK_SIZE, maxOf(target - STACK_SIZE, target / 2))
 
     private fun SafeContext.isLow() = carried() <= lowAt
 
@@ -140,7 +141,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         }.run()
     }
 
-    /** A shulker of logs from the ender chest once on the last stack of buttons with none carried. */
+    /** A shulker of logs from the ender chest once buttons are low with none carried. */
     fun SafeContext.enderChestWant(): Want? {
         if (!enabled || !restock || failed) return null
         return Want(
@@ -194,7 +195,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         return minOf(target, carried() + (free - ROOM_MARGIN).coerceAtLeast(0) * STACK_SIZE)
     }
 
-    /** Whether a restock gets off the last stack, see [isLow]. */
+    /** Whether a restock gets above [lowAt], see [isLow]. */
     private fun SafeContext.hasRoom() = craftTarget() > lowAt
 
     private fun SafeContext.enderChests() = carriedCount(EnderChestRestockTask::isEnderChest)
