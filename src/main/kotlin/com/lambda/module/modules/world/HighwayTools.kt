@@ -91,6 +91,7 @@ import com.lambda.util.player.MovementUtils.octant
 import com.lambda.util.player.MovementUtils.sneaking
 import com.lambda.util.player.RotationUtils.lookAt
 import com.lambda.util.world.StructureUtils.generateDirectionalTube
+import com.lambda.util.world.WorldUtils.isLoaded
 import net.minecraft.block.Block
 import net.minecraft.block.Blocks
 import net.minecraft.block.ButtonBlock
@@ -140,6 +141,8 @@ object HighwayTools : Module(
     private val sealGap by setting("Seal Gap", 2, 0..3, 1, "How many blocks the highway may be away from the border. The gaps in between are filled first to place against", " blocks") { sealBorder }
     private val distance by setting("Distance", -1, -1..1000000, 1, "Distance to build the highway/tunnel (negative for infinite)")
     private val sliceSize by setting("Slice Size", 5, 1..5, 1, "Number of slices to build at once")
+    private val stopWhenDone by setting("Stop When Done", false, "Turns off once the highway ahead is already built, nothing to dig or place, e.g. to find where it ended while AFK. Buttons missing ahead don't count")
+    private val doneDistance by setting("Done Distance", 16, 4..64, 1, "How far ahead has to be built already, all of it loaded, so a short stretch through open space doesn't stop it", " blocks") { stopWhenDone }
     private val keepMoving by setting("Keep Moving", true, "Walk on while the slices ahead are done instead of stopping after each one. Needs Pathing")
     private val unstuckStep by setting("Unstuck Step", true, "Step forward crouched when the build makes no progress, e.g. after being knocked out of reach")
     private val unstuckDelay by setting("Unstuck Delay", 5, 2..60, 1, "Time without progress before stepping", " s") { unstuckStep }
@@ -200,6 +203,7 @@ object HighwayTools : Module(
     /** Why the last cruise target wasn't further, for the debug log. */
     private var cruiseStop = ""
     private var waitTicks = 0
+    private var doneCheckTicks = 0
     private var throwCooldown = 0
     private var cruiseGoalTicks = 0
     private var cruiseRepaths = 0
@@ -241,6 +245,7 @@ object HighwayTools : Module(
     private const val WALK_START_TICKS = 40
     private const val TICKS_PER_BLOCK = 20
     private const val CRUISE_LOOKAHEAD = 6
+    private const val DONE_CHECK_TICKS = 10
     private const val RETARGET_DISTANCE = 1.5
     private const val MAX_WAIT_FACTOR = 3
     private const val CRUISE_STALL_TICKS = 20
@@ -402,6 +407,11 @@ object HighwayTools : Module(
             if (running && provokeEndermen && !aura.enabled) blockingEnderman()?.let { return@listen provoke(it) }
             val holdForButtons = running && releaseButtons(task)
             if (running && keepMoving && buildConfig.pathing && !holdForButtons) cruise() else stopCruising()
+            if (running && stopWhenDone && !holdForButtons && isDoneAhead(task)) {
+                info("Nothing left to build ahead, the highway ends at ${player.blockPos.toShortString()}")
+                LOG.info("[HighwayTools] stopped, nothing left to build in the next $doneDistance blocks from ${player.blockPos.toShortString()}")
+                return@listen disable()
+            }
             if (running && inventoryLoaded && restockFood) restockFoodFromShulker()
             if (running && inventoryLoaded && inventoryConfig.accessEnderChest) restockFromEnderChest()
             // Not once a missing ender chest stopped it.
@@ -750,6 +760,26 @@ object HighwayTools : Module(
         if (!done(index)) return null
         // All that's left is out of reach ahead, e.g. a top block far ahead on a diagonal: a step closer.
         return steps.firstOrNull()?.takeIf { onlyOutOfReachAhead(index) }
+    }
+
+    /**
+     * Whether everything up to [doneDistance] ahead is built already, checked every few ticks. Up to the slice you're on
+     * with its buttons, so the last ones dug aren't left without, ahead without: an old highway may have none.
+     */
+    private fun SafeContext.isDoneAhead(task: BuildTask): Boolean {
+        if (++doneCheckTicks < DONE_CHECK_TICKS) return false
+        doneCheckTicks = 0
+        if (task.isWorking || released.isNotEmpty()) return false
+        val slice = slice()
+        val button = with(buttons) { floorButton() }
+        val spots = spawnSpots()
+        val index = highwayIndex(player.blockPos)
+        val end = index + doneDistance
+        if (distance in 0..end) return false
+        if (!isLoaded(highwayPos(end))) return false
+        return (minOf(slices.firstOrNull() ?: index, index)..end).all { s ->
+            sliceDone(slice, s, button, spots, if (s <= index) { _ -> true } else { _ -> false }) { task.isPending(it) }
+        }
     }
 
     /** The blocks of the slice at [index] still to break, null while something there is still to place. */
