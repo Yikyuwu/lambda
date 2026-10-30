@@ -200,6 +200,10 @@ object HighwayTools : Module(
     private var warnedCantStep = false
     private var mode: Mode = Mode.Idle
     private var cruiseTarget: BlockPos? = null
+    /** Sprint jumps and the ticks [sprintJumpBlocker] gave each reason since the last debug log. */
+    private var jumps = 0
+    private var jumpBlocker: String? = null
+    private val jumpBlockers = mutableMapOf<String, Int>()
     private var waitTicks = 0
     private var throwCooldown = 0
     private var cruiseGoalTicks = 0
@@ -434,7 +438,13 @@ object HighwayTools : Module(
         listen<MovementEvent.InputUpdate> {
             if (mode is Mode.Walking) it.input.sneaking = true
             aura.crouch(it.input)
-            if (sprintJump && canSprintJump()) it.input.jumping = true
+            if (sprintJump && isBuilding) {
+                if (canSprintJump()) {
+                    if (player.isOnGround) jumps++
+                    it.input.jumping = true
+                }
+                jumpBlockers.merge(jumpBlocker ?: "jumping", 1, Int::plus)
+            }
         }
 
         // A walk or stare that paused the build can't finish any more.
@@ -804,8 +814,11 @@ object HighwayTools : Module(
                 "hp ${player.health.toInt()} food ${player.hungerManager.foodLevel}, carried food " +
                 (player.inventory.mainStacks + player.offHandStack).filter(::isFood).groupBy { it.item.name.string }
                     .map { (name, stacks) -> "${stacks.sumOf { it.count }} $name" } +
-                ", food shulker ${carriesFoodShulker()}, next ${task.nextResult?.name ?: "none"}"
+                ", food shulker ${carriesFoodShulker()}, next ${task.nextResult?.name ?: "none"}" +
+                if (sprintJump) ", $jumps sprint jumps, ticks ${jumpBlockers.entries.sortedByDescending { it.value }.joinToString { "${it.key} ${it.value}" }}" else ""
         )
+        jumps = 0
+        jumpBlockers.clear()
     }
 
     /** What the build is stuck on, for the chat. */
@@ -920,25 +933,32 @@ object HighwayTools : Module(
      * Whether a jump now, while sprinting to [cruiseTarget], lands before it: far enough away, the build placing nothing,
      * and the way there over built floor with room for the head at the top of the jump, so nothing to fall into or bump.
      */
-    private fun SafeContext.canSprintJump(): Boolean {
-        val target = cruiseTarget ?: return false
-        if (mode != Mode.Idle || !BaritoneHandler.isActive || !player.isOnGround || !player.isSprinting ||
-            player.isSneaking || player.isUsingItem || player.isTouchingWater || player.isInLava) return false
-        val task = runningTask as? BuildTask ?: return false
-        if (task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } is InteractResult) return false
+    private fun SafeContext.canSprintJump() = sprintJumpBlocker().also { jumpBlocker = it } == null
+
+    /** Why [canSprintJump] doesn't jump now, null when it does. Counted for the debug log. */
+    private fun SafeContext.sprintJumpBlocker(): String? {
+        val target = cruiseTarget ?: return "no cruise target"
+        if (mode != Mode.Idle) return "mode ${mode::class.simpleName}"
+        if (!BaritoneHandler.isActive) return "not pathing"
+        if (!player.isOnGround) return "in the air"
+        if (!player.isSprinting) return "not sprinting"
+        if (player.isSneaking || player.isUsingItem || player.isTouchingWater || player.isInLava) return "sneaking, eating or in a fluid"
+        val task = runningTask as? BuildTask ?: return "no build"
+        if (task.nextResult.let { (it as? Dependent)?.lastDependency ?: it } is InteractResult) return "placing"
         val end = Vec3d.ofBottomCenter(target)
         val way = end.subtract(player.pos).let { Vec3d(it.x, 0.0, it.z) }
-        if (way.length() < SPRINT_JUMP_DISTANCE) return false
+        if (way.length() < SPRINT_JUMP_DISTANCE) return "target close"
         val dir = way.normalize()
         val y = player.blockPos.y
         // The player's corners along the way, every quarter block.
-        return (0..(way.length() / 0.25).toInt()).all { i ->
+        val safe = (0..(way.length() / 0.25).toInt()).all { i ->
             val at = player.pos.add(dir.multiply(i * 0.25))
             CORNERS.all { (dx, dz) ->
                 val pos = BlockPos.ofFloored(at.x + dx, y.toDouble(), at.z + dz)
                 canStandAt(pos) && (2..3).all { up -> isPassable(pos.up(up)) && !blockState(pos.up(up)).hasFluid }
             }
         }
+        return if (safe) null else "way not clear"
     }
 
     /** Room for the player, solid ground below and nothing to step into that hurts or holds you. */
