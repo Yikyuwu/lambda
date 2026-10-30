@@ -33,6 +33,7 @@ import com.lambda.module.tag.ModuleTag
 import com.lambda.sound.SoundHandler.playSound
 import com.lambda.util.CommunicationUtils
 import com.lambda.util.CommunicationUtils.info
+import com.lambda.util.CommunicationUtils.warn
 import com.lambda.util.EnchantmentUtils.forEachEnchantment
 import com.lambda.util.FormattingUtils.format
 import com.lambda.util.ServerTPSUtils
@@ -86,6 +87,8 @@ import net.minecraft.util.math.BlockPos
 import net.minecraft.world.GameMode
 import java.awt.Color
 import java.time.Instant
+import java.time.LocalTime
+import java.time.temporal.ChronoUnit
 import java.util.*
 import kotlin.math.hypot
 
@@ -211,6 +214,10 @@ object AutoDisconnect : Module(
 
     private var disconnectDetails: DisconnectDetails? = null
     private var disconnectInProgress: Boolean = false
+    /** Why it last left, said once back in game, the disconnect screen is easily clicked away and forgotten. */
+    private var lastLeft: Text? = null
+    /** Ticks in game since joining again after leaving, also with AutoDisconnect turned off meanwhile. */
+    private var rejoinedTicks = -1
     private val joinTimer = TickTimer()
 
     init {
@@ -247,6 +254,17 @@ object AutoDisconnect : Module(
         listen<WorldEvent.Join> {
             disconnectInProgress = false
             joinTimer.reset()
+        }
+
+        listen<WorldEvent.Join>(alwaysListen = true) {
+            if (lastLeft != null) rejoinedTicks = 0
+        }
+
+        listen<TickEvent.Pre>(alwaysListen = true) {
+            if (rejoinedTicks < 0 || !isLoaded(player.blockPos) || isIn2b2tQueue() || ++rejoinedTicks < JOIN_GRACE_TICKS) return@listen
+            rejoinedTicks = -1
+            lastLeft?.let { AutoDisconnect.warn(it) }
+            lastLeft = null
         }
 
         listen<PlayerEvent.Health> { event ->
@@ -314,6 +332,17 @@ object AutoDisconnect : Module(
             val imageIdentifier = Identifier.of("lambda", "auto_disconnect_screenshot")
             val texture = NativeImageBackedTexture({ "auto-disconnect-screenshot" }, image)
             mc.textureManager.registerTexture(imageIdentifier, texture)
+            lastLeft = buildText {
+                literal("Left at ")
+                highlighted(LocalTime.now().truncatedTo(ChronoUnit.SECONDS).toString())
+                literal(": ")
+                text(reasonText)
+                disarmedTrigger?.let {
+                    literal(" (")
+                    highlighted(it.displayName)
+                    literal(" trigger)")
+                }
+            }
             disconnectDetails = DisconnectDetails(
                 imageIdentifier = imageIdentifier,
                 imageHeight = image.height,
