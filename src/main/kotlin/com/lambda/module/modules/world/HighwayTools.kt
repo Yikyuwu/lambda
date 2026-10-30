@@ -39,6 +39,7 @@ import com.lambda.interaction.construction.blueprint.PropagatingBlueprint
 import com.lambda.interaction.construction.blueprint.PropagatingBlueprint.Companion.propagatingBlueprint
 import com.lambda.interaction.construction.simulation.result.Contextual
 import com.lambda.interaction.construction.simulation.result.Dependent
+import com.lambda.interaction.construction.simulation.result.results.GenericResult
 import com.lambda.interaction.construction.verify.TargetState
 import com.lambda.interaction.handlers.BaritoneHandler
 import com.lambda.interaction.handlers.SpleefGuard
@@ -715,11 +716,18 @@ object HighwayTools : Module(
         fun done(i: Int) = (distance < 0 || i < distance) && sliceDone(slice, i, button, spots, { it in released })
 
         if (!done(index)) return null
-        return safeSteps(forward = true, CRUISE_LOOKAHEAD)
-            .withIndex()
+        val steps = safeSteps(forward = true, CRUISE_LOOKAHEAD)
+        return steps.withIndex()
             .takeWhile { (i, _) -> done(index + i + 1) }
             .lastOrNull()?.value
+            // All that's left is out of reach, e.g. a top block far ahead on a diagonal: a step closer.
+            ?: steps.firstOrNull()?.takeIf { onlyOutOfReach() }
     }
+
+    /** Whether the build has nothing it can reach left to do, only blocks out of reach. */
+    private fun onlyOutOfReach() =
+        (runningTask as? BuildTask)?.takeUnless { it.isWorking }?.nextResult
+            ?.let { (it as? Dependent)?.lastDependency ?: it } is GenericResult.OutOfReach
 
     private fun stopCruising() {
         if (cruiseTarget == null) return
