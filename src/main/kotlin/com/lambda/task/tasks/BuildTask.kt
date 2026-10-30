@@ -269,15 +269,17 @@ class BuildTask private constructor(
             .plus(pendingInteractions.toList())
             .toList()
 
-        val bestResult = viableResults.firstOrNull() ?: return
-        handleResult(ordered(bestResult), viableResults)
+        // Filtered and sorted once here, not again for each look at them.
+        val viable = viableResults.toList()
+        val bestResult = viable.firstOrNull() ?: return
+        handleResult(ordered(bestResult, viable), viable.asSequence())
     }
 
-    /** The first of the lowest by [actionOrder], unless [first] stops a fluid. */
-    private fun SafeContext.ordered(first: BuildResult): BuildResult {
+    /** The first of the lowest of [viable] by [actionOrder], unless [first] stops a fluid. */
+    private fun SafeContext.ordered(first: BuildResult, viable: List<BuildResult>): BuildResult {
         val order = actionOrder ?: return first
         if (first !is Contextual || first.context.let { it is InteractContext && !it.cachedState.fluidState.isEmpty }) return first
-        return viableResults.filter { it is Contextual }.minByOrNull { order(this, (it as Contextual).context.blockPos) } ?: first
+        return viable.filter { it is Contextual }.minByOrNull { order(this, (it as Contextual).context.blockPos) } ?: first
     }
 
     /**
