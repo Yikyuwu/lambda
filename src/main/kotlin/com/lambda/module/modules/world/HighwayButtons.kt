@@ -30,6 +30,7 @@ import com.lambda.task.tasks.EnderChestRestockTask.Companion.MIN_ENDER_CHESTS
 import com.lambda.task.tasks.EnderChestRestockTask.Want
 import com.lambda.task.tasks.StationTask.Companion.STACK_SIZE
 import com.lambda.task.tasks.StationTask.Companion.carriedCount
+import com.lambda.task.tasks.StationTask.Companion.nearbyGrabber
 import com.lambda.task.tasks.StationTask.Companion.stopSafely
 import com.lambda.task.tasks.StationTask.Companion.waitsForPlayer
 import com.lambda.util.CommunicationUtils.logError
@@ -57,6 +58,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     /** A restock failed, maybe leaving a shulker placed, so none until the highway is started again. */
     var failed = false
     private var warnedOut = false
+    private var warnedMob = false
     /** Set once a shulker of logs taken on this ender chest trip was crafted from, so the trip puts it back. */
     private var returnLogShulker = false
     /** Crafting runs once per ender chest trip, one that made nothing isn't run again and again. */
@@ -82,6 +84,26 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
     private val lowAt get() = minOf(restockAt * STACK_SIZE, maxOf(target - STACK_SIZE, target / 2))
 
     private fun SafeContext.isLow() = carried() <= lowAt
+
+    /**
+     * Whether a restock that's due waits for a mob to be killed or a mob that would pick up the shulker's drop to go,
+     * saying so once. Started early, see [restockAt], so this has time. Out of buttons it starts anyway: a fight pauses
+     * it until the mob is dead, and the shulker is only broken once no mob would pick it up.
+     */
+    private fun SafeContext.waitsForMob(): Boolean {
+        val mob = when {
+            carried() == 0 -> null
+            c.isFighting -> "mob being fought"
+            else -> nearbyGrabber()?.name?.string
+        }
+        if (mob == null) {
+            warnedMob = false
+            return false
+        }
+        if (!warnedMob) LOG.info("[HighwayButtons] restock waits for the $mob, ${carried()} buttons left")
+        warnedMob = true
+        return true
+    }
 
     private fun SafeContext.carriesLogShulker() = player.inventory.mainStacks.any(::isLogShulker)
 
@@ -109,7 +131,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
             warnedOut = false
             return
         }
-        if (!restock || failed || retryTicks > 0 || c.isBusy) return
+        if (!restock || failed || retryTicks > 0 || c.isUsingContainer || waitsForMob()) return
         val logShulker = carriesLogShulker()
         // Without either nothing can be crafted, so the highway goes on without buttons.
         val noEnderChest = when {
@@ -146,7 +168,7 @@ class HighwayButtons(override val c: HighwayTools) : ConfigBlock, Automated by c
         if (!enabled || !restock || failed) return null
         return Want(
             "a shulker of logs", 1, CraftButtonsTask::logsIn,
-            isLow = { isLow() && !carriesLogShulker() },
+            isLow = { isLow() && !carriesLogShulker() && !waitsForMob() },
             isMet = { !isLow() || carriesLogShulker() },
         )
     }

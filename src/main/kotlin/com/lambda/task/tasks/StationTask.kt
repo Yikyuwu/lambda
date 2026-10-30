@@ -499,6 +499,9 @@ abstract class StationTask<P : StationPhase>(
             return true
         }
 
+        /** A mob near the player that would pick up a placed container's drop, see [isItemGrabber]. */
+        fun SafeContext.nearbyGrabber() = closestEntity<MobEntity>(GRABBER_RANGE, player.blockPos) { isItemGrabber(it) }
+
         /**
          * A mob that picks up a dropped shulker or ender chest: one that can pick up loot with nothing in its hand,
          * like a baby piglin. Armed ones like zombified piglins keep their weapon over it, and piglin brutes only take axes.
