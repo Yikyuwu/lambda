@@ -1125,11 +1125,12 @@ object HighwayTools : Module(
         buttonHoldTicks = if (hold) buttonHoldTicks + 1 else 0
         if (waiting.isNotEmpty()) {
             // Not while a block in reach is still to be built: in an open stretch the next one often waits a tick for the
-            // one it's placed against, and a button let go then swaps the hotbar between each of them.
+            // one it's placed against, and a button let go then swaps the hotbar between each of them. Only a button
+            // missing doesn't count: the whole floor row is a button target, a block still there is to be broken.
             val reachSq = reach * reach
             val idle = !task.isWorking && structure.none { (pos, state) ->
-                state !is TargetState.FloorButton && eye.squaredDistanceTo(Vec3d.ofCenter(pos)) <= reachSq &&
-                    !state.matches(blockState(pos), pos)
+                eye.squaredDistanceTo(Vec3d.ofCenter(pos)) <= reachSq && !state.matches(blockState(pos), pos) &&
+                    !(state is TargetState.FloorButton && blockState(pos).isAir)
             }
             val batch = minOf(interactConfig.interactionsPerTick, buildConfig.maxPendingActions, BUTTON_BATCH).coerceAtLeast(1)
             if (leaving || idle || waiting.size >= batch) {
